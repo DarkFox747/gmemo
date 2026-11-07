@@ -1,0 +1,91 @@
+# promote.yml — trigger LPMS memory promotion on push to the default branch.
+#
+# When a commit is pushed to the repository's default branch (typically via a
+# merged PR), this workflow:
+#   1. Mints a short-lived GitHub Actions OIDC token scoped to the configured
+#      LPMS audience (vars.LPMS_OIDC_AUDIENCE).
+#   2. POSTs to the LPMS /promote endpoint with the OIDC token as a Bearer
+#      credential plus a JSON body matching the PromoteBody schema exactly.
+#
+# Trigger: push to main. The branch filter replaces the old pull_request.merged
+# guard — only pushes to the default branch can mint a token with
+# ref: refs/heads/main, which the handler's refs/heads/ strip will match.
+#
+# No long-lived cloud secrets are needed: authentication is purely OIDC.
+# Endpoint URL and audience are repository/org variables (not secrets).
+#
+# Required repository/org variables:
+#   vars.LPMS_PROMOTE_URL   — full HTTPS URL, e.g. https://<pilot-domain>/promote
+#   vars.LPMS_OIDC_AUDIENCE — must match GITHUB_OIDC_AUDIENCE in the service config
+#
+# Required repo setup (one-time, operator-run — see terraform/README.md):
+#   INSERT INTO machine_credential (project_id, principal_name, token_hash, role, expires_at)
+#   for this repo's OIDC principal.
+#
+# Security notes:
+#   - id-token: write is scoped to this job only; other jobs in the same
+#     workflow do not inherit it.
+#   - The token is marked as a secret (core.setSecret) so it never appears in
+#     plain-text in workflow logs.
+#   - The endpoint enforces: iss, aud, exp/nbf, signature, repo claim,
+#     ref == source_branch, source_branch == default_branch, active machine_credential.
+#   - Only one branch (the default branch) can ever trigger a successful promote.
+
+name: LPMS Promote
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write   # required to mint the OIDC token
+      contents: read    # required to check out (not needed here, but least-privilege standard)
+
+    steps:
+      - name: Mint OIDC token
+        id: tok
+        # actions/github-script v7.0.1 — pinned to full commit SHA for supply-chain safety.
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          LPMS_OIDC_AUDIENCE: ${{ vars.LPMS_OIDC_AUDIENCE }}
+        with:
+          script: |
+            // Mint a short-lived OIDC token scoped to the LPMS promote audience.
+            // Read audience from env (not via ${{ }} interpolation into the JS string).
+            // core.setSecret ensures the token never appears in plain-text logs.
+            const audience = process.env.LPMS_OIDC_AUDIENCE;
+            const token = await core.getIDToken(audience);
+            core.setSecret(token);
+            core.setOutput('token', token);
+
+      - name: POST /promote
+        env:
+          OIDC_TOKEN: ${{ steps.tok.outputs.token }}
+          PROMOTE_URL: ${{ vars.LPMS_PROMOTE_URL }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_SHA: ${{ github.sha }}
+        run: |
+          # Body fields match the PromoteBody .strict() Zod schema exactly:
+          #   repo            — OIDC repository claim (owner/repo)
+          #   source_branch   — the pushed branch (== default branch, enforced by trigger)
+          #   merge_sha       — the pushed commit SHA
+          # pr_number is optional in the schema and not reliably derivable from a
+          # push event, so it is omitted.
+          curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --request POST \
+            --url "${PROMOTE_URL}" \
+            --header "Authorization: Bearer ${OIDC_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "$(jq --null-input \
+              --arg repo "${GH_REPOSITORY}" \
+              --arg source_branch "${GH_REF_NAME}" \
+              --arg merge_sha "${GH_SHA}" \
+              '{repo: $repo, source_branch: $source_branch, merge_sha: $merge_sha}')"

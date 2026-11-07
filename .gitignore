@@ -1,0 +1,70 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Office temp/lock files
+~$*.docx
+~$*.xlsx
+~$*.pptx
+
+# Node / TypeScript build
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# pnpm (keep pnpm-lock.yaml TRACKED — it is the single source of truth)
+.pnpm-store/
+pnpm-debug.log*
+
+# Logs / temp
+*.log
+tmp/
+.tmp/
+
+# ECS one-off task override files (contain Cognito subs / provisioning config)
+migrate-overrides.json
+provision-overrides.json
+*-overrides.json
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+!.env.dev.example
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# KEEP committed (do NOT ignore): .terraform.lock.hcl, backend.hcl, *.tfvars.example
+
+# Orchestrator tooling and personal material (never published)
+.claude/
+.claude.json
+.mcp.json
+entrevistas/
+prompt.md
+PROMPT-demo-entrega4.md
+
+# Local sanitization gate patterns (contain the sensitive values themselves)
+.sanitize-patterns
+
+# Demo package output
+dist-demo/

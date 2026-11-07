@@ -1,0 +1,6 @@
+# Normalize line endings: the repo is built in Linux containers (Docker) and scripts must stay LF.
+* text=auto eol=lf
+*.docx binary
+*.xlsx binary
+*.png binary
+*.zip binary

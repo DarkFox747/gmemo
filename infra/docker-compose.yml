@@ -1,0 +1,22 @@
+# Postgres local para desarrollo. Imagen con pgvector preinstalado
+# (para la fase de búsqueda semántica). Solo para dev — no es la infra de prod.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: lpms-postgres
+    environment:
+      POSTGRES_USER: lpms
+      POSTGRES_PASSWORD: lpms
+      POSTGRES_DB: lpms
+    ports:
+      - "5432:5432"
+    volumes:
+      - lpms-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lpms -d lpms"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  lpms-pgdata:

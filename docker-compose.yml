@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: lpms
+      POSTGRES_PASSWORD: lpms
+      POSTGRES_DB: lpms
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lpms -d lpms"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"        # optional: host access for debugging
+
+  # One-shot: apply numbered migrations, then the dev seed. Runs compiled JS
+  # (no tsx in the image). Exits 0 on success; app waits for completion.
+  migrate:
+    build: .
+    image: lpms-cloud:dev
+    command: ["sh", "-c", "node dist/db/migrate.js && node dist/db/seed.js"]
+    environment:
+      DATABASE_URL: "postgres://lpms:lpms@db:5432/lpms"   # no sslmode -> local plaintext
+      NODE_ENV: development                                # required for seed.js to proceed
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  # POST /mcp requires header X-Git-Remote: https://github.com/crombie-dev/lpms-cloud.git
+  # (matches the seeded repo.remote_url). RdsTenantResolver uses it for tenant resolution.
+  app:
+    build: .
+    image: lpms-cloud:dev
+    environment:
+      DATABASE_URL: "postgres://lpms:lpms@db:5432/lpms"    # local, TLS not enforced (NODE_ENV!=production)
+      NODE_ENV: development
+      AUTH_DEV_BYPASS: "true"        # Gate-1 stub; guarded -- impossible under NODE_ENV=production
+      JUDGE_STUB: "true"             # deterministic judge; makes BEDROCK_MODEL_ID optional (guarded vs prod)
+      PROMOTE_OIDC_DEV_BYPASS: "true" # /promote OIDC bypass; makes GITHUB_OIDC_AUDIENCE optional (guarded vs prod)
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      LOG_LEVEL: debug
+      # COGNITO_* intentionally omitted -- optional under the dev bypass.
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+    healthcheck:
+      # busybox wget ships in node:alpine; hits GET /health -> 200 { status: "ok" }.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

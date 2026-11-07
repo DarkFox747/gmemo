@@ -1,0 +1,18 @@
+# Tasks — terraform-infra
+
+`design.md` is the authoritative source for exact file contents, resource config,
+and the file-change matrix. Follow its "Tasks-friendly ordering". Each root/module
+must be `terraform validate`-able. `apply`/`plan` are OUT (human/CI, need AWS creds).
+
+- [x] T001 `.gitignore`: add Terraform ignores (`*.tfstate*`, `.terraform/`, `*.tfvars`, crash/override) — KEEP `*.tfvars.example`, `backend.hcl`, `.terraform.lock.hcl` committed. (First, to prevent accidental state/tfvars commits.)
+- [x] T002 `terraform/bootstrap/*` (main/variables/outputs/versions): local-state S3 state bucket (versioning + SSE + public-access-block) + DynamoDB lock table, deterministic names. Commit its `.terraform.lock.hcl`.
+- [x] T003 `terraform/modules/network/*`: VPC, IGW, 2 public + 2 private subnets (2 AZs), route tables, ALB SG (80+443 from `alb_ingress_cidrs`), Fargate SG (3000 from ALB SG), RDS SG (5432 from Fargate SG). Outputs vpc/subnet/SG ids.
+- [x] T004 `terraform/modules/data/*`: `random_password` → `DATABASE_URL` → Secrets Manager; DB subnet group; RDS `db.t4g.micro` pg16 gp3 encrypted single-AZ private; custom DB parameter group `rds.force_ssl=1`. Sensitive outputs (endpoint, secret ARN).
+- [x] T005 `terraform/modules/cognito/*`: user pool (admin-create-only, email sign-in, password policy) + public app client (`USER_PASSWORD_AUTH`+`REFRESH`, 15-min access TTL) + `aws_cognito_user` for_each `authorized_user_emails` (SUPPRESS, no password). Outputs user_pool_id, app_client_id, issuer, jwks_uri.
+- [x] T006 `terraform/modules/dns-tls/*`: ACM cert (us-east-1, DNS-validated) for `domain_name`; Route53 zone via `data aws_route53_zone` (or created when `create_hosted_zone=true`); validation records + `aws_acm_certificate_validation`; ALIAS record `domain_name`→ALB. (ALB DNS/zone id passed in from service/root; cert ARN output for the listener.)
+- [x] T007 `terraform/modules/service/*`: ECR repo; ECS cluster + task def (prod env block: bypass/stubs=false, `COGNITO_*`, `BEDROCK_*`, `AWS_REGION`, `GITHUB_OIDC_AUDIENCE` placeholder, `NODE_EXTRA_CA_CERTS`; `DATABASE_URL` as Secrets Manager secret) + service (`desired_count`); execution + least-privilege task roles; CloudWatch log group; ALB (internet-facing, 2 public subnets); target group (ip, 3000, `/health`); **:443 HTTPS listener (ACM cert + TLS13 policy)** + **:80 → 301 redirect to :443**. Outputs ALB DNS + zone id, ECR URL.
+- [x] T008 `terraform/envs/pilot/*` (main/variables/outputs/versions/backend.hcl/pilot.tfvars.example): wire network → data → cognito → dns-tls → service; partial S3 backend; root vars (region, CIDRs, `alb_ingress_cidrs`, image tag, model ids/ARNs, sizing, `desired_count`, `authorized_user_emails`, `domain_name`, `route53_zone_name`, `create_hosted_zone`, `github_oidc_audience`); outputs (HTTPS URL, ECR URL, cognito ids, migrate helper). Commit `.terraform.lock.hcl` + `backend.hcl`. Example tfvars: FAKE domain + example emails only.
+- [x] T009 `Dockerfile`: fetch RDS global CA bundle to `/etc/ssl/certs/rds-global-bundle.pem` at build. No other change.
+- [x] T010 `terraform/README.md`: full runbook (bootstrap → init pilot → apply → push image → run-task migrate [NOT seed] → admin-set-user-password → manual Gate-2 SQL → desired_count=1 → initiate-auth token → `https://<domain>/mcp`); cost (~$46/mo) + FLAGS summary.
+- [x] T011 `openspec/project-map.yaml`: reflect delivered pilot topology (single-AZ, no NAT, real-Cognito production pilot + HTTPS; real GitHub-OIDC deferred).
+- [x] T012 Gate: `terraform fmt -check -recursive terraform/` + per-root `terraform init -backend=false && terraform validate` (bootstrap + pilot). If `terraform` binary is unavailable, report it and defer validation to human/CI. Do NOT run `plan`/`apply`.

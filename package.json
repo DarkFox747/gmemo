@@ -1,0 +1,49 @@
+{
+  "name": "lpms-cloud",
+  "version": "0.1.0",
+  "description": "LPMS Cloud MCP Facade — read-tool scaffold",
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=9",
+    "npm": "please-use-pnpm",
+    "yarn": "please-use-pnpm"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest",
+    "lint": "eslint src tests",
+    "format": "prettier --write .",
+    "migrate": "tsx src/db/migrate.ts",
+    "provision": "tsx src/db/provision.ts",
+    "seed:dev": "tsx src/db/seed.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1100.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "aws-jwt-verify": "^4.0.0",
+    "express": "^5.0.0",
+    "express-rate-limit": "^8.6.1",
+    "helmet": "^8.3.0",
+    "pg": "^8.0.0",
+    "zod": "^3.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.0.0",
+    "@types/supertest": "^6.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "prettier": "^3.0.0",
+    "supertest": "^7.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^2.0.0"
+  }
+}

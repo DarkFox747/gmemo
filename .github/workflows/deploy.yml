@@ -1,0 +1,146 @@
+# deploy.yml — build + push the app image and roll the ECS pilot service.
+#
+# APP CODE deploys ONLY. This workflow never runs terraform and never touches
+# IAM/VPC/RDS/Route53. Infra apply stays manual (see terraform/README.md).
+#
+# Flow on push to main (app paths) or manual dispatch:
+#   1. Assume the least-privilege CI role via GitHub OIDC (no stored AWS keys).
+#   2. Build the Docker image, tag it :<git-sha> (immutable/traceable) AND
+#      :latest, and push both to the existing ECR repo.
+#   3. Register a NEW task-definition revision pinned to the :<git-sha> image
+#      (fixes the mutable-:latest audit finding — the running task references an
+#      immutable digest-by-sha tag, not a moving :latest).
+#   4. Update the service to the new revision and wait for it to stabilise.
+#      NOTE: no ALB smoke test — ingress is locked to a single operator IP, so a
+#      runner cannot reach the endpoint. `aws ecs wait services-stable` is the
+#      deploy gate instead.
+#
+# Compatibility with Terraform: modules/service/main.tf sets
+#   lifecycle { ignore_changes = [task_definition] }
+# on aws_ecs_service, so Terraform will NOT fight this pipeline over the running
+# task-def revision. desired_count is still Terraform-owned (this workflow never
+# changes it) — a manual `desired_count=0` pause remains fully effective.
+#
+# Required repo variable (non-secret): AWS_ROLE_ARN — the OIDC deploy role ARN
+#   (e.g. arn:aws:iam::<AWS_ACCOUNT_ID>:role/<OIDC_ROLE_NAME>).
+
+name: Deploy App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - "package.json"
+      - "pnpm-lock.yaml"
+  workflow_dispatch: {}
+
+# Serialise deploys: never let two rolls race the same service.
+concurrency:
+  group: deploy-pilot
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: lpms-pilot-app
+  ECS_CLUSTER: lpms-pilot
+  ECS_SERVICE: lpms-pilot-app
+  TASK_FAMILY: lpms-pilot-app
+  CONTAINER_NAME: app
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # mint the OIDC token to assume the CI role
+      contents: read # checkout only
+
+    steps:
+      - name: Checkout
+        # actions/checkout v4.2.2 — pinned to full commit SHA (supply-chain).
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Configure AWS credentials (OIDC)
+        # aws-actions/configure-aws-credentials v4.0.2 — pinned to full SHA.
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        # aws-actions/amazon-ecr-login v2.0.1 — pinned to full SHA.
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076
+
+      - name: Build and push image (:<sha> and :latest)
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          LATEST_URI="${REGISTRY}/${ECR_REPOSITORY}:latest"
+
+          docker build -t "$IMAGE_URI" -t "$LATEST_URI" .
+          docker push "$IMAGE_URI"
+          docker push "$LATEST_URI"
+
+          # Expose the immutable sha-pinned URI to later steps.
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Register new task definition revision (pinned to :<sha>)
+        id: taskdef
+        env:
+          IMAGE_URI: ${{ steps.build.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+
+          # Base the new revision on the CURRENT one, swapping only the image.
+          # Strip server-managed fields that register-task-definition rejects.
+          CURRENT=$(aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" \
+            --query 'taskDefinition' --output json)
+
+          NEW_DEF=$(echo "$CURRENT" | jq \
+            --arg IMAGE "$IMAGE_URI" \
+            --arg NAME "$CONTAINER_NAME" '
+              .containerDefinitions =
+                (.containerDefinitions
+                  | map(if .name == $NAME then .image = $IMAGE else . end))
+              | del(
+                  .taskDefinitionArn,
+                  .revision,
+                  .status,
+                  .requiresAttributes,
+                  .compatibilities,
+                  .registeredAt,
+                  .registeredBy
+                )')
+
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          echo "Registered: $NEW_ARN"
+          echo "task_def_arn=$NEW_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Roll the ECS service to the new revision
+        env:
+          TASK_DEF_ARN: ${{ steps.taskdef.outputs.task_def_arn }}
+        run: |
+          set -euo pipefail
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$TASK_DEF_ARN"
+
+      - name: Wait for the service to stabilise
+        run: |
+          set -euo pipefail
+          # No ALB smoke test — ingress is IP-locked. Stability is the gate.
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"

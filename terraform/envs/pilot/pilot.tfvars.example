@@ -1,0 +1,68 @@
+# Example variable values — CLEARLY FAKE. Do NOT use these values as-is.
+# Copy this file to pilot.tfvars (gitignored), replace all values, then apply.
+#
+# IMPORTANT: pilot.tfvars is gitignored. Never commit a real .tfvars file.
+
+aws_region = "us-east-1"
+
+# ---------------------------------------------------------------------------
+# Networking — replace with your actual IP range(s)
+# 203.0.113.0/24 is an RFC 5737 documentation range; it is NOT routable.
+# ---------------------------------------------------------------------------
+alb_ingress_cidrs = ["203.0.113.0/24"]
+
+# ---------------------------------------------------------------------------
+# Container
+# NOTE: desired_count = 0 keeps the service stopped after initial apply.
+# Push the Docker image (Step 6) and run migrations (Step 7) first, then
+# bump to 1 (Step 10) to start the service. This avoids a CannotPullContainerError
+# retry loop when the ECR repository is still empty.
+# ---------------------------------------------------------------------------
+image_tag     = "latest"
+task_cpu      = 256
+task_memory   = 512
+desired_count = 0
+
+# ---------------------------------------------------------------------------
+# Bedrock — replace with real model IDs and ARNs for your account/region.
+# If using a cross-region inference profile (us.*), include BOTH:
+#   1. The inference-PROFILE ARN  — IAM evaluates THIS for bedrock:Converse;
+#      without it the judge call returns AccessDenied → silent uncertain state.
+#   2. Each constituent foundation-model ARN (needed for bedrock:InvokeModel).
+# ---------------------------------------------------------------------------
+bedrock_model_id           = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+bedrock_embedding_model_id = "amazon.titan-embed-text-v2:0"
+
+bedrock_model_arns = [
+  # ACCOUNT-SPECIFIC: cross-region inference-profile ARN (bedrock:Converse target).
+  # Replace <ACCOUNT_ID> with your 12-digit AWS account ID.
+  # "arn:aws:bedrock:us-east-1:<ACCOUNT_ID>:inference-profile/us.anthropic.claude-3-5-haiku-20241022-v1:0",
+  "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
+  "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
+  "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
+  "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0",
+]
+
+# ---------------------------------------------------------------------------
+# Cognito — email addresses to provision as pilot users.
+# No password is set in Terraform. Use admin-set-user-password out-of-band.
+# ---------------------------------------------------------------------------
+authorized_user_emails = [
+  "operator@example.com",
+]
+
+# ---------------------------------------------------------------------------
+# GitHub OIDC — /promote is fail-closed this pilot; this placeholder value
+# satisfies the prod boot guard (GITHUB_OIDC_AUDIENCE must be non-empty).
+# ---------------------------------------------------------------------------
+github_oidc_audience = "https://github.com/your-org"
+
+# ---------------------------------------------------------------------------
+# DNS + TLS — CLEARLY FAKE domain (RFC 2606 reserved). Replace with your real domain.
+# create_hosted_zone = false looks up an existing Route53 hosted zone.
+# create_hosted_zone = true creates the zone and outputs name_servers for
+# NS delegation at the registrar (required before ACM validation succeeds).
+# ---------------------------------------------------------------------------
+domain_name        = "lpms-pilot.example.com"
+route53_zone_name  = "example.com"
+create_hosted_zone = false

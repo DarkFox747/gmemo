@@ -1,0 +1,240 @@
+/**
+ * Service entrypoint — single composition root.
+ *
+ * Boot sequence:
+ *  1. Load + validate config from environment (fail-fast on invalid values).
+ *  2. Apply LOG_LEVEL so every subsequent log respects the configured level.
+ *  3. Create the pg Pool singleton (one pool for the process lifetime).
+ *  4. Gate-1 authenticator: if AUTH_DEV_BYPASS && NODE_ENV!=='production', use
+ *     DevAuthenticator (loud WARN banner); else build CognitoJwtVerifier with
+ *     best-effort hydrate() — boot does NOT hard-depend on Cognito reachability.
+ *  5. Construct PgAuthRepository and the four auth seam singletons.
+ *  6. Assemble AppServices and hand it to createApp.
+ *  7. Listen on the configured HOST:PORT.
+ *  8. Register SIGTERM/SIGINT handlers for graceful shutdown.
+ *
+ * Nothing is constructed per-request in this file; the singletons built here
+ * are injected through createApp(services) → makeMcpPostHandler(services).
+ */
+
+import { CognitoJwtVerifier } from 'aws-jwt-verify';
+import { JwtRsaVerifier } from 'aws-jwt-verify/jwt-rsa';
+import { loadConfig } from './config/index.js';
+import { logger, setLogLevel } from './observability/logger.js';
+import { createApp } from './http/app.js';
+import { createPool, closePool } from './db/pool.js';
+import { PgAuthRepository } from './db/authRepository.js';
+import { PgMemoryRepository } from './db/memoryRepository.js';
+import { PgStagingRepository } from './db/stagingRepository.js';
+import { PgPromotionRepository } from './db/promotionRepository.js';
+import { CognitoAuthenticator } from './auth/authenticator.js';
+import { DevAuthenticator } from './auth/devAuthenticator.js';
+import { DevOidcAuthenticator } from './auth/devOidcAuthenticator.js';
+import {
+  GithubOidcAuthenticator,
+  GITHUB_OIDC_ISSUER,
+  GITHUB_OIDC_JWKS_URI,
+} from './auth/oidcAuthenticator.js';
+import { RdsTenantResolver } from './auth/tenantResolver.js';
+import { RdsAuthorizer } from './auth/authorizer.js';
+import { RdsAuditLogger } from './auth/auditLogger.js';
+import { DeterministicJudge } from './judge/deterministicJudge.js';
+import { BedrockJudge } from './judge/bedrockJudge.js';
+import { StubEmbedder } from './embedder/stubEmbedder.js';
+import { BedrockEmbedder } from './embedder/bedrockEmbedder.js';
+import { PromoteService } from './promote/promoteService.js';
+import type { AppServices, Authenticator } from './mcp/context.js';
+import type { Judge } from './judge/judge.js';
+import type { OidcVerifier } from './auth/oidcAuthenticator.js';
+import type { Embedder } from './embedder/embedder.js';
+
+// --- 1. Config (fail-fast; exits on invalid env) ---
+const config = loadConfig();
+
+// --- 2. Logging level ---
+setLogLevel(config.LOG_LEVEL);
+
+// --- 3. Database pool (process-level singleton) ---
+const pool = createPool(config.DATABASE_URL, config.NODE_ENV === 'production');
+
+// --- 4. Gate-1 authenticator: dev stub vs real Cognito (composition root) ---
+let authenticator: Authenticator;
+
+if (config.AUTH_DEV_BYPASS && config.NODE_ENV !== 'production') {
+  // Defense in depth: loadConfig() already fails fast on the prod pairing;
+  // this second check keeps the stub structurally unreachable in production.
+  logger.warn('════════════════════════════════════════════════════════════');
+  logger.warn('[boot] AUTH_DEV_BYPASS ACTIVE — Gate 1 (Cognito) is STUBBED.');
+  logger.warn('[boot] DevAuthenticator returns a FIXED principal. DEV ONLY.');
+  logger.warn('[boot] Gate 2 (RDS user+membership), RBAC and audit remain REAL.');
+  logger.warn('════════════════════════════════════════════════════════════');
+  authenticator = new DevAuthenticator();
+} else {
+  // Real path. superRefine guarantees these are present here; the explicit
+  // guard satisfies the type-checker (COGNITO_* are optional in Config).
+  if (
+    !config.COGNITO_USER_POOL_ID ||
+    !config.COGNITO_CLIENT_ID_ALLOWLIST ||
+    !config.COGNITO_REQUIRED_SCOPE
+  ) {
+    throw new Error('[boot] Cognito configuration missing on the real auth path');
+  }
+  // CognitoJwtVerifier derives the issuer URL and JWKS endpoint from userPoolId,
+  // validates token_use='access', client_id allowlist, and required scope.
+  // Region is derived from the pool ID by aws-jwt-verify — no COGNITO_REGION needed.
+  // aud is intentionally NOT validated — Cognito access tokens use client_id.
+  const cognitoVerifier = CognitoJwtVerifier.create({
+    userPoolId: config.COGNITO_USER_POOL_ID,
+    tokenUse: 'access',
+    clientId: config.COGNITO_CLIENT_ID_ALLOWLIST,
+    scope: config.COGNITO_REQUIRED_SCOPE,
+  });
+  // Best-effort JWKS pre-fetch: warms the in-process key cache before traffic
+  // arrives. Non-fatal — the verifier lazy-fetches on the first verify() call
+  // when this fails, so boot must not hard-depend on Cognito reachability.
+  cognitoVerifier.hydrate().catch((err: unknown) => {
+    logger.warn('[boot] Cognito JWKS pre-fetch failed (non-fatal; retries on first verify)', err);
+  });
+  authenticator = new CognitoAuthenticator(cognitoVerifier);
+}
+
+// --- 5. Auth repository + seam implementations ---
+const authRepository = new PgAuthRepository(pool);
+
+// --- 5b. Memory repository (change B: data-model) ---
+const memoryRepository = new PgMemoryRepository(pool);
+
+// --- 5c. Staging repository (change D: staging write path) ---
+const stagingRepository = new PgStagingRepository(pool);
+
+// --- 5d. Promotion repository (promotion-pipeline) ---
+const promotionRepository = new PgPromotionRepository(pool);
+
+// --- 5e. Judge: dev stub vs Bedrock skeleton (composition root) ---
+let judge: Judge;
+
+if (config.JUDGE_STUB && config.NODE_ENV !== 'production') {
+  // Defense in depth: loadConfig() already fails fast on the prod pairing;
+  // this second check keeps the stub structurally unreachable in production.
+  logger.warn('════════════════════════════════════════════════════════════');
+  logger.warn('[boot] JUDGE_STUB ACTIVE — DeterministicJudge will be used for all verdicts.');
+  logger.warn(`[boot] All verdicts will be: ${config.JUDGE_STUB_VERDICT}. DEV/TEST ONLY.`);
+  logger.warn('[boot] Set JUDGE_STUB=false (and provide BEDROCK_MODEL_ID) for production.');
+  logger.warn('════════════════════════════════════════════════════════════');
+  judge = new DeterministicJudge(config.JUDGE_STUB_VERDICT);
+} else {
+  // superRefine guarantees BEDROCK_MODEL_ID and AWS_REGION are present on this path.
+  judge = new BedrockJudge({
+    modelId: config.BEDROCK_MODEL_ID!,
+    region: config.AWS_REGION!,
+    maxAttempts: config.BEDROCK_MAX_ATTEMPTS,
+    timeoutMs: config.BEDROCK_TIMEOUT_MS,
+  });
+}
+
+// --- 5f. OIDC verifier: dev bypass vs GithubOidcAuthenticator (composition root) ---
+let oidcVerifier: OidcVerifier;
+
+if (config.PROMOTE_OIDC_DEV_BYPASS && config.NODE_ENV !== 'production') {
+  // Defense in depth: loadConfig() already fails fast on the prod pairing;
+  // this second check keeps the bypass structurally unreachable in production.
+  logger.warn('════════════════════════════════════════════════════════════');
+  logger.warn('[boot] PROMOTE_OIDC_DEV_BYPASS ACTIVE — GitHub OIDC verification is STUBBED.');
+  logger.warn('[boot] DevOidcAuthenticator returns a fixed principal. DEV ONLY.');
+  logger.warn('[boot] Set PROMOTE_OIDC_DEV_BYPASS=false (+ GITHUB_OIDC_AUDIENCE) for production.');
+  logger.warn('════════════════════════════════════════════════════════════');
+  oidcVerifier = new DevOidcAuthenticator();
+} else {
+  // superRefine guarantees GITHUB_OIDC_AUDIENCE is present on this path.
+  // Build the real JWKS verifier once at boot; the in-process cache handles
+  // key rotation transparently across requests.
+  const githubOidcVerifier = JwtRsaVerifier.create({
+    issuer: GITHUB_OIDC_ISSUER,
+    audience: config.GITHUB_OIDC_AUDIENCE!,
+    jwksUri: GITHUB_OIDC_JWKS_URI,
+  });
+  oidcVerifier = new GithubOidcAuthenticator(githubOidcVerifier);
+}
+
+// --- 5g. AuditLogger singleton (reused by promoteService below) ---
+const auditLogger = new RdsAuditLogger(authRepository);
+
+// --- 5h. Embedder: dev stub vs Bedrock skeleton (composition root) ---
+let embedder: Embedder;
+
+if (config.EMBEDDER_STUB && config.NODE_ENV !== 'production') {
+  // Defense in depth: loadConfig() already fails fast on the prod pairing;
+  // this second check keeps the stub structurally unreachable in production.
+  logger.warn('════════════════════════════════════════════════════════════');
+  logger.warn('[boot] EMBEDDER_STUB ACTIVE — StubEmbedder (deterministic, non-semantic).');
+  logger.warn('[boot] Embeddings are pseudo-random. DEV/TEST ONLY.');
+  logger.warn('[boot] Set EMBEDDER_STUB=false (and provide BEDROCK_EMBEDDING_MODEL_ID) for production.');
+  logger.warn('════════════════════════════════════════════════════════════');
+  embedder = new StubEmbedder();
+} else {
+  // superRefine guarantees BEDROCK_EMBEDDING_MODEL_ID and AWS_REGION are present on this path.
+  embedder = new BedrockEmbedder({
+    modelId: config.BEDROCK_EMBEDDING_MODEL_ID!,
+    region: config.AWS_REGION!,
+    maxAttempts: config.BEDROCK_MAX_ATTEMPTS,
+    timeoutMs: config.BEDROCK_TIMEOUT_MS,
+  });
+}
+
+// --- 5i. PromoteService ---
+const promoteService = new PromoteService({ promotionRepository, judge, auditLogger, embedder });
+
+const services: AppServices = {
+  authenticator, // ← selected above: DevAuthenticator or CognitoAuthenticator
+  tenantResolver: new RdsTenantResolver(authRepository),
+  authorizer: new RdsAuthorizer(authRepository),
+  auditLogger,   // ← same singleton used by promoteService
+  memoryRepository,
+  stagingRepository,
+  authRepository,
+  promotionRepository,
+  judge,
+  oidcVerifier,
+  promoteService,
+  embedder,                                                  // ← shared by PromoteService + recall handler
+  semanticFallbackMinResults: config.SEMANTIC_FALLBACK_MIN_RESULTS,
+  semanticFallbackK: config.SEMANTIC_FALLBACK_K,
+};
+
+// --- 6 + 7. Build app and listen ---
+// Pass the 4 rate-limit window/max values from config; enabled is ON in
+// production (superRefine already rejected RATE_LIMIT_ENABLED=false there).
+const app = createApp(services, {
+  rateLimit: {
+    enabled: config.RATE_LIMIT_ENABLED,
+    mcpWindowMs: config.RATE_LIMIT_MCP_WINDOW_MS,
+    mcpMax: config.RATE_LIMIT_MCP_MAX,
+    promoteWindowMs: config.RATE_LIMIT_PROMOTE_WINDOW_MS,
+    promoteMax: config.RATE_LIMIT_PROMOTE_MAX,
+  },
+});
+
+const server = app.listen(config.PORT, config.HOST, () => {
+  logger.info(`lpms-cloud listening on http://${config.HOST}:${config.PORT}`);
+  logger.info(`NODE_ENV=${config.NODE_ENV} LOG_LEVEL=${config.LOG_LEVEL}`);
+});
+
+// --- 8. Graceful shutdown ---
+// Close the HTTP server (stop accepting new connections) then drain the DB pool.
+const shutdown = (signal: string): void => {
+  logger.info(`[shutdown] ${signal} received — shutting down gracefully`);
+  server.close(() => {
+    closePool(pool)
+      .then(() => {
+        logger.info('[shutdown] Shutdown complete');
+        process.exit(0);
+      })
+      .catch((err: unknown) => {
+        logger.error('[shutdown] Error during pool close', err);
+        process.exit(1);
+      });
+  });
+};
+
+process.on('SIGTERM', () => { shutdown('SIGTERM'); });
+process.on('SIGINT', () => { shutdown('SIGINT'); });
