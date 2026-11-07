@@ -36,6 +36,8 @@ export interface StagingItemRow {
   target_memory_id: string | null;
   target_revision: number | null;
   judge_state: 'pending' | 'accepted' | 'uncertain' | 'rejected';
+  /** True when the item is held for human review regardless of the judge. */
+  mandatory_review: boolean;
   created_at: Date;
   promoted_at: Date | null;
   promoted_memory_id: string | null;
@@ -55,6 +57,11 @@ export interface InsertStagingItemParams {
   /** Set by the handler per Decision 7 (stale handle → 'uncertain'). */
   judgeState: 'pending' | 'uncertain';
   authorIdentity: string;
+  /** 'stale_target' for capture-time stale handles; null otherwise. */
+  judgeCriterion: 'stale_target' | null;
+  /** True when the item must go through human review regardless of the judge. */
+  mandatoryReview: boolean;
+  judgeReason: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +124,7 @@ interface RawStagingItemRow {
   target_memory_id: string | null;
   target_revision: number | null;
   judge_state: string;
+  mandatory_review: boolean;
   created_at: Date;
   promoted_at: Date | null;
   promoted_memory_id: string | null;
@@ -155,12 +163,14 @@ WHERE id = $1
 // Idempotent insert; unique (session_id, content_hash) prevents duplicates.
 // $1=session_id  $2=op  $3=type  $4=title  $5=summary  $6=body
 // $7=fields(jsonb)  $8=content_hash  $9=target_memory_id  $10=target_revision
-// $11=judge_state  $12=author_identity
+// $11=judge_state  $12=author_identity  $13=judge_criterion  $14=mandatory_review
+// $15=judge_reason
 const INSERT_STAGING_ITEM_SQL = `
 INSERT INTO staging_item
   (session_id, op, type, title, summary, body, fields, content_hash,
-   target_memory_id, target_revision, judge_state, author_identity)
-VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
+   target_memory_id, target_revision, judge_state, author_identity,
+   judge_criterion, mandatory_review, judge_reason)
+VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15)
 ON CONFLICT (session_id, content_hash) DO NOTHING
 RETURNING id, judge_state
 `.trim();
@@ -179,7 +189,7 @@ WHERE session_id = $1 AND content_hash = $2
 const LIST_STAGING_ITEMS_SQL = `
 SELECT i.id, i.op, i.type, i.title, i.summary, i.body, i.fields,
        i.content_hash, i.target_memory_id, i.target_revision,
-       i.judge_state, i.created_at,
+       i.judge_state, i.mandatory_review, i.created_at,
        i.promoted_at, i.promoted_memory_id
 FROM staging_item i
 JOIN staging_session s ON s.id = i.session_id
@@ -265,6 +275,9 @@ export class PgStagingRepository implements StagingRepository {
       p.targetRevision,    // $10
       p.judgeState,        // $11
       p.authorIdentity,    // $12
+      p.judgeCriterion,    // $13
+      p.mandatoryReview,   // $14
+      p.judgeReason,       // $15
     ]);
 
     if (insertResult.rows.length > 0) {
@@ -313,6 +326,7 @@ export class PgStagingRepository implements StagingRepository {
       target_memory_id: r.target_memory_id,
       target_revision: r.target_revision,
       judge_state: r.judge_state as StagingItemRow['judge_state'],
+      mandatory_review: r.mandatory_review,
       created_at: r.created_at,
       promoted_at: r.promoted_at,
       promoted_memory_id: r.promoted_memory_id,

@@ -2,45 +2,26 @@
  * T016: PromoteService embedding behaviour unit tests.
  *
  * DB-free: exercises the embed-before-applyAccepted path via a SpyEmbedder and
- * the same in-file fake patterns used in promoteService.test.ts.
+ * the shared fakes in ./fakes.ts.
  *
  * Covered cases:
- *  - accepted add     → embedder.embed called once with "title\nsummary\nbody";
- *                       returned vector forwarded to applyAccepted (non-null)
- *  - accepted amend   → same embed call / forwarding behaviour
- *  - accepted supersede → same embed call / forwarding behaviour
- *  - accepted deprecate → embedder.embed NEVER called; applyAccepted receives null
- *  - embed throws      → applyAccepted receives null; item still applied; no throw
- *                        escapes; no quarantine
+ *  - accepted add / amend → embedder.embed called once with "title\nsummary\nbody";
+ *                           returned vector forwarded to applyAccepted (non-null)
+ *  - accepted supersede / deprecate → always mandatory review (C1, HU-06.4):
+ *                           never applied here, so embed is NEVER called
+ *  - PII-masked content is what gets embedded (raw PII never reaches the embedder)
+ *  - embed throws → applyAccepted receives null; item still applied; no throw
+ *                   escapes; no quarantine
  */
 
 import { describe, it, expect } from 'vitest';
-import { PromoteService } from '../../src/promote/promoteService.js';
-import type { PromoteMeta } from '../../src/promote/promoteService.js';
-import type {
-  PromotionRepository,
-  PromotionItemRow,
-  ApplyContext,
-  ApplyResult,
-  Verdict,
-} from '../../src/db/promotionRepository.js';
-import type { Judge, JudgeItem } from '../../src/judge/judge.js';
 import type { Embedder } from '../../src/embedder/embedder.js';
-import type {
-  AuditLogger,
-  TenantContext,
-  RequestContext,
-  ToolName,
-} from '../../src/mcp/context.js';
+import type { PromotionItemRow } from '../../src/db/promotionRepository.js';
+import { makeItem as baseItem, makeService as baseService, META } from './fakes.js';
 
-// ---------------------------------------------------------------------------
-// Fakes (same patterns as promoteService.test.ts)
-// ---------------------------------------------------------------------------
+const SESSION_ID = 'sess-embed-001';
 
-/**
- * SpyEmbedder: records every embed() call; returns a fixed vector or throws,
- * depending on how it is constructed.
- */
+/** SpyEmbedder: records every embed() call; returns a fixed vector or throws. */
 class SpyEmbedder implements Embedder {
   readonly embedCalls: string[] = [];
 
@@ -55,201 +36,29 @@ class SpyEmbedder implements Embedder {
   }
 }
 
-/** Controllable fake for PromotionRepository (mirrors promoteService.test.ts). */
-class FakePromotionRepository implements PromotionRepository {
-  readonly quarantineCalls: Array<{
-    item: PromotionItemRow;
-    ctx: ApplyContext;
-    reason: string;
-    redact: boolean;
-  }> = [];
-
-  readonly verdictCalls: Array<{
-    itemId: string;
-    verdict: Verdict;
-    reason: string | null;
-  }> = [];
-
-  readonly finalizeCalls: Array<{
-    sessionId: string;
-    status: 'promoted' | 'rejected' | 'partially_promoted';
-  }> = [];
-
-  readonly applyAcceptedCalls: Array<{
-    item: PromotionItemRow;
-    ctx: ApplyContext;
-    embedding: number[] | null;
-  }> = [];
-
-  constructor(
-    private readonly items: PromotionItemRow[] = [],
-    private readonly applyResults: Map<string, ApplyResult> = new Map(),
-  ) {}
-
-  findOpenSessionId(_tenant: TenantContext): Promise<string | null> {
-    return Promise.resolve('test-session');
-  }
-
-  fetchPromotableItems(_sessionId: string, _projectId: string): Promise<PromotionItemRow[]> {
-    return Promise.resolve(this.items);
-  }
-
-  recordVerdict(itemId: string, verdict: Verdict, reason: string | null): Promise<void> {
-    this.verdictCalls.push({ itemId, verdict, reason });
-    return Promise.resolve();
-  }
-
-  applyAccepted(
-    item: PromotionItemRow,
-    ctx: ApplyContext,
-    embedding: number[] | null,
-  ): Promise<ApplyResult> {
-    this.applyAcceptedCalls.push({ item, ctx, embedding });
-    const scripted = this.applyResults.get(item.id);
-    if (scripted) return Promise.resolve(scripted);
-    return Promise.resolve({ status: 'applied', memoryId: `mem-${item.id}`, deduped: false });
-  }
-
-  quarantineItem(
-    item: PromotionItemRow,
-    ctx: ApplyContext,
-    reason: string,
-    redact: boolean,
-  ): Promise<void> {
-    this.quarantineCalls.push({ item, ctx, reason, redact });
-    return Promise.resolve();
-  }
-
-  finalizeSession(
-    sessionId: string,
-    status: 'promoted' | 'rejected' | 'partially_promoted',
-  ): Promise<void> {
-    this.finalizeCalls.push({ sessionId, status });
-    return Promise.resolve();
-  }
-}
-
-/** Controllable fake for Judge. */
-class FakeJudge implements Judge {
-  readonly evaluateCalls: JudgeItem[] = [];
-
-  constructor(private readonly verdicts: Verdict[] = ['accepted']) {}
-
-  evaluate(item: JudgeItem): Promise<Verdict> {
-    this.evaluateCalls.push(item);
-    const idx = this.evaluateCalls.length - 1;
-    const verdict =
-      idx < this.verdicts.length
-        ? this.verdicts[idx]!
-        : this.verdicts[this.verdicts.length - 1]!;
-    return Promise.resolve(verdict);
-  }
-}
-
-/** Silent no-op fake for AuditLogger. */
-class FakeAuditLogger implements AuditLogger {
-  recordRead(_ctx: RequestContext, _tool: ToolName, _queryHash?: string): Promise<void> {
-    return Promise.resolve();
-  }
-
-  recordWrite(
-    _ctx: RequestContext,
-    _params: {
-      tool: 'remember' | 'discard_staged';
-      sessionId?: string;
-      itemId: string;
-      contentHash?: string;
-    },
-  ): Promise<void> {
-    return Promise.resolve();
-  }
-
-  recordPromote(
-    _ctx: RequestContext,
-    _p: {
-      sessionId: string;
-      applied: number;
-      quarantined: number;
-      uncertain: number;
-      prNumber: number | null;
-      mergeSha: string | null;
-    },
-  ): Promise<void> {
-    return Promise.resolve();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Fixture helpers
-// ---------------------------------------------------------------------------
-
-const SESSION_ID = 'sess-embed-001';
-
-const META: PromoteMeta = {
-  tenant: { projectId: 'proj-1', repoId: 'repo-1', branch: 'main' },
-  actor: { actorId: 'ci-actor', roles: ['service_agent'] },
-  originBranch: 'main',
-  originPr: 1,
-  mergeSha: 'sha-embed',
-};
-
-/** Builds a PromotionItemRow with safe defaults. */
-function makeItem(
-  id: string,
-  overrides: Partial<Omit<PromotionItemRow, 'id'>> = {},
-): PromotionItemRow {
-  return {
-    id,
-    op: 'add',
-    type: 'decision',
+function makeItem(id: string, overrides: Partial<Omit<PromotionItemRow, 'id'>> = {}) {
+  return baseItem(id, {
     title: 'Embed title',
     summary: 'Embed summary.',
-    body: 'Embed body.',
-    fields: {},
-    content_hash: `hash-${id}`,
-    target_memory_id: null,
-    target_revision: null,
-    judge_state: 'pending',
-    judge_reason: null,
-    author_identity: 'test-author',
-    promoted_at: null,
-    promoted_memory_id: null,
+    body: 'Embed body referencing src/embedder/embedder.ts.',
     ...overrides,
-  };
+  });
 }
 
-/**
- * Wire a PromoteService with controllable fakes.
- * The caller supplies the SpyEmbedder so it can assert on it directly.
- */
-function makeService(
-  items: PromotionItemRow[],
-  embedder: Embedder,
-  verdicts: Verdict[] = ['accepted'],
-  applyResults: Map<string, ApplyResult> = new Map(),
-): { service: PromoteService; repo: FakePromotionRepository } {
-  const repo = new FakePromotionRepository(items, applyResults);
-  const judge = new FakeJudge(verdicts);
-  const auditLogger = new FakeAuditLogger();
-  const service = new PromoteService({ promotionRepository: repo, judge, auditLogger, embedder });
-  return { service, repo };
+function makeService(items: PromotionItemRow[], embedder: Embedder) {
+  return baseService(items, { embedder });
 }
 
-// ---------------------------------------------------------------------------
-// Tests: accepted ops (add / amend / supersede) → embed called + vector forwarded
-// ---------------------------------------------------------------------------
-
-describe('PromoteService embedding — accepted add/amend/supersede', () => {
-  for (const op of ['add', 'amend', 'supersede'] as const) {
-    it(`accepted ${op} → embedder.embed called once with "title\\nsummary\\nbody"; non-null vector passed to applyAccepted`, async () => {
+describe('PromoteService embedding — accepted add/amend', () => {
+  for (const op of ['add', 'amend'] as const) {
+    it(`accepted ${op} → embed called once with "title\\nsummary\\nbody"; vector passed to applyAccepted`, async () => {
       const vector = [0.1, 0.2, 0.3];
       const embedder = new SpyEmbedder(vector);
       const item = makeItem(`emb-${op}`, {
         op,
         title: 'My title',
         summary: 'My summary.',
-        body: 'My body.',
-        // amend / supersede need a target; irrelevant to embedding but realistic
+        body: 'My body in src/x.ts.',
         target_memory_id: op !== 'add' ? 'mem-target-1' : null,
         target_revision: op !== 'add' ? 1 : null,
       });
@@ -257,72 +66,54 @@ describe('PromoteService embedding — accepted add/amend/supersede', () => {
       const { service, repo } = makeService([item], embedder);
       await service.promote(SESSION_ID, META);
 
-      // embed called exactly once
-      expect(embedder.embedCalls).toHaveLength(1);
-
-      // embed text is the concatenation required by Decision 8
-      expect(embedder.embedCalls[0]).toBe('My title\nMy summary.\nMy body.');
-
-      // applyAccepted received the vector (non-null)
+      expect(embedder.embedCalls).toEqual(['My title\nMy summary.\nMy body in src/x.ts.']);
       expect(repo.applyAcceptedCalls).toHaveLength(1);
-      expect(repo.applyAcceptedCalls[0]!.embedding).not.toBeNull();
       expect(repo.applyAcceptedCalls[0]!.embedding).toEqual(vector);
     });
   }
 });
 
-// ---------------------------------------------------------------------------
-// Test: accepted deprecate → embed NOT called; applyAccepted receives null
-// ---------------------------------------------------------------------------
+describe('PromoteService embedding — supersede/deprecate are mandatory review', () => {
+  for (const op of ['supersede', 'deprecate'] as const) {
+    it(`accepted ${op} → queued for review; embed NEVER called; not applied`, async () => {
+      const embedder = new SpyEmbedder([0.9, 0.8]);
+      const item = makeItem(`emb-${op}`, { op, target_memory_id: 'mem-t', target_revision: 1 });
 
-describe('PromoteService embedding — accepted deprecate', () => {
-  it('accepted deprecate → embedder.embed NEVER called; applyAccepted receives null embedding', async () => {
-    const embedder = new SpyEmbedder([0.9, 0.8]);
-    const item = makeItem('emb-dep', {
-      op: 'deprecate',
-      target_memory_id: 'mem-to-deprecate',
+      const { service, repo } = makeService([item], embedder);
+      const outcome = await service.promote(SESSION_ID, META);
+
+      expect(embedder.embedCalls).toHaveLength(0);
+      expect(repo.applyAcceptedCalls).toHaveLength(0);
+      expect(outcome.uncertain).toBe(1);
     });
+  }
+});
 
-    const { service, repo } = makeService([item], embedder);
-    const outcome = await service.promote(SESSION_ID, META);
+describe('PromoteService embedding — masked content', () => {
+  it('embeds the PII-masked text, never the raw email', async () => {
+    const embedder = new SpyEmbedder();
+    const item = makeItem('emb-pii', { summary: 'Ask jane.doe@example.com.' });
 
-    // embed must not be called for deprecate
-    expect(embedder.embedCalls).toHaveLength(0);
+    const { service } = makeService([item], embedder);
+    await service.promote(SESSION_ID, META);
 
-    // applyAccepted is still called (deprecate is a valid op)
-    expect(repo.applyAcceptedCalls).toHaveLength(1);
-    expect(repo.applyAcceptedCalls[0]!.embedding).toBeNull();
-
-    // Item is counted as applied
-    expect(outcome.applied).toBe(1);
-    expect(outcome.status).toBe('promoted');
+    expect(embedder.embedCalls).toHaveLength(1);
+    expect(embedder.embedCalls[0]).toContain('[EMAIL]');
+    expect(embedder.embedCalls[0]).not.toContain('jane.doe@example.com');
   });
 });
 
-// ---------------------------------------------------------------------------
-// Test: embed throws → fail-soft (null forwarded; item still applied; no throw)
-// ---------------------------------------------------------------------------
-
 describe('PromoteService embedding — embed throws (fail-soft)', () => {
-  it('embed throws → applyAccepted receives null; item still applied; no exception escapes; no quarantine', async () => {
+  it('embed throws → applyAccepted receives null; item still applied; no quarantine', async () => {
     const embedder = new SpyEmbedder(new Error('Bedrock unavailable'));
     const item = makeItem('emb-throw', { op: 'add' });
 
     const { service, repo } = makeService([item], embedder);
-
-    // promote() must not throw even when embed throws
     const outcome = await service.promote(SESSION_ID, META);
 
-    // embed was attempted
     expect(embedder.embedCalls).toHaveLength(1);
-
-    // applyAccepted still called with null (fail-soft)
     expect(repo.applyAcceptedCalls).toHaveLength(1);
     expect(repo.applyAcceptedCalls[0]!.embedding).toBeNull();
-
-    // Item is counted as applied — the embedding failure does not block promotion
-    expect(outcome.applied).toBe(1);
-    expect(outcome.quarantined).toBe(0);
-    expect(outcome.status).toBe('promoted');
+    expect(outcome).toMatchObject({ applied: 1, quarantined: 0, status: 'promoted' });
   });
 });

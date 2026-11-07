@@ -143,6 +143,10 @@ describeWithDb('migration integration — 0003_staging.sql', () => {
     await pool.query(
       `DELETE FROM schema_migrations WHERE version = '0004_promotion_gaps'`,
     );
+    // 0007 also alters staging_item; same reasoning.
+    await pool.query(
+      `DELETE FROM schema_migrations WHERE version = '0007_judge_structured_verdict'`,
+    );
 
     // Delete seeded project row — cascades to repo and memory (both ON DELETE CASCADE).
     await pool.query(

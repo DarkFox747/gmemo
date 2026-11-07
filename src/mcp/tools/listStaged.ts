@@ -13,6 +13,17 @@ import type { ListStagedResponse, StagedItemView } from '../../contracts/tools.j
 import type { RequestContext, HandlerDeps } from '../context.js';
 import type { StagingItemRow } from '../../db/stagingRepository.js';
 
+/**
+ * Agent-facing state. An accepted item held for mandatory review (not applied)
+ * is shown as 'uncertain' so agents see it is still pending human review (SEC L-9).
+ */
+function agentState(row: StagingItemRow): string {
+  if (row.judge_state === 'accepted' && row.mandatory_review && row.promoted_at === null) {
+    return 'uncertain';
+  }
+  return row.judge_state;
+}
+
 /** Projects a staging_item row to the StagedItemView contract shape. */
 function toStagedItemView(row: StagingItemRow): StagedItemView {
   return {
@@ -21,7 +32,7 @@ function toStagedItemView(row: StagingItemRow): StagedItemView {
     type: row.type,
     title: row.title,
     summary: row.summary,
-    state: row.judge_state,
+    state: agentState(row),
     date: row.created_at.toISOString(),
   };
 }

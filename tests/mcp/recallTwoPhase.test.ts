@@ -167,6 +167,7 @@ const STAGED_ITEM: StagingItemRow = {
   target_memory_id: null,
   target_revision: null,
   judge_state: 'pending',
+  mandatory_review: false,
   created_at: new Date('2025-12-01T00:00:00Z'),
   promoted_at: null,
   promoted_memory_id: null,

@@ -42,11 +42,14 @@ import { DeterministicJudge } from './judge/deterministicJudge.js';
 import { BedrockJudge } from './judge/bedrockJudge.js';
 import { StubEmbedder } from './embedder/stubEmbedder.js';
 import { BedrockEmbedder } from './embedder/bedrockEmbedder.js';
+import { logNotifier } from './notify/notifier.js';
 import { PromoteService } from './promote/promoteService.js';
 import type { AppServices, Authenticator } from './mcp/context.js';
 import type { Judge } from './judge/judge.js';
 import type { OidcVerifier } from './auth/oidcAuthenticator.js';
 import type { Embedder } from './embedder/embedder.js';
+import type { MemoryType } from './contracts/memory.js';
+import type { RoutingConfig } from './promote/routing.js';
 
 // --- 1. Config (fail-fast; exits on invalid env) ---
 const config = loadConfig();
@@ -117,11 +120,12 @@ if (config.JUDGE_STUB && config.NODE_ENV !== 'production') {
   // Defense in depth: loadConfig() already fails fast on the prod pairing;
   // this second check keeps the stub structurally unreachable in production.
   logger.warn('════════════════════════════════════════════════════════════');
-  logger.warn('[boot] JUDGE_STUB ACTIVE — DeterministicJudge will be used for all verdicts.');
-  logger.warn(`[boot] All verdicts will be: ${config.JUDGE_STUB_VERDICT}. DEV/TEST ONLY.`);
+  logger.warn(
+    `[boot] JUDGE_STUB ACTIVE — heuristic DeterministicJudge (accepted confidence ${config.JUDGE_STUB_CONFIDENCE}). DEV/TEST ONLY.`,
+  );
   logger.warn('[boot] Set JUDGE_STUB=false (and provide BEDROCK_MODEL_ID) for production.');
   logger.warn('════════════════════════════════════════════════════════════');
-  judge = new DeterministicJudge(config.JUDGE_STUB_VERDICT);
+  judge = new DeterministicJudge({ acceptedConfidence: config.JUDGE_STUB_CONFIDENCE });
 } else {
   // superRefine guarantees BEDROCK_MODEL_ID and AWS_REGION are present on this path.
   judge = new BedrockJudge({
@@ -181,8 +185,27 @@ if (config.EMBEDDER_STUB && config.NODE_ENV !== 'production') {
   });
 }
 
-// --- 5i. PromoteService ---
-const promoteService = new PromoteService({ promotionRepository, judge, auditLogger, embedder });
+// --- 5i. Routing config (judge threshold + mandatory review types) ---
+// loadConfig() already rejected unknown types, so the cast is safe.
+const routing: RoutingConfig = {
+  confidenceThreshold: config.JUDGE_CONFIDENCE_THRESHOLD,
+  mandatoryReviewTypes: new Set(config.MANDATORY_REVIEW_TYPES as MemoryType[]),
+};
+if (routing.mandatoryReviewTypes.size === 0) {
+  logger.warn(
+    '[boot] MANDATORY_REVIEW_TYPES is empty — only supersede/deprecate require human review.',
+  );
+}
+
+// --- 5j. PromoteService ---
+const promoteService = new PromoteService({
+  promotionRepository,
+  judge,
+  auditLogger,
+  embedder,
+  notifier: logNotifier,
+  routing,
+});
 
 const services: AppServices = {
   authenticator, // ← selected above: DevAuthenticator or CognitoAuthenticator
@@ -199,6 +222,7 @@ const services: AppServices = {
   embedder,                                                  // ← shared by PromoteService + recall handler
   semanticFallbackMinResults: config.SEMANTIC_FALLBACK_MIN_RESULTS,
   semanticFallbackK: config.SEMANTIC_FALLBACK_K,
+  notifier: logNotifier,
 };
 
 // --- 6 + 7. Build app and listen ---

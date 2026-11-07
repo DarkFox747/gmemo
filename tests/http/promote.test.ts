@@ -95,7 +95,9 @@ function makePromotionRepo(sessionId: string | null): PromotionRepository {
   return {
     findOpenSessionId: async () => sessionId,
     fetchPromotableItems: async () => [],
-    recordVerdict: async () => {},
+    findJudgeContext: async () => [],
+    persistMasked: async () => 'ok' as const,
+    recordDecision: async () => {},
     applyAccepted: async () => ({
       status: 'applied' as const,
       memoryId: 'mem-t022',

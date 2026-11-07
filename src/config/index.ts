@@ -1,4 +1,17 @@
 import { z } from 'zod';
+import { MEMORY_TYPES } from '../mcp/tools/schemas.js';
+
+/**
+ * Strict 0..1 decimal from an env string. A regex (not z.coerce.number) so that
+ * an empty string never silently becomes 0. Surrounding whitespace is trimmed first.
+ */
+const unitInterval = (def: string) =>
+  z
+    .string()
+    .trim()
+    .regex(/^(0(\.\d+)?|1(\.0+)?)$/, 'must be a decimal between 0 and 1')
+    .default(def)
+    .transform(Number);
 
 const envSchema = z
   .object({
@@ -40,7 +53,20 @@ const envSchema = z
       .enum(['true', 'false'])
       .default('false')
       .transform((v) => v === 'true'),
-    JUDGE_STUB_VERDICT: z.enum(['accepted', 'rejected', 'uncertain']).default('uncertain'),
+    // Confidence an accepted DeterministicJudge verdict reports (dev/test only).
+    JUDGE_STUB_CONFIDENCE: unitInterval('0.9'),
+    // Accepted verdicts below this confidence are routed to the human review queue.
+    JUDGE_CONFIDENCE_THRESHOLD: unitInterval('0.8'),
+    // CSV of memory types that always require human review. An empty list is
+    // allowed outside production (the composition root warns at boot) and
+    // forbidden in production (superRefine below).
+    MANDATORY_REVIEW_TYPES: z
+      .string()
+      .default('decision,constraint,domain_rule')
+      .transform((s) => s.split(',').map((t) => t.trim()).filter(Boolean))
+      .refine((arr) => arr.every((t) => (MEMORY_TYPES as readonly string[]).includes(t)), {
+        message: `MANDATORY_REVIEW_TYPES must only contain: ${MEMORY_TYPES.join(', ')}`,
+      }),
     // Real Bedrock judge requires a model ID; OPTIONAL at field level; REQUIRED by
     // superRefine on the real path (JUDGE_STUB !== true).
     BEDROCK_MODEL_ID: z.string().min(1).optional(),
@@ -139,6 +165,26 @@ const envSchema = z
         path: ['JUDGE_STUB'],
         message: 'JUDGE_STUB=true is forbidden when NODE_ENV=production.',
       });
+    }
+
+    // ── LOAD-BEARING PROD GUARD — review routing floor ───────────────────────
+    // In production a near-zero threshold or an empty mandatory list would let
+    // the judge auto-apply governed memory types without a human. Fail to load.
+    if (cfg.NODE_ENV === 'production') {
+      if (cfg.JUDGE_CONFIDENCE_THRESHOLD < 0.5) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['JUDGE_CONFIDENCE_THRESHOLD'],
+          message: 'JUDGE_CONFIDENCE_THRESHOLD must be >= 0.5 when NODE_ENV=production.',
+        });
+      }
+      if (cfg.MANDATORY_REVIEW_TYPES.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['MANDATORY_REVIEW_TYPES'],
+          message: 'MANDATORY_REVIEW_TYPES must not be empty when NODE_ENV=production.',
+        });
+      }
     }
 
     // ── Real Bedrock judge path requires a model ID ───────────────────────────

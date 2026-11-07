@@ -50,8 +50,17 @@ docker compose down -v
 
 > El build de la imagen descarga el bundle de CA de RDS: **necesita internet**.
 
-Compose define en la app los bypass/stubs de desarrollo: `AUTH_DEV_BYPASS`, `JUDGE_STUB` (con
-`JUDGE_STUB_VERDICT=accepted`), `PROMOTE_OIDC_DEV_BYPASS` y `EMBEDDER_STUB`. No hace falta AWS.
+Compose define en la app los bypass/stubs de desarrollo: `AUTH_DEV_BYPASS`, `JUDGE_STUB` (juez
+determinista), `PROMOTE_OIDC_DEV_BYPASS` y `EMBEDDER_STUB`. No hace falta AWS.
+
+El juez determinista (`JUDGE_STUB`) no devuelve un veredicto fijo: aplica reglas ordenadas (la primera que
+coincide gana). En resumen: revela credenciales en lenguaje natural o blobs codificados → rechazado
+(`security_second_layer`); cuerpo demasiado corto o título genérico → rechazado (`specificity`); título
+igual a una memoria existente → rechazado (`duplication`); título muy parecido en el mismo tipo →
+incierto (`contradiction`); `gotcha`/`integration_note` sin referencia concreta → incierto (`grounding`);
+lenguaje dubitativo → aceptado con confianza 0.6 (menor que el umbral, va a revisión); resto → aceptado
+con `JUDGE_STUB_CONFIDENCE`. La tabla completa está en
+`openspec/changes/judge-structured-verdict/design.md`.
 
 > **Guard de producción.** Todos esos bypass/stubs (y `RATE_LIMIT_ENABLED=false`) son rechazados por
 > `src/config/index.ts` cuando `NODE_ENV=production`: el servidor sale con código 1 al arrancar.

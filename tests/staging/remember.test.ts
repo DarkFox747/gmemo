@@ -18,7 +18,7 @@
 import { describe, it, expect } from 'vitest';
 import { rememberHandler } from '../../src/mcp/tools/remember.js';
 import { InMemoryMemoryRepository, type FakeMemory } from '../memory/fakes.js';
-import { InMemoryStagingRepository } from './fakes.js';
+import { InMemoryStagingRepository, RecordingNotifier } from './fakes.js';
 import type { RequestContext, HandlerDeps } from '../../src/mcp/context.js';
 import type { RememberRequest } from '../../src/contracts/tools.js';
 import { encodeHandle } from '../../src/mcp/handle.js';
@@ -64,6 +64,7 @@ const BASE_ADD: RememberRequest = {
 function makeDeps(
   memories: FakeMemory[] = [],
   stagingRepo = new InMemoryStagingRepository(),
+  notifier = new RecordingNotifier(),
 ): HandlerDeps {
   return {
     memoryRepository: new InMemoryMemoryRepository(memories),
@@ -71,6 +72,7 @@ function makeDeps(
     embedder: { embed: (_: string) => Promise.resolve([] as number[]) },
     semanticFallbackMinResults: 0,
     semanticFallbackK: 8,
+    notifier,
   };
 }
 
@@ -128,6 +130,78 @@ describe('rememberHandler — amend', () => {
     const result = await rememberHandler(input, CTX, deps);
 
     expect(result.state).toBe('uncertain');
+  });
+
+  describe('stale target (HU-11.3)', () => {
+    const staleInput: RememberRequest = {
+      op: 'amend',
+      type: 'decision',
+      title: 'Stale amend',
+      summary: 'Amend using a handle behind the current revision',
+      body: 'Memory has been amended since this handle was issued.',
+      target_handle: encodeHandle(TARGET_MEMORY_ID, 1),
+    };
+
+    it('stores stale_target + mandatory_review and notifies review_enqueued once', async () => {
+      const repo = new InMemoryStagingRepository();
+      const notifier = new RecordingNotifier();
+      const deps = makeDeps([TARGET_MEMORY], repo, notifier);
+
+      const result = await rememberHandler(staleInput, CTX, deps);
+
+      expect(repo.insertedParams[0]).toMatchObject({
+        judgeState: 'uncertain',
+        judgeCriterion: 'stale_target',
+        mandatoryReview: true,
+        judgeReason: 'target revision is no longer current',
+      });
+      expect(notifier.events).toEqual([
+        {
+          projectId: PROJECT_ID,
+          event: {
+            type: 'review_enqueued',
+            itemId: result.id,
+            queue: 'uncertain',
+            criterion: 'stale_target',
+          },
+        },
+      ]);
+    });
+
+    it('dedup re-submission does not notify again', async () => {
+      const repo = new InMemoryStagingRepository();
+      const notifier = new RecordingNotifier();
+      const deps = makeDeps([TARGET_MEMORY], repo, notifier);
+
+      await rememberHandler(staleInput, CTX, deps);
+      await rememberHandler(staleInput, CTX, deps);
+
+      expect(repo.insertedItemCount).toBe(1);
+      expect(notifier.events).toHaveLength(1);
+    });
+
+    it('a failing notifier does not fail the write', async () => {
+      const repo = new InMemoryStagingRepository();
+      const deps = makeDeps([TARGET_MEMORY], repo, new RecordingNotifier(true));
+
+      await expect(rememberHandler(staleInput, CTX, deps)).resolves.toMatchObject({
+        state: 'uncertain',
+      });
+    });
+  });
+
+  it('fresh amend and add do not notify nor set queue columns', async () => {
+    const repo = new InMemoryStagingRepository();
+    const notifier = new RecordingNotifier();
+    const deps = makeDeps([TARGET_MEMORY], repo, notifier);
+    await rememberHandler(BASE_ADD, CTX, deps);
+
+    expect(notifier.events).toHaveLength(0);
+    expect(repo.insertedParams[0]).toMatchObject({
+      judgeCriterion: null,
+      mandatoryReview: false,
+      judgeReason: null,
+    });
   });
 
   it('amend with unknown target (not found in memory repo) → INVALID_REFERENCE', async () => {
@@ -310,5 +384,51 @@ describe('rememberHandler — secret scan', () => {
       ...BASE_ADD,
       body: 'Stored token: eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.fakesig',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SEC M-1: a non-add op cannot change the target memory type
+// ---------------------------------------------------------------------------
+
+describe('rememberHandler — target type must match (SEC M-1)', () => {
+  it.each(['amend', 'supersede', 'deprecate'] as const)(
+    '%s with a type different from the target → INVALID_REFERENCE, nothing persisted',
+    async (op) => {
+      const stagingRepo = new InMemoryStagingRepository();
+      const deps = makeDeps([TARGET_MEMORY], stagingRepo); // target type: decision
+      const input: RememberRequest = {
+        op,
+        type: 'gotcha',
+        title: 'Downgrade the decision to a gotcha',
+        summary: 'Type change would bypass the mandatory review',
+        body: 'An agent must not be able to change the type of a governed memory.',
+        target_handle: encodeHandle(TARGET_MEMORY_ID, TARGET_CURRENT_REVISION),
+      };
+
+      await expect(rememberHandler(input, CTX, deps)).rejects.toMatchObject({
+        code: ErrorCode.INVALID_REFERENCE,
+      });
+      expect(stagingRepo.insertedItemCount).toBe(0);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// SEC M-2: capture-time scan runs over a normalized copy
+// ---------------------------------------------------------------------------
+
+describe('rememberHandler — secret scan over a normalized copy (SEC M-2)', () => {
+  it('zero-width-split AWS key → PERMISSION_DENIED, nothing persisted', async () => {
+    const stagingRepo = new InMemoryStagingRepository();
+    const deps = makeDeps([], stagingRepo);
+    await expect(
+      rememberHandler(
+        { ...BASE_ADD, body: 'Credential AKIA\u200bIOSFODNN7\u2060EXAMPLE used by the job.' },
+        CTX,
+        deps,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.PERMISSION_DENIED });
+    expect(stagingRepo.insertedItemCount).toBe(0);
   });
 });

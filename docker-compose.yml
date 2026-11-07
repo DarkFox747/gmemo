@@ -38,8 +38,7 @@ services:
       DATABASE_URL: "postgres://gmemo:gmemo@db:5432/gmemo"  # local, TLS not enforced (NODE_ENV!=production)
       NODE_ENV: development
       AUTH_DEV_BYPASS: "true"        # Gate-1 stub; guarded -- impossible under NODE_ENV=production
-      JUDGE_STUB: "true"             # deterministic judge; makes BEDROCK_MODEL_ID optional (guarded vs prod)
-      JUDGE_STUB_VERDICT: "accepted" # stub verdict, so staged items actually promote
+      JUDGE_STUB: "true"             # DeterministicJudge (rule-based verdicts); makes BEDROCK_MODEL_ID optional (guarded vs prod)
       PROMOTE_OIDC_DEV_BYPASS: "true" # /promote OIDC bypass; makes GITHUB_OIDC_AUDIENCE optional (guarded vs prod)
       EMBEDDER_STUB: "true"          # deterministic embedder; removes the Bedrock/AWS_REGION requirement (guarded vs prod)
       PORT: "3000"

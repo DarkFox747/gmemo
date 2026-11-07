@@ -11,6 +11,36 @@ export function sha256Hex(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
 }
 
+export interface ContentHashInput {
+  op: string;
+  type: string;
+  title: string;
+  summary: string;
+  body: string;
+  fields?: Record<string, unknown>;
+  /** Target memory id for non-add ops, `null` for add. */
+  target: string | null;
+}
+
+/**
+ * Returns the SHA-256 hex digest of the fixed-key-order canonical JSON of a
+ * staged item. Extracted verbatim from the capture path (remember step 5):
+ * the key order and the `fields ?? {}` default MUST NOT change, otherwise the
+ * hashes of already-staged rows (and their UNIQUE dedup) would stop matching.
+ */
+export function computeContentHash(input: ContentHashInput): string {
+  const canonical = JSON.stringify({
+    op: input.op,
+    type: input.type,
+    title: input.title,
+    summary: input.summary,
+    body: input.body,
+    fields: input.fields ?? {},
+    target: input.target,
+  });
+  return sha256Hex(canonical);
+}
+
 /**
  * Compares two strings in constant time to prevent timing-based side-channel
  * attacks. Length is checked first; if lengths differ, returns false without

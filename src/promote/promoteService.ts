@@ -1,28 +1,35 @@
 /**
- * PromoteService — orchestrates the per-session promotion state machine.
+ * PromoteService — orchestrates the per-session promotion state machine (design C1).
  *
  * Algorithm (sequential; fail-closed; idempotent):
- *   1. fetchPromotableItems (promoted_at IS NULL — already-applied items excluded).
+ *   1. fetchPromotableItems (promoted_at IS NULL, reviewed_at IS NULL, project re-assert).
  *      Empty → return no_op immediately.
- *   2. For each item (in order):
- *      a. Skip if judge_state === 'rejected' (already quarantined on a prior run).
- *      b. Determine verdict — reuse persisted state ('accepted'/'uncertain') or judge fresh:
- *           sanitize (assertNoSecrets) → quarantine(secret_detected, redact=true) + continue
- *           judge.evaluate → recordVerdict.
- *         A caught judge error is NEVER mapped to 'accepted' (BedrockJudge is already
- *         fail-closed to 'uncertain'; the service adds no extra mapping).
- *      c. Route on verdict:
- *           accepted  → applyAccepted → applied / stale→quarantine / dup→quarantine / already
- *           rejected  → quarantineItem
- *           uncertain → leave un-applied (verdict persisted)
- *   3. Terminal status: all applied → promoted; none applied + none uncertain → rejected;
- *      otherwise → partially_promoted. finalizeSession.
- *   4. recordPromote audit.
- *   5. Return PromoteOutcome.
+ *   2. For each item (in order), skipping judge_state === 'rejected' (already terminal):
+ *      a. Sanitize (pure, S1–S4): bounds → credentials → embedded instructions → PII mask.
+ *         A block quarantines the item (+ leak_detected for credentials). PII is masked
+ *         and persisted with its recomputed content_hash BEFORE the judge runs.
+ *      b. Decision: a pending item is judged against up to 3 similar active memories
+ *         (findJudgeContext) and the result passes through normalizeJudgeResult. A
+ *         context failure or a throwing judge fails closed (uncertain/confidence/0) —
+ *         never accepted. A non-pending item reuses its persisted decision (no re-judge).
+ *      c. routeDecision (pure, R1–R8) → apply | queue | quarantine, then side effects:
+ *           queue      → recordDecision + review_enqueued, only when not already queued
+ *           quarantine → quarantineItem (+ leak_detected for security_second_layer)
+ *           apply      → recordDecision (fresh decisions) → embed (fail-soft) → applyAccepted:
+ *                          applied/already → applied; stale → review queue (HU-11.3);
+ *                          duplicate → quarantine duplicate_content;
+ *                          review_required (target type differs / mandatory) → mandatory queue
+ *      An item that throws is logged (id + error name), left pending and not counted.
+ *   3. Terminal status: any item failed → partially_promoted; all applied → promoted;
+ *      none applied + none queued → rejected; otherwise → partially_promoted. finalizeSession.
+ *   4. recordPromote audit. 5. Return PromoteOutcome.
  *
- * Idempotency: step 1's promoted_at IS NULL filter + applyAccepted's FOR UPDATE +
- * promoted_at IS NULL guard mean a re-run applies nothing already applied and never
- * double-writes memory or revision rows.
+ * Idempotency: the promoted_at IS NULL filter, the rejected skip, the "already
+ * queued" check (wasQueued) and applyAccepted's FOR UPDATE + promoted_at guard mean
+ * a re-run never re-applies, re-quarantines, re-queues or re-notifies an item.
+ * Notifications are sent after the state write, at most once (safeNotify).
+ *
+ * Logging: item ids and category names only — never content or judge text.
  */
 
 import type { TenantContext, ActorIdentity, AuditLogger, RequestContext } from '../mcp/context.js';
@@ -30,11 +37,16 @@ import type {
   PromotionRepository,
   PromotionItemRow,
   ApplyContext,
-  Verdict,
 } from '../db/promotionRepository.js';
-import type { Judge } from '../judge/judge.js';
+import type { Judge, JudgeContextItem, JudgeResult } from '../judge/judge.js';
+import { failClosed, normalizeJudgeResult } from '../judge/judge.js';
 import type { Embedder } from '../embedder/embedder.js';
-import { assertNoSecrets } from '../security/secretScan.js';
+import type { Notifier } from '../notify/notifier.js';
+import { safeNotify } from '../notify/notifier.js';
+import { computeContentHash } from '../security/hash.js';
+import { sanitizeItem, mergeFlags } from './sanitize.js';
+import { routeDecision, STALE_TARGET_DECISION } from './routing.js';
+import type { RoutingConfig, RoutingDecision } from './routing.js';
 import { logger } from '../observability/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -54,8 +66,11 @@ export interface PromoteOutcome {
   applied: number;
   deduped: number;
   quarantined: number;
+  /** Items left in (or newly placed in) the human review queue. */
   uncertain: number;
 }
+
+type ItemOutcome = 'applied' | 'deduped' | 'quarantined' | 'queued' | 'skipped';
 
 // ---------------------------------------------------------------------------
 // Service
@@ -76,24 +91,23 @@ export class PromoteService implements PromoteServiceLike {
       judge: Judge;
       auditLogger: AuditLogger;
       embedder: Embedder;
+      notifier: Notifier;
+      routing: RoutingConfig;
     },
   ) {}
 
   async promote(sessionId: string, meta: PromoteMeta): Promise<PromoteOutcome> {
-    const { promotionRepository, judge, auditLogger } = this.deps;
+    const { promotionRepository, auditLogger } = this.deps;
 
-    // Step 1: Fetch all promotable items (promoted_at IS NULL).
-    // Pass projectId so the repository JOIN re-asserts tenant ownership (L3 fix).
+    // Step 1: pass projectId so the repository JOIN re-asserts tenant ownership.
     const items: PromotionItemRow[] = await promotionRepository.fetchPromotableItems(
       sessionId,
       meta.tenant.projectId,
     );
     if (items.length === 0) {
-      // Nothing to do — idempotent re-run after a completed promote.
       return { status: 'no_op', applied: 0, deduped: 0, quarantined: 0, uncertain: 0 };
     }
 
-    // Step 2: Build per-session apply context.
     const ctx: ApplyContext = {
       projectId: meta.tenant.projectId,
       repoId: meta.tenant.repoId,
@@ -106,110 +120,35 @@ export class PromoteService implements PromoteServiceLike {
     let deduped = 0;
     let quarantined = 0;
     let uncertain = 0;
+    let errored = 0;
 
-    // Step 3: Process each item sequentially (Decision 1 — per-item txn granularity).
+    // Step 2: sequential, per-item transactions (one poisoned item cannot roll back others).
     for (const item of items) {
-      // 3a: Skip items already quarantined on a prior run (no duplicate quarantine).
-      if (item.judge_state === 'rejected') {
+      let r: ItemOutcome;
+      try {
+        r = await this.processItem(item, ctx);
+      } catch (err) {
+        // The item stays promotable for a re-run; it is not counted. Id + error
+        // name only — an error message may echo content.
+        errored++;
+        logger.error('[promote] item failed — left pending for a re-run', {
+          itemId: item.id,
+          errorName: errorName(err),
+        });
         continue;
       }
-
-      // 3b: Determine verdict — reuse persisted state or judge fresh.
-      let verdict: Verdict;
-
-      if (item.judge_state === 'accepted' || item.judge_state === 'uncertain') {
-        // Verdict already persisted from a prior partial run — reuse it.
-        verdict = item.judge_state as Verdict;
-      } else {
-        // item.judge_state === 'pending' — sanitize then judge.
-
-        // Sanitize: assertNoSecrets is fail-closed; any finding → quarantine + skip.
-        // fields is included (mirrors remember.ts step 4) — promotion is the last
-        // barrier before authoritative memory; must be at least as thorough (M1 fix).
-        try {
-          assertNoSecrets(item.title, item.summary, item.body, JSON.stringify(item.fields ?? {}));
-        } catch {
-          // Secret found — quarantine with redaction and move to next item.
-          await promotionRepository.quarantineItem(item, ctx, 'secret_detected', true);
-          quarantined++;
-          continue;
-        }
-
-        // Judge (BedrockJudge is already fail-closed → uncertain on any error;
-        // the service NEVER maps a caught judge error to 'accepted').
-        verdict = await judge.evaluate({
-          op: item.op,
-          type: item.type,
-          title: item.title,
-          summary: item.summary,
-          body: item.body,
-          fields: item.fields,
-        });
-
-        // Persist verdict for non-rejected items so re-runs can reuse it without
-        // re-judging. For rejected: quarantineItem's in-txn MARK_QUARANTINED_SQL
-        // sets judge_state='rejected' atomically with the quarantine insert, so a
-        // pre-quarantine recordVerdict would leave state inconsistent if quarantine
-        // then fails (L2 fix — do NOT add recordVerdict back for the rejected path).
-        if (verdict !== 'rejected') {
-          await promotionRepository.recordVerdict(item.id, verdict, null);
-        }
-      }
-
-      // 3c: Route on verdict.
-      if (verdict === 'accepted') {
-        // Compute embedding fail-soft before apply (Decision 8).
-        // deprecate has no content change — skip embed and pass null.
-        let embedding: number[] | null = null;
-        if (item.op !== 'deprecate') {
-          try {
-            embedding = await this.deps.embedder.embed(
-              `${item.title}\n${item.summary}\n${item.body}`,
-            );
-          } catch {
-            logger.warn(
-              `[promote] embedding failed for item ${item.id} — writing NULL (fail-soft)`,
-            );
-            embedding = null;
-          }
-        }
-        const r = await promotionRepository.applyAccepted(item, ctx, embedding);
-        switch (r.status) {
-          case 'applied':
-            applied++;
-            if (r.deduped) deduped++;
-            break;
-          case 'stale':
-            await promotionRepository.quarantineItem(item, ctx, 'stale_target', false);
-            quarantined++;
-            break;
-          case 'duplicate':
-            await promotionRepository.quarantineItem(item, ctx, 'duplicate_content', false);
-            quarantined++;
-            break;
-          case 'already':
-            // Idempotent re-run for an already-applied item — count as applied.
-            applied++;
-            break;
-        }
-      } else if (verdict === 'rejected') {
-        await promotionRepository.quarantineItem(
-          item,
-          ctx,
-          item.judge_reason ?? 'judge_rejected',
-          false,
-        );
-        quarantined++;
-      } else {
-        // uncertain — leave un-applied; verdict was already persisted above.
-        uncertain++;
-      }
+      if (r === 'applied' || r === 'deduped') applied++;
+      if (r === 'deduped') deduped++;
+      if (r === 'quarantined') quarantined++;
+      if (r === 'queued') uncertain++;
     }
 
-    // Step 4: Determine terminal status and finalize the session.
-    const total = items.length;
+    // Step 3: terminal status. A failed item means the session is never fully
+    // promoted nor fully rejected.
     let terminalStatus: 'promoted' | 'rejected' | 'partially_promoted';
-    if (applied === total) {
+    if (errored > 0) {
+      terminalStatus = 'partially_promoted';
+    } else if (applied === items.length) {
       terminalStatus = 'promoted';
     } else if (applied === 0 && uncertain === 0) {
       terminalStatus = 'rejected';
@@ -218,7 +157,7 @@ export class PromoteService implements PromoteServiceLike {
     }
     await promotionRepository.finalizeSession(sessionId, terminalStatus);
 
-    // Step 5: Audit log (actorKind 'ci', action 'promote').
+    // Step 4: audit (actorKind 'ci', action 'promote').
     const reqCtx: RequestContext = { tenant: meta.tenant, actor: meta.actor };
     await auditLogger.recordPromote(reqCtx, {
       sessionId,
@@ -229,7 +168,237 @@ export class PromoteService implements PromoteServiceLike {
       mergeSha: meta.mergeSha,
     });
 
-    // Step 6: Return outcome.
     return { status: terminalStatus, applied, deduped, quarantined, uncertain };
   }
+
+  private async processItem(fetched: PromotionItemRow, ctx: ApplyContext): Promise<ItemOutcome> {
+    const { promotionRepository: repo, notifier } = this.deps;
+
+    // Already quarantined on a prior run — never quarantine twice.
+    if (fetched.judge_state === 'rejected') return 'skipped';
+
+    // Already in the review queue: suppresses duplicate writes/notifications on re-runs.
+    const wasQueued = fetched.judge_state === 'uncertain' || fetched.mandatory_review;
+
+    // --- Sanitize stage (S1–S4) ---
+    const s = sanitizeItem(fetched);
+    const flags = mergeFlags(fetched.sanitize_flags, s.flags);
+
+    if (s.block) {
+      if (s.block.reason === 'sanitize_failed') {
+        logger.warn('[promote] sanitize failed — quarantining (fail-closed)', {
+          itemId: fetched.id,
+        });
+      }
+      // S3 snapshot is PII-masked; S1/S2 are redacted by the repository.
+      const snapshot = s.masked ? { ...fetched, ...s.masked } : fetched;
+      await repo.quarantineItem(snapshot, ctx, {
+        reason: s.block.reason,
+        redact: s.block.redact,
+        decision: null,
+        sanitizeFlags: flags,
+      });
+      if (s.block.leak) {
+        await safeNotify(notifier, ctx.projectId, {
+          type: 'leak_detected',
+          itemId: fetched.id,
+          categories: s.block.categories,
+        });
+      }
+      return 'quarantined';
+    }
+
+    let item: PromotionItemRow = fetched;
+    if (s.masked) {
+      // S4: persist masked content + recomputed hash before the judge sees it.
+      const contentHash = computeContentHash({
+        op: fetched.op,
+        type: fetched.type,
+        title: s.masked.title,
+        summary: s.masked.summary,
+        body: s.masked.body,
+        fields: s.masked.fields,
+        target: fetched.target_memory_id,
+      });
+      const masked: PromotionItemRow = {
+        ...fetched,
+        ...s.masked,
+        content_hash: contentHash,
+        sanitize_flags: flags,
+      };
+      const res = await repo.persistMasked(fetched.id, s.masked, contentHash, flags);
+      if (res === 'hash_conflict') {
+        await repo.quarantineItem(masked, ctx, {
+          reason: 'duplicate_content',
+          redact: false,
+          decision: null,
+          sanitizeFlags: flags,
+        });
+        return 'quarantined';
+      }
+      item = masked;
+    }
+
+    // --- Decision stage ---
+    const decision: RoutingDecision =
+      item.judge_state === 'pending' ? await this.judgeItem(item, ctx) : fromPersisted(item);
+
+    const route = routeDecision(decision, item, this.deps.routing);
+
+    switch (route.kind) {
+      case 'quarantine': {
+        await repo.quarantineItem(item, ctx, {
+          reason: route.reason,
+          redact: route.redact,
+          decision: route.persist,
+          sanitizeFlags: route.leak ? mergeFlags(flags, { leak: true }) : flags,
+        });
+        if (route.leak) {
+          await safeNotify(notifier, ctx.projectId, {
+            type: 'leak_detected',
+            itemId: item.id,
+            categories: ['security_second_layer'],
+          });
+        }
+        return 'quarantined';
+      }
+
+      case 'queue': {
+        if (!wasQueued) {
+          await repo.recordDecision(item.id, route.persist, flags);
+          await safeNotify(notifier, ctx.projectId, {
+            type: 'review_enqueued',
+            itemId: item.id,
+            queue: route.queue,
+            criterion: route.persist.criterion,
+          });
+        }
+        return 'queued';
+      }
+
+      case 'apply': {
+        // Persist a fresh decision before apply, so a crash re-uses it on re-run.
+        if (item.judge_state === 'pending') {
+          await repo.recordDecision(item.id, route.persist, flags);
+        }
+        const r = await repo.applyAccepted(
+          item,
+          ctx,
+          await this.embed(item),
+          this.deps.routing.mandatoryReviewTypes,
+        );
+        switch (r.status) {
+          case 'applied':
+            return r.deduped ? 'deduped' : 'applied';
+          case 'already':
+            return 'applied';
+          case 'review_required':
+            // SEC M-1: the target's type differs or is mandatory → human review.
+            await repo.recordDecision(item.id, { ...route.persist, mandatoryReview: true }, flags);
+            await safeNotify(notifier, ctx.projectId, {
+              type: 'review_enqueued',
+              itemId: item.id,
+              queue: 'mandatory',
+              criterion: route.persist.criterion,
+            });
+            return 'queued';
+          case 'stale':
+            // HU-11.3: stale target → human review queue, never quarantine.
+            await repo.recordDecision(
+              item.id,
+              { ...STALE_TARGET_DECISION, confidence: route.persist.confidence },
+              flags,
+            );
+            await safeNotify(notifier, ctx.projectId, {
+              type: 'review_enqueued',
+              itemId: item.id,
+              queue: 'uncertain',
+              criterion: 'stale_target',
+            });
+            return 'queued';
+          case 'duplicate':
+            await repo.quarantineItem(item, ctx, {
+              reason: 'duplicate_content',
+              redact: false,
+              decision: route.persist,
+              sanitizeFlags: flags,
+            });
+            return 'quarantined';
+        }
+      }
+    }
+  }
+
+  /**
+   * Judges a pending item against its context. Never throws and never returns an
+   * unvalidated result: context failure / judge failure → failClosed (queued).
+   */
+  private async judgeItem(item: PromotionItemRow, ctx: ApplyContext): Promise<JudgeResult> {
+    let context: JudgeContextItem[];
+    try {
+      context = await this.deps.promotionRepository.findJudgeContext(
+        ctx.projectId,
+        { title: item.title, summary: item.summary },
+        item.target_memory_id,
+      );
+    } catch (err) {
+      logger.warn('[promote] judge context unavailable — failing closed to review', {
+        itemId: item.id,
+        errorName: errorName(err),
+      });
+      return failClosed('judge_context_unavailable');
+    }
+
+    let result: JudgeResult;
+    try {
+      result = await this.deps.judge.evaluate(
+        {
+          op: item.op,
+          type: item.type,
+          title: item.title,
+          summary: item.summary,
+          body: item.body,
+          fields: item.fields,
+        },
+        context,
+      );
+    } catch (err) {
+      logger.warn('[promote] judge failed — failing closed to review', {
+        itemId: item.id,
+        errorName: errorName(err),
+      });
+      return failClosed('judge_unavailable');
+    }
+
+    return normalizeJudgeResult(result, context, { itemId: item.id });
+  }
+
+  /** Embedding is fail-soft; deprecate has no content change (null). */
+  private async embed(item: PromotionItemRow): Promise<number[] | null> {
+    if (item.op === 'deprecate') return null;
+    try {
+      return await this.deps.embedder.embed(`${item.title}\n${item.summary}\n${item.body}`);
+    } catch (err) {
+      logger.warn('[promote] embedding failed — writing NULL (fail-soft)', {
+        itemId: item.id,
+        errorName: errorName(err),
+      });
+      return null;
+    }
+  }
+}
+
+/** Rebuilds the decision of a non-pending item from its persisted columns. */
+function fromPersisted(item: PromotionItemRow): RoutingDecision {
+  return {
+    verdict: item.judge_state === 'accepted' ? 'accepted' : 'uncertain',
+    criterion: item.judge_criterion ?? 'confidence',
+    confidence: item.judge_confidence,
+    reason: item.judge_reason ?? '',
+    relatedMemoryId: item.related_memory_id,
+  };
+}
+
+function errorName(err: unknown): string {
+  return err instanceof Error ? err.name : 'unknown';
 }

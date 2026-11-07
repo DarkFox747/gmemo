@@ -28,6 +28,7 @@ import type {
   InsertStagingItemParams,
 } from '../../src/db/stagingRepository.js';
 import type { TenantContext } from '../../src/mcp/context.js';
+import type { Notifier, NotifyEvent } from '../../src/notify/notifier.js';
 import type { MemoryType } from '../../src/contracts/memory.js';
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,9 @@ export interface FakeStagingItem {
   targetMemoryId?: string | null;
   targetRevision?: number | null;
   judgeState?: StagingItemRow['judge_state'];
+  mandatoryReview?: boolean;
+  /** Defaults to null (not applied). */
+  promotedAt?: Date | null;
   authorIdentity?: string;
   /** Defaults to 2025-01-01T00:00:00Z when omitted. */
   createdAt?: Date;
@@ -81,6 +85,9 @@ export class InMemoryStagingRepository implements StagingRepository {
    *   expect(stagingRepo.insertedItemCount).toBe(0)  // nothing persisted
    */
   public insertedItemCount = 0;
+
+  /** Params of every non-dedup insert, in order (lets tests assert the queue columns). */
+  public readonly insertedParams: InsertStagingItemParams[] = [];
 
   /** tenantKey ('projectId:repoId:branch') → session id */
   private readonly sessionsByKey = new Map<string, string>();
@@ -115,8 +122,9 @@ export class InMemoryStagingRepository implements StagingRepository {
         target_memory_id: item.targetMemoryId ?? null,
         target_revision: item.targetRevision ?? null,
         judge_state: item.judgeState ?? 'pending',
+        mandatory_review: item.mandatoryReview ?? false,
         created_at: item.createdAt ?? DEFAULT_CREATED_AT,
-        promoted_at: null,
+        promoted_at: item.promotedAt ?? null,
         promoted_memory_id: null,
       };
       this.storedItems.set(item.id, { sessionId: item.sessionId, data });
@@ -179,12 +187,14 @@ export class InMemoryStagingRepository implements StagingRepository {
       target_memory_id: p.targetMemoryId,
       target_revision: p.targetRevision,
       judge_state: p.judgeState,
+      mandatory_review: p.mandatoryReview,
       created_at: new Date(),
       promoted_at: null,
       promoted_memory_id: null,
     };
     this.storedItems.set(id, { sessionId, data });
     this.insertedItemCount++;
+    this.insertedParams.push(p);
     return { id, judgeState: data.judge_state, deduped: false };
   }
 
@@ -209,5 +219,18 @@ export class InMemoryStagingRepository implements StagingRepository {
 
     this.storedItems.delete(itemId);
     return true;
+  }
+}
+
+/** Notifier fake that records every event; optionally throws to test best-effort behaviour. */
+export class RecordingNotifier implements Notifier {
+  public readonly events: Array<{ projectId: string; event: NotifyEvent }> = [];
+
+  constructor(private readonly shouldThrow = false) {}
+
+  notify(projectId: string, event: NotifyEvent): Promise<void> {
+    this.events.push({ projectId, event });
+    if (this.shouldThrow) return Promise.reject(new Error('notifier down'));
+    return Promise.resolve();
   }
 }

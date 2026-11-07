@@ -79,7 +79,10 @@ en local no hace falta `Authorization`.
 | `DATABASE_URL` | — (requerida) | Postgres |
 | `AUTH_DEV_BYPASS` | `false` | solo dev |
 | `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID_ALLOWLIST`, `COGNITO_REQUIRED_SCOPE` | — | requeridas si `AUTH_DEV_BYPASS` no es `true` |
-| `JUDGE_STUB`, `JUDGE_STUB_VERDICT` | `false`, `uncertain` | veredicto: `accepted` / `rejected` / `uncertain` |
+| `JUDGE_STUB` | `false` | juez determinista basado en reglas (solo dev) |
+| `JUDGE_STUB_CONFIDENCE` | `0.9` | confianza de un veredicto `accepted` del juez determinista (0 a 1) |
+| `JUDGE_CONFIDENCE_THRESHOLD` | `0.8` | un `accepted` con confianza menor va a la cola de revisión humana (0 a 1) |
+| `MANDATORY_REVIEW_TYPES` | `decision,constraint,domain_rule` | tipos de memoria que siempre requieren revisión humana (lista CSV; vacía permitida) |
 | `BEDROCK_MODEL_ID` | — | requerida si `JUDGE_STUB` no es `true` |
 | `PROMOTE_OIDC_DEV_BYPASS` | `false` | solo dev |
 | `GITHUB_OIDC_AUDIENCE` | — | requerida si `PROMOTE_OIDC_DEV_BYPASS` no es `true` |

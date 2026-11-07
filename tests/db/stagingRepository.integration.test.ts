@@ -172,6 +172,9 @@ describeWithDb('PgStagingRepository integration', () => {
       targetRevision: null,
       judgeState: 'pending' as const,
       authorIdentity: 'integ-test-user',
+      judgeCriterion: null,
+      mandatoryReview: false,
+      judgeReason: null,
     };
 
     const result1 = await repo!.insertStagingItem(sessionId, params);
@@ -193,6 +196,38 @@ describeWithDb('PgStagingRepository integration', () => {
       [sessionId, params.contentHash],
     );
     expect(rows[0].cnt).toBe(1);
+  });
+
+  it('insertStagingItem persists judge_criterion, mandatory_review and judge_reason (stale capture)', async () => {
+    const tenant = { projectId: projectId1, repoId: repoId1, branch: 'test-stale-branch' };
+    const sessionId = await repo!.findOrCreateOpenSession(tenant, 'integ-test-user');
+
+    const { id } = await repo!.insertStagingItem(sessionId, {
+      op: 'add',
+      type: 'decision',
+      title: 'Stale capture test',
+      summary: 'Summary for the stale capture test.',
+      body: 'Body text for the stale capture test.',
+      fields: {},
+      contentHash: 'integ-stale-content-hash-001',
+      targetMemoryId: null,
+      targetRevision: null,
+      judgeState: 'uncertain',
+      authorIdentity: 'integ-test-user',
+      judgeCriterion: 'stale_target',
+      mandatoryReview: true,
+      judgeReason: 'target revision is no longer current',
+    });
+
+    const { rows } = await pool!.query(
+      `SELECT judge_state, judge_criterion, mandatory_review, judge_reason
+         FROM staging_item WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0].judge_state).toBe('uncertain');
+    expect(rows[0].judge_criterion).toBe('stale_target');
+    expect(rows[0].mandatory_review).toBe(true);
+    expect(rows[0].judge_reason).toBe('target revision is no longer current');
   });
 
   // -------------------------------------------------------------------------
@@ -223,6 +258,9 @@ describeWithDb('PgStagingRepository integration', () => {
       targetRevision: null,
       judgeState: 'pending',
       authorIdentity: 'integ-test-user',
+      judgeCriterion: null,
+      mandatoryReview: false,
+      judgeReason: null,
     });
 
     // Insert one item into project-2's session.
@@ -238,6 +276,9 @@ describeWithDb('PgStagingRepository integration', () => {
       targetRevision: null,
       judgeState: 'pending',
       authorIdentity: 'integ-test-user',
+      judgeCriterion: null,
+      mandatoryReview: false,
+      judgeReason: null,
     });
 
     // List for tenant1 must contain only project-1's item.
@@ -285,6 +326,9 @@ describeWithDb('PgStagingRepository integration', () => {
       targetRevision: null,
       judgeState: 'pending',
       authorIdentity: 'integ-test-user',
+      judgeCriterion: null,
+      mandatoryReview: false,
+      judgeReason: null,
     });
 
     // Attempting to discard via a different tenant (tenant2) returns false —

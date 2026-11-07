@@ -22,6 +22,7 @@ import type { Judge } from '../judge/judge.js';
 import type { PromoteServiceLike } from '../promote/promoteService.js';
 import type { AuthRepository } from '../db/authRepository.js';
 import type { Embedder } from '../embedder/embedder.js';
+import type { Notifier } from '../notify/notifier.js';
 
 // ---------------------------------------------------------------------------
 // Core identity / context types
@@ -175,6 +176,8 @@ export interface HandlerDeps {
   semanticFallbackMinResults: number;
   /** k: number of nearest-neighbour rows to retrieve in Phase 2. */
   semanticFallbackK: number;
+  /** Best-effort review/leak notifications (call via safeNotify; never fails a write). */
+  notifier: Notifier;
 }
 
 /**
@@ -214,6 +217,8 @@ export interface AppServices extends AuthServices {
   semanticFallbackMinResults: number;
   /** k: number of nearest-neighbour rows to retrieve in Phase-2 semantic fallback. */
   semanticFallbackK: number;
+  /** Notifier seam — shared by remember (capture) and PromoteService. */
+  notifier: Notifier;
 }
 
 /**

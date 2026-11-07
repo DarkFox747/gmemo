@@ -74,15 +74,21 @@ Source: dev-harness
 
 ### Requirement: Compose boots from scratch
 
-`docker compose down -v && docker compose up --build` MUST bring up `db` (Postgres 16 with pgvector), run `migrate` to completion (all numbered migrations plus the dev seed) and leave `app` healthy on port 3000. No AWS credentials or `.env` file are needed. The `app` service SHALL run with every dev stub enabled: `AUTH_DEV_BYPASS`, `JUDGE_STUB` (verdict `accepted`), `PROMOTE_OIDC_DEV_BYPASS` and `EMBEDDER_STUB`.
+`docker compose down -v && docker compose up --build` MUST bring up `db` (Postgres 16 with pgvector), run `migrate` to completion (all numbered migrations plus the dev seed) and leave `app` healthy on port 3000. No AWS credentials or `.env` file are needed. The `app` service SHALL run with every dev stub enabled: `AUTH_DEV_BYPASS`, `JUDGE_STUB=true` (deterministic judge with heuristic rules and default `JUDGE_STUB_CONFIDENCE` 0.9; `JUDGE_STUB_VERDICT` no longer exists), `PROMOTE_OIDC_DEV_BYPASS` and `EMBEDDER_STUB`.
 
-Source: demo-baseline
+Source: demo-baseline, judge-structured-verdict
 
 #### Scenario: Clean boot
 
 - GIVEN Docker is running and no gmemo volumes exist
 - WHEN running `docker compose up --build`
 - THEN `migrate` exits 0, including migration `0005` (`CREATE EXTENSION vector`), and `app` reports healthy
+
+#### Scenario: Smoke item still promotes
+
+- GIVEN a fresh compose stack
+- WHEN `pnpm smoke` runs
+- THEN the smoke `gotcha` matches the deterministic judge's default rule (accepted, 0.9 >= threshold) and is applied, and the run exits 0
 
 #### Scenario: Missing stub is caught by config, not by a silent fallback
 
@@ -138,5 +144,6 @@ Source: demo-baseline
 | Requirement | Source | Superseded by |
 |---|---|---|
 | Compose `db` uses plain `postgres:16` | dev-harness | demo-baseline (pgvector image, required by migration 0005) |
-| Compose app sets only `DATABASE_URL`, `AUTH_DEV_BYPASS`, `NODE_ENV` | dev-harness | demo-baseline (all stubs including `EMBEDDER_STUB` and `JUDGE_STUB_VERDICT=accepted`) |
+| Compose app sets only `DATABASE_URL`, `AUTH_DEV_BYPASS`, `NODE_ENV` | dev-harness | demo-baseline (all stubs including `EMBEDDER_STUB` and `JUDGE_STUB`) |
 | Seed membership role is viewer or higher | dev-harness | demo-baseline (seeded as `contributor` for the smoke test's write steps) |
+| Compose app sets `JUDGE_STUB_VERDICT=accepted` (constant verdict) | demo-baseline | judge-structured-verdict (deterministic heuristic judge, `JUDGE_STUB_CONFIDENCE`) |

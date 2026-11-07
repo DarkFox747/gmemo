@@ -17,13 +17,41 @@
 import pg from 'pg';
 import type { MemoryType } from '../contracts/memory.js';
 import type { TenantContext } from '../mcp/context.js';
+import type { DecisionCriterion, JudgeContextItem, Verdict } from '../judge/judge.js';
 import { toVectorParam } from './vector.js';
+import { computeContentHash } from '../security/hash.js';
 
 // ---------------------------------------------------------------------------
 // Types (exported for use by PromoteService and fakes)
 // ---------------------------------------------------------------------------
 
-export type Verdict = 'accepted' | 'rejected' | 'uncertain';
+/** Detector flags persisted on staging_item.sanitize_flags (categories only, never matched text). */
+export interface SanitizeFlags {
+  leak?: true;
+  secrets?: string[];
+  injection?: string[];
+  pii?: string[];
+}
+
+/** Decision columns written in one statement per state transition. */
+export interface PersistedDecision {
+  verdict: Verdict;
+  criterion: DecisionCriterion;
+  confidence: number | null;
+  reason: string;
+  relatedMemoryId: string | null;
+  mandatoryReview: boolean;
+}
+
+export interface QuarantineInput {
+  /** quarantine.judge_reason (code). */
+  reason: string;
+  /** Sentinel title/summary/body AND fields '{}' when true. */
+  redact: boolean;
+  /** null on sanitize-stage quarantines (no judge decision exists). */
+  decision: PersistedDecision | null;
+  sanitizeFlags: SanitizeFlags;
+}
 
 /** Projection of a staging_item row returned by fetchPromotableItems. */
 export interface PromotionItemRow {
@@ -37,8 +65,15 @@ export interface PromotionItemRow {
   content_hash: string;
   target_memory_id: string | null;
   target_revision: number | null;
+  /** Current type of the target memory (same project); null for add or a missing target. */
+  target_type: MemoryType | null;
   judge_state: 'pending' | 'accepted' | 'uncertain' | 'rejected';
   judge_reason: string | null;
+  judge_criterion: DecisionCriterion | null;
+  judge_confidence: number | null;
+  related_memory_id: string | null;
+  mandatory_review: boolean;
+  sanitize_flags: SanitizeFlags;
   author_identity: string;
   promoted_at: Date | null;
   promoted_memory_id: string | null;
@@ -60,7 +95,10 @@ export type ApplyResult =
   | { status: 'applied'; memoryId: string; deduped: boolean }
   | { status: 'stale' }
   | { status: 'duplicate' }
-  | { status: 'already' }; // promoted_at already set — idempotent no-op
+  | { status: 'already' } // promoted_at already set — idempotent no-op
+  // Target type differs from the item type, or is a mandatory-review type:
+  // nothing written, the item must go to the human review queue (SEC M-1).
+  | { status: 'review_required' };
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -77,26 +115,52 @@ export interface PromotionRepository {
    */
   fetchPromotableItems(sessionId: string, projectId: string): Promise<PromotionItemRow[]>;
 
-  /** Persists the judge verdict and optional reason on the item row. */
-  recordVerdict(itemId: string, verdict: Verdict, reason: string | null): Promise<void>;
+  /**
+   * Up to 3 similar ACTIVE memories of the project (BM25 OR-query, no embedder).
+   * excludeMemoryId (the item's target) is never returned. Empty tokens -> [].
+   */
+  findJudgeContext(
+    projectId: string,
+    text: { title: string; summary: string },
+    excludeMemoryId: string | null,
+  ): Promise<JudgeContextItem[]>;
+
+  /**
+   * Overwrites the staging row with PII-masked content and its recomputed hash.
+   * Returns 'hash_conflict' when UNIQUE(session_id, content_hash) is violated.
+   */
+  persistMasked(
+    itemId: string,
+    content: { title: string; summary: string; body: string; fields: Record<string, unknown> },
+    contentHash: string,
+    flags: SanitizeFlags,
+  ): Promise<'ok' | 'hash_conflict'>;
+
+  /** Persists the structured judge decision on the item row (one write). */
+  recordDecision(itemId: string, d: PersistedDecision, flags: SanitizeFlags): Promise<void>;
 
   /**
    * Applies one accepted item inside a per-item transaction.
    * FOR UPDATE lock + promoted_at IS NULL guard enforces first-writer-wins.
    * embedding is the pre-computed vector (null when the embed failed or op=deprecate).
+   * mandatoryTypes: a target of one of these types (or of a type different from
+   * the item's) is never mutated → { status: 'review_required' }.
    */
-  applyAccepted(item: PromotionItemRow, ctx: ApplyContext, embedding: number[] | null): Promise<ApplyResult>;
+  applyAccepted(
+    item: PromotionItemRow,
+    ctx: ApplyContext,
+    embedding: number[] | null,
+    mandatoryTypes: ReadonlySet<MemoryType>,
+  ): Promise<ApplyResult>;
 
   /**
    * Snapshots the item in quarantine and marks it terminal (rejected).
-   * When redact=true, title/summary/body are replaced with the redact sentinel.
+   * When q.redact=true, title/summary/body are replaced with the redact sentinel
+   * and fields with {} - in both the quarantine row and the staging row, and the
+   * quarantine content_hash is the hash of the redacted content.
+   * No-op (nothing written) when the item was applied or human-reviewed meanwhile.
    */
-  quarantineItem(
-    item: PromotionItemRow,
-    ctx: ApplyContext,
-    reason: string,
-    redact: boolean,
-  ): Promise<void>;
+  quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<void>;
 
   /** Sets the session terminal status after all items have been processed. */
   finalizeSession(
@@ -116,20 +180,48 @@ WHERE project_id = $1 AND repo_id = $2 AND branch = $3 AND status = 'open'
 `.trim();
 
 // $1=session_id  $2=project_id (L3: JOIN re-asserts tenant; items from a
-// different project's session cannot leak through even if session_id is known)
+// different project's session cannot leak through even if session_id is known).
+// target_type: the target memory's type, same project only (SEC M-1 routing).
 const FETCH_PROMOTABLE_ITEMS_SQL = `
 SELECT si.id, si.op, si.type, si.title, si.summary, si.body, si.fields, si.content_hash,
-       si.target_memory_id, si.target_revision, si.judge_state, si.judge_reason,
+       si.target_memory_id, si.target_revision, tm.type AS target_type,
+       si.judge_state, si.judge_reason,
+       si.judge_criterion, si.judge_confidence, si.related_memory_id,
+       si.mandatory_review, si.sanitize_flags,
        si.author_identity, si.promoted_at, si.promoted_memory_id
 FROM staging_item si
 JOIN staging_session ss ON ss.id = si.session_id
-WHERE si.session_id = $1 AND si.promoted_at IS NULL AND ss.project_id = $2
+LEFT JOIN memory tm ON tm.id = si.target_memory_id AND tm.project_id = ss.project_id
+WHERE si.session_id = $1 AND si.promoted_at IS NULL AND si.reviewed_at IS NULL
+  AND ss.project_id = $2
 ORDER BY si.created_at ASC
 `.trim();
 
-// $1=judge_state  $2=judge_reason  $3=item_id
-const RECORD_VERDICT_SQL = `
-UPDATE staging_item SET judge_state = $1, judge_reason = $2 WHERE id = $3
+// $1=judge_state $2=judge_reason $3=judge_criterion $4=judge_confidence
+// $5=related_memory_id $6=mandatory_review $7=sanitize_flags(jsonb) $8=item_id
+const RECORD_DECISION_SQL = `
+UPDATE staging_item
+SET judge_state = $1, judge_reason = $2, judge_criterion = $3, judge_confidence = $4,
+    related_memory_id = $5, mandatory_review = $6, sanitize_flags = $7::jsonb
+WHERE id = $8 AND promoted_at IS NULL AND reviewed_at IS NULL
+`.trim();
+
+// $1=title $2=summary $3=body $4=fields(jsonb) $5=content_hash $6=sanitize_flags(jsonb) $7=item_id
+const PERSIST_MASKED_SQL = `
+UPDATE staging_item
+SET title = $1, summary = $2, body = $3, fields = $4::jsonb,
+    content_hash = $5, sanitize_flags = $6::jsonb
+WHERE id = $7 AND promoted_at IS NULL
+`.trim();
+
+// $1=websearch query string  $2=project_id  $3=exclude memory id | null
+const FIND_JUDGE_CONTEXT_SQL = `
+SELECT m.id, m.type, m.title, m.summary
+FROM memory m, websearch_to_tsquery('english', $1) q
+WHERE m.project_id = $2 AND m.status = 'active' AND m.content_tsv @@ q
+  AND ($3::uuid IS NULL OR m.id <> $3)
+ORDER BY ts_rank_cd(m.content_tsv, q) DESC, m.id DESC
+LIMIT 3
 `.trim();
 
 // S0: Lock + idempotency guard. $1=item_id
@@ -171,9 +263,10 @@ VALUES ($1, 1, 'add', $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
 
 // M1/S1: Lock memory row for amend/supersede (L3: AND project_id re-asserts
 // tenant so a cross-project target_memory_id is treated as stale/not-found).
+// type feeds the SEC M-1 apply-time guard (requiresReview).
 // $1=memory_id  $2=project_id
 const LOCK_MEMORY_SQL = `
-SELECT id, current_revision, status FROM memory WHERE id = $1 AND project_id = $2 FOR UPDATE
+SELECT id, current_revision, status, type FROM memory WHERE id = $1 AND project_id = $2 FOR UPDATE
 `.trim();
 
 // M2: Update memory content for amend op.
@@ -273,9 +366,19 @@ INSERT INTO quarantine
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)
 `.trim();
 
-// Q2: Mark the staging item terminal. $1=judge_reason  $2=item_id
+// Q2: Mark the staging item terminal and overwrite its content with the
+// (masked / redacted) snapshot so a redacted secret never lingers in staging.
+// content_hash is left untouched on terminal rows. Guarded (SEC M-3): an item
+// applied or human-reviewed meanwhile is not touched (0 rows → Q1 rolled back).
+// $1=judge_reason $2=judge_criterion $3=judge_confidence $4=related_memory_id
+// $5=mandatory_review $6=sanitize_flags(jsonb) $7=title $8=summary $9=body
+// $10=fields(jsonb) $11=item_id
 const MARK_QUARANTINED_SQL = `
-UPDATE staging_item SET judge_state = 'rejected', judge_reason = $1 WHERE id = $2
+UPDATE staging_item
+SET judge_state = 'rejected', judge_reason = $1, judge_criterion = $2,
+    judge_confidence = $3, related_memory_id = $4, mandatory_review = $5,
+    sanitize_flags = $6::jsonb, title = $7, summary = $8, body = $9, fields = $10::jsonb
+WHERE id = $11 AND promoted_at IS NULL AND reviewed_at IS NULL
 `.trim();
 
 // Finalize session: set terminal status.
@@ -301,8 +404,14 @@ interface RawPromotionItemRow {
   content_hash: string;
   target_memory_id: string | null;
   target_revision: number | null;
+  target_type: string | null;
   judge_state: string;
   judge_reason: string | null;
+  judge_criterion: string | null;
+  judge_confidence: number | null;
+  related_memory_id: string | null;
+  mandatory_review: boolean;
+  sanitize_flags: SanitizeFlags;
   author_identity: string;
   promoted_at: Date | null;
   promoted_memory_id: string | null;
@@ -312,6 +421,7 @@ interface RawMemoryLockRow {
   id: string;
   current_revision: number;
   status: string;
+  type: string;
 }
 
 interface RawMemoryDeprecateLockRow extends RawMemoryLockRow {
@@ -319,8 +429,36 @@ interface RawMemoryDeprecateLockRow extends RawMemoryLockRow {
   summary: string;
   body: string;
   fields: Record<string, unknown>;
-  type: string;
   content_hash: string;
+}
+
+/**
+ * SEC M-1 apply-time guard: an op may never change the type of its target, and a
+ * mandatory-review target type is never mutated without a human.
+ */
+function requiresReview(
+  item: PromotionItemRow,
+  targetType: string,
+  mandatoryTypes: ReadonlySet<MemoryType>,
+): boolean {
+  return targetType !== item.type || mandatoryTypes.has(targetType as MemoryType);
+}
+
+const REDACT_SENTINEL = '[REDACTED: secret detected]';
+
+// ---------------------------------------------------------------------------
+// Judge-context query builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the websearch_to_tsquery string: lowercase runs of 3+ Unicode letters
+ * or digits (so accented words stay whole), deduped, first 16, joined with
+ * ' or '. Returns [] when no tokens remain. Always sent as a bind parameter.
+ */
+export function toOrQuery(title: string, summary: string): string[] {
+  const tokens = `${title} ${summary}`.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [];
+  const unique = [...new Set(tokens)].slice(0, 16);
+  return unique.length === 0 ? [] : [unique.join(' or ')];
 }
 
 // ---------------------------------------------------------------------------
@@ -367,16 +505,63 @@ export class PgPromotionRepository implements PromotionRepository {
       content_hash: r.content_hash,
       target_memory_id: r.target_memory_id,
       target_revision: r.target_revision,
+      target_type: r.target_type as MemoryType | null,
       judge_state: r.judge_state as PromotionItemRow['judge_state'],
       judge_reason: r.judge_reason,
+      judge_criterion: r.judge_criterion as PromotionItemRow['judge_criterion'],
+      judge_confidence: r.judge_confidence,
+      related_memory_id: r.related_memory_id,
+      mandatory_review: r.mandatory_review,
+      sanitize_flags: r.sanitize_flags ?? {},
       author_identity: r.author_identity,
       promoted_at: r.promoted_at,
       promoted_memory_id: r.promoted_memory_id,
     }));
   }
 
-  async recordVerdict(itemId: string, verdict: Verdict, reason: string | null): Promise<void> {
-    await this.pool.query(RECORD_VERDICT_SQL, [verdict, reason, itemId]);
+  async findJudgeContext(
+    projectId: string,
+    text: { title: string; summary: string },
+    excludeMemoryId: string | null,
+  ): Promise<JudgeContextItem[]> {
+    const [query] = toOrQuery(text.title, text.summary);
+    if (query === undefined) return [];
+    const { rows } = await this.pool.query<{ id: string; type: string; title: string; summary: string }>(
+      FIND_JUDGE_CONTEXT_SQL,
+      [query, projectId, excludeMemoryId],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      type: r.type as MemoryType,
+      title: r.title,
+      summary: r.summary,
+    }));
+  }
+
+  async persistMasked(
+    itemId: string,
+    content: { title: string; summary: string; body: string; fields: Record<string, unknown> },
+    contentHash: string,
+    flags: SanitizeFlags,
+  ): Promise<'ok' | 'hash_conflict'> {
+    try {
+      await this.pool.query(PERSIST_MASKED_SQL, [
+        content.title, content.summary, content.body,
+        JSON.stringify(content.fields),
+        contentHash, JSON.stringify(flags), itemId,
+      ]);
+      return 'ok';
+    } catch (err) {
+      if ((err as { code?: string }).code === '23505') return 'hash_conflict';
+      throw err;
+    }
+  }
+
+  async recordDecision(itemId: string, d: PersistedDecision, flags: SanitizeFlags): Promise<void> {
+    await this.pool.query(RECORD_DECISION_SQL, [
+      d.verdict, d.reason, d.criterion, d.confidence,
+      d.relatedMemoryId, d.mandatoryReview, JSON.stringify(flags), itemId,
+    ]);
   }
 
   /**
@@ -384,8 +569,15 @@ export class PgPromotionRepository implements PromotionRepository {
    * FOR UPDATE lock on the staging_item row + promoted_at IS NULL guard enforce
    * first-writer-wins semantics across concurrent promote() calls.
    * embedding is the pre-computed vector (null when embed failed or op=deprecate).
+   * A target whose type differs from the item's, or is in mandatoryTypes, is not
+   * touched → { status: 'review_required' } (SEC M-1 defence in depth).
    */
-  async applyAccepted(item: PromotionItemRow, ctx: ApplyContext, embedding: number[] | null): Promise<ApplyResult> {
+  async applyAccepted(
+    item: PromotionItemRow,
+    ctx: ApplyContext,
+    embedding: number[] | null,
+    mandatoryTypes: ReadonlySet<MemoryType>,
+  ): Promise<ApplyResult> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -446,6 +638,10 @@ export class PgPromotionRepository implements PromotionRepository {
           await this.safeRollback(client);
           return { status: 'stale' };
         }
+        if (requiresReview(item, targetRes.rows[0]!.type, mandatoryTypes)) {
+          await this.safeRollback(client);
+          return { status: 'review_required' };
+        }
         const prevRevision = targetRes.rows[0]!.current_revision;
 
         // M2: Update memory content — may throw 23505 on duplicate content_hash.
@@ -492,6 +688,10 @@ export class PgPromotionRepository implements PromotionRepository {
         ) {
           await this.safeRollback(client);
           return { status: 'stale' };
+        }
+        if (requiresReview(item, targetRes.rows[0]!.type, mandatoryTypes)) {
+          await this.safeRollback(client);
+          return { status: 'review_required' };
         }
 
         // S2: Insert new memory (same column list as A1).
@@ -560,6 +760,10 @@ export class PgPromotionRepository implements PromotionRepository {
           return { status: 'stale' };
         }
         const snap = targetRes.rows[0]!;
+        if (requiresReview(item, snap.type, mandatoryTypes)) {
+          await this.safeRollback(client);
+          return { status: 'review_required' };
+        }
 
         // D2: Flip status to deprecated + bump current_revision (L3: project_id guard).
         await client.query(UPDATE_MEMORY_DEPRECATED_SQL, [item.target_memory_id, ctx.projectId]);
@@ -596,36 +800,54 @@ export class PgPromotionRepository implements PromotionRepository {
 
   /**
    * Snapshots the item in quarantine and marks it terminal in staging.
-   * When redact=true (secret_detected path), title/summary/body are replaced
-   * with the sentinel string; reason is category-only (no matched text).
+   * When q.redact=true (secret path), title/summary/body become the sentinel and
+   * fields becomes {} in BOTH tables; reason is category-only (no matched text).
    */
-  async quarantineItem(
-    item: PromotionItemRow,
-    ctx: ApplyContext,
-    reason: string,
-    redact: boolean,
-  ): Promise<void> {
-    const REDACT_SENTINEL = '[REDACTED: secret detected]';
-    const title = redact ? REDACT_SENTINEL : item.title;
-    const summary = redact ? REDACT_SENTINEL : item.summary;
-    const body = redact ? REDACT_SENTINEL : item.body;
+  async quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<void> {
+    const title = q.redact ? REDACT_SENTINEL : item.title;
+    const summary = q.redact ? REDACT_SENTINEL : item.summary;
+    const body = q.redact ? REDACT_SENTINEL : item.body;
+    const fields = q.redact ? {} : item.fields;
+    const fieldsJson = JSON.stringify(fields);
+    const d = q.decision;
+    // SEC L-7: a redacted snapshot never carries the hash of the secret-bearing content.
+    const quarantineHash = q.redact
+      ? computeContentHash({
+          op: item.op, type: item.type, title, summary, body, fields,
+          target: item.target_memory_id,
+        })
+      : item.content_hash;
+    // Reviewer M1: a non-redacted judge rejection (duplication / specificity)
+    // keeps the judge justification on the staging row; quarantine keeps the code.
+    const stagingReason = !q.redact && d?.verdict === 'rejected' ? d.reason : q.reason;
 
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
 
-      // Q1: Self-contained snapshot (no FK to staging → sweep-safe).
+      // Q1: Self-contained snapshot (no FK to staging -> sweep-safe).
       await client.query(INSERT_QUARANTINE_SQL, [
         ctx.projectId, ctx.repoId,
         ctx.sessionId, item.id,
         item.op, item.type,
         title, summary, body,
-        JSON.stringify(item.fields),
-        item.content_hash, reason, item.author_identity,
+        fieldsJson,
+        quarantineHash, q.reason, item.author_identity,
       ]);
 
       // Q2: Mark staging item terminal (promoted_at stays NULL).
-      await client.query(MARK_QUARANTINED_SQL, [reason, item.id]);
+      const marked = await client.query(MARK_QUARANTINED_SQL, [
+        stagingReason, d?.criterion ?? null, d?.confidence ?? null,
+        d?.relatedMemoryId ?? null, d?.mandatoryReview ?? false,
+        JSON.stringify(q.sanitizeFlags),
+        title, summary, body, fieldsJson,
+        item.id,
+      ]);
+      if ((marked.rowCount ?? 0) === 0) {
+        // SEC M-3: applied or human-reviewed meanwhile — drop the Q1 snapshot too.
+        await this.safeRollback(client);
+        return;
+      }
 
       await client.query('COMMIT');
     } catch (err) {

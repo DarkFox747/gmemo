@@ -35,6 +35,7 @@ import type {
   TenantResolutionInput,
   ToolName,
 } from '../../src/mcp/context.js';
+import type { Notifier } from '../../src/notify/notifier.js';
 import type { Embedder } from '../../src/embedder/embedder.js';
 import type { MemoryRepository } from '../../src/db/memoryRepository.js';
 import type { StagingRepository } from '../../src/db/stagingRepository.js';
@@ -43,7 +44,9 @@ import type {
   PromotionItemRow,
   ApplyContext,
   ApplyResult,
-  Verdict,
+  PersistedDecision,
+  QuarantineInput,
+  SanitizeFlags,
 } from '../../src/db/promotionRepository.js';
 import type { Judge, JudgeItem } from '../../src/judge/judge.js';
 import type { OidcVerifier, PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
@@ -293,24 +296,41 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     findOpenSessionId: (_tenant: TenantContext) => Promise.resolve(null),
     fetchPromotableItems: (_sessionId: string, _projectId: string) =>
       Promise.resolve([] as PromotionItemRow[]),
-    recordVerdict: (_itemId: string, _verdict: Verdict, _reason: string | null) =>
+    findJudgeContext: (
+      _projectId: string,
+      _text: { title: string; summary: string },
+      _excludeMemoryId: string | null,
+    ) => Promise.resolve([]),
+    persistMasked: (
+      _itemId: string,
+      _content: { title: string; summary: string; body: string; fields: Record<string, unknown> },
+      _contentHash: string,
+      _flags: SanitizeFlags,
+    ) => Promise.resolve('ok' as const),
+    recordDecision: (_itemId: string, _d: PersistedDecision, _flags: SanitizeFlags) =>
       Promise.resolve(),
     applyAccepted: (_item: PromotionItemRow, _ctx: ApplyContext, _embedding: number[] | null): Promise<ApplyResult> =>
       Promise.resolve({ status: 'applied' as const, memoryId: '', deduped: false }),
-    quarantineItem: (
-      _item: PromotionItemRow,
-      _ctx: ApplyContext,
-      _reason: string,
-      _redact: boolean,
-    ) => Promise.resolve(),
+    quarantineItem: (_item: PromotionItemRow, _ctx: ApplyContext, _q: QuarantineInput) =>
+      Promise.resolve(),
     finalizeSession: (_sessionId: string, _status: 'promoted' | 'rejected' | 'partially_promoted') =>
       Promise.resolve(),
   };
 
-  // Stub judge: always returns 'accepted'.
+  // Stub judge: always returns an accepted JudgeResult.
   const stubJudge: Judge = {
-    evaluate: (_item: JudgeItem) => Promise.resolve('accepted' as const),
+    evaluate: (_item: JudgeItem) =>
+      Promise.resolve({
+        verdict: 'accepted' as const,
+        criterion: 'confidence' as const,
+        confidence: 0.9,
+        reason: 'stub',
+        relatedMemoryId: null,
+      }),
   };
+
+  // Stub notifier: no-op.
+  const stubNotifier: Notifier = { notify: () => Promise.resolve() };
 
   // Stub OIDC verifier: returns a fixed promote principal.
   const stubOidcVerifier: OidcVerifier = {
@@ -341,6 +361,8 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     judge: stubJudge,
     auditLogger: stubAuditLogger,
     embedder: stubEmbedder,
+    notifier: stubNotifier,
+    routing: { confidenceThreshold: 0.8, mandatoryReviewTypes: new Set() },
   });
 
   return {
@@ -358,6 +380,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     embedder: stubEmbedder,
     semanticFallbackMinResults: 0,  // Phase 2 never fires in stub-services tests
     semanticFallbackK: 8,
+    notifier: stubNotifier,
     ...overrides,
   };
 }

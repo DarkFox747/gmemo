@@ -8,6 +8,7 @@
 
 import { AppError, ErrorCode } from '../errors/appError.js';
 import { logger } from '../observability/logger.js';
+import { normalizeForScan } from './normalizeForScan.js';
 
 interface SecretPattern {
   readonly category: string;
@@ -88,7 +89,8 @@ export function scanForSecrets(text: string): string[] {
 /**
  * Asserts that none of the provided string parts contain recognisable secrets.
  *
- * Joins all `parts` with a newline, then runs `scanForSecrets`. On ANY finding,
+ * Joins all `parts` with a newline, normalizes the copy (normalizeForScan), then
+ * runs `scanForSecrets`. On ANY finding,
  * or if the scanner itself throws (fail-closed), logs ONLY category names via
  * the repo logger and throws `AppError(PERMISSION_DENIED)`.
  *
@@ -100,7 +102,8 @@ export function scanForSecrets(text: string): string[] {
  */
 export function assertNoSecrets(...parts: string[]): void {
   try {
-    const text = parts.join('\n');
+    // Scan a normalized copy so zero-width / fullwidth characters cannot split a key.
+    const text = normalizeForScan(parts.join('\n'));
     const categories = scanForSecrets(text);
     if (categories.length > 0) {
       logger.warn('Content rejected by secret scan', { categories });

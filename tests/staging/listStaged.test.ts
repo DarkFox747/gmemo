@@ -125,3 +125,35 @@ describe('listStagedHandler', () => {
     expect(response.items).toEqual([]);
   });
 });
+
+describe('listStagedHandler — pending mandatory review is visible (SEC L-9)', () => {
+  function item(id: string, extra: Partial<FakeStagingItem>): FakeStagingItem {
+    return { ...SEEDED_ITEMS[0]!, id, contentHash: `hash-${id}`, ...extra };
+  }
+
+  it('accepted + mandatory_review, not applied → state "uncertain"; other states unchanged', async () => {
+    const stagingRepo = new InMemoryStagingRepository(
+      [SEEDED_SESSION],
+      [
+        item('m-pending', { judgeState: 'accepted', mandatoryReview: true }),
+        item('m-applied', {
+          judgeState: 'accepted',
+          mandatoryReview: true,
+          promotedAt: new Date('2025-06-03T00:00:00Z'),
+        }),
+        item('plain-accepted', { judgeState: 'accepted' }),
+        item('rejected', { judgeState: 'rejected', mandatoryReview: true }),
+      ],
+    );
+
+    const { items } = await listStagedHandler({}, CTX, makeDeps(stagingRepo));
+    const state = Object.fromEntries(items.map((i) => [i.id, i.state]));
+
+    expect(state).toEqual({
+      'm-pending': 'uncertain',
+      'm-applied': 'accepted',
+      'plain-accepted': 'accepted',
+      rejected: 'rejected',
+    });
+  });
+});

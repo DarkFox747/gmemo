@@ -26,7 +26,7 @@ Source: write-path
 
 ### Requirement: remember tool
 
-`remember(op, type, title, summary, body, fields?, target_handle?)` MUST be registered and return `{ id, state }` for the created or deduped item. It MUST write ONLY to a staging session (never `memory`), lazily creating or reusing the session for the caller's `(project, repo, branch)`; the agent MUST NOT pass IDs. `op='add'` MUST omit `target_handle`; other ops MUST provide a valid one, else `INVALID_REFERENCE`. A malformed handle returns `INVALID_REFERENCE`; a stale handle is accepted and the item is flagged `uncertain`. Budgets MUST be validated before persist, `type` MUST be one of the 7 memory types, and `fields` MUST be validated per type. Re-staging content whose `content_hash` already exists in the open session MUST return the existing item (idempotent no-op).
+`remember(op, type, title, summary, body, fields?, target_handle?)` MUST be registered and return `{ id, state }` for the created or deduped item. It MUST write ONLY to a staging session (never `memory`), lazily creating or reusing the session for the caller's `(project, repo, branch)`; the agent MUST NOT pass IDs. `op='add'` MUST omit `target_handle`; other ops MUST provide a valid one, else `INVALID_REFERENCE`. A malformed handle returns `INVALID_REFERENCE`; a stale handle is accepted and the item is flagged `uncertain` (see "Stale target at capture"). Budgets MUST be validated before persist, `type` MUST be one of the 7 memory types, and `fields` MUST be validated per type. Re-staging content whose `content_hash` already exists in the open session MUST return the existing item (idempotent no-op).
 
 Source: write-path
 
@@ -41,12 +41,6 @@ Source: write-path
 - GIVEN an item with the same `content_hash` in the open session
 - WHEN calling `remember` again with identical content
 - THEN the existing item is returned and no duplicate row is created
-
-#### Scenario: Stale target
-
-- GIVEN a `target_handle` whose revision has moved
-- WHEN calling `remember` with `op='amend'`
-- THEN the item is accepted with state `uncertain`
 
 ### Requirement: list_staged and discard_staged
 
@@ -108,6 +102,26 @@ Source: write-path
 - WHEN running `pnpm test`
 - THEN unit tests pass and DB-gated tests skip cleanly
 
+### Requirement: Stale target at capture
+
+When `remember` receives an `amend`, `supersede` or `deprecate` whose target revision is no longer current, it SHALL store the item as `uncertain` with criterion `stale_target`, `mandatory_review = true` and an explanatory reason, and SHALL notify `review_enqueued` once (not on a deduplicated re-submission).
+
+Source: write-path, judge-structured-verdict
+
+#### Scenario: Stale amend captured
+
+- GIVEN an active memory at revision N+1 and an agent that read revision N
+- WHEN the agent calls `remember` with `op: amend` targeting revision N
+- THEN the staging item is `uncertain`/`stale_target` with `mandatory_review` true and `review_enqueued` is notified once
+
+#### Scenario: Dedup does not re-notify
+
+- GIVEN the same stale amend submitted twice with identical content
+- WHEN the second call is deduplicated
+- THEN no second notification is emitted
+
 ## History
 
-None.
+| Requirement | Source | Superseded by |
+|---|---|---|
+| Stale handle at capture: item stored as `uncertain` with no criterion and no notification | write-path | judge-structured-verdict (`uncertain`/`stale_target`, `mandatory_review`, `review_enqueued` notified once) |

@@ -8,9 +8,10 @@
  * 8-step algorithm (write-path design.md §"rememberHandler"):
  *  1. assertValidFields — unknown key → INVALID_REFERENCE
  *  2. op↔target validation — add+handle or non-add−handle → INVALID_REFERENCE
- *  3. Resolve target (non-add only); stale handle → judgeState='uncertain'
- *  4. assertNoSecrets — any finding → PERMISSION_DENIED (before any DB write)
- *  5. Compute contentHash = sha256Hex of a fixed-key-order canonical JSON string
+ *  3. Resolve target (non-add only); type ≠ target type → INVALID_REFERENCE;
+ *     stale handle → judgeState='uncertain'
+ *  4. assertNoSecrets (normalized copy) — any finding → PERMISSION_DENIED (before any DB write)
+ *  5. Compute contentHash via computeContentHash (fixed-key-order canonical JSON)
  *  6. findOrCreateOpenSession — lazy upsert with sliding 7-day TTL
  *  7. insertStagingItem — idempotent; dedup path returns the same id
  *  8. Return { id, state, sessionId, contentHash }
@@ -22,7 +23,8 @@ import { decodeHandle, isHandleStale } from '../handle.js';
 import { AppError, ErrorCode } from '../../errors/appError.js';
 import { assertValidFields } from '../fieldsPolicy.js';
 import { assertNoSecrets } from '../../security/secretScan.js';
-import { sha256Hex } from '../../security/hash.js';
+import { computeContentHash } from '../../security/hash.js';
+import { safeNotify } from '../../notify/notifier.js';
 
 export async function rememberHandler(
   input: RememberRequest,
@@ -47,7 +49,7 @@ export async function rememberHandler(
   }
 
   // Step 3: resolve target (non-add only)
-  let judgeState: 'pending' | 'uncertain' = 'pending';
+  let stale = false;
   let targetMemoryId: string | null = null;
   let targetRevision: number | null = null;
 
@@ -59,9 +61,13 @@ export async function rememberHandler(
     if (detail === null) {
       throw new AppError(ErrorCode.INVALID_REFERENCE);
     }
+    // SEC M-1: an op may not change the target's type (a type change could move a
+    // mandatory-review memory out of review). Same opaque error as a bad handle.
+    if (detail.memory.type !== input.type) {
+      throw new AppError(ErrorCode.INVALID_REFERENCE);
+    }
 
-    const stale = isHandleStale(detail.memory.current_revision, decoded.revisionNo);
-    judgeState = stale ? 'uncertain' : 'pending';
+    stale = isHandleStale(detail.memory.current_revision, decoded.revisionNo);
     targetMemoryId = decoded.memoryId;
     targetRevision = decoded.revisionNo;
   }
@@ -75,16 +81,15 @@ export async function rememberHandler(
   );
 
   // Step 5: content hash over a fixed-key-order canonical JSON string
-  const canonical = JSON.stringify({
+  const contentHash = computeContentHash({
     op: input.op,
     type: input.type,
     title: input.title,
     summary: input.summary,
     body: input.body,
-    fields: input.fields ?? {},
+    fields: input.fields,
     target: targetMemoryId,
   });
-  const contentHash = sha256Hex(canonical);
 
   // Step 6: lazy-create or reuse the one open session for this (project, repo, branch)
   const sessionId = await deps.stagingRepository.findOrCreateOpenSession(
@@ -103,9 +108,23 @@ export async function rememberHandler(
     contentHash,
     targetMemoryId,
     targetRevision,
-    judgeState,
+    judgeState: stale ? 'uncertain' : 'pending',
     authorIdentity: ctx.actor.actorId,
+    // Stale target (HU-11.3): goes straight to the human review queue.
+    judgeCriterion: stale ? 'stale_target' : null,
+    mandatoryReview: stale,
+    judgeReason: stale ? 'target revision is no longer current' : null,
   });
+
+  // Notify once, only for a fresh insert (a dedup re-submission was already notified).
+  if (stale && !res.deduped) {
+    await safeNotify(deps.notifier, ctx.tenant.projectId, {
+      type: 'review_enqueued',
+      itemId: res.id,
+      queue: 'uncertain',
+      criterion: 'stale_target',
+    });
+  }
 
   // Step 8: return the superset result (wrapper projects { id, state } to the agent)
   return {
