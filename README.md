@@ -1,6 +1,6 @@
-# LPMS Cloud — Memoria global del diseño
+# gmemo — Memoria global del diseño
 
-Notas de trabajo del diseño de **LPMS Cloud**, la evolución de LPMS (memoria local por dev)
+Notas de trabajo del diseño de **gmemo**, la evolución de LPMS (memoria local por dev)
 a un **servicio de memoria compartida de Crombie** hosteado en AWS. Sirven para guiar futuras
 sesiones: capturan **decisiones + el porqué**, no solo el qué.
 
@@ -15,7 +15,7 @@ sesiones: capturan **decisiones + el porqué**, no solo el qué.
 - `dev-harness` — Docker + compose + seed + bypass de Cognito solo-dev (guardado contra prod). Ver "Levantar en 2 comandos".
 - `write-path` — staging (`0003`) + `StagingRepository` + `remember`/`list_staged`/`discard_staged` (los agentes **proponen** a staging, nunca escriben a main) + RBAC de escritura + audit (`remember` y `discard`) + secret-scan fail-closed + `recall` mezcla `source:"staged"`.
 
-285 tests en verde (49 de integración DB se saltean sin `DATABASE_URL`) · gestor de paquetes **pnpm** exclusivo.
+555 tests en verde (89 de integración DB se saltean sin `DATABASE_URL`; 466 en la ejecución unitaria) · gestor de paquetes **pnpm** exclusivo.
 Decisiones antes abiertas, ahora resueltas: FTS `english`, framework de test (Vitest), fases SDD (este framework).
 
 **Pendiente / backlog** (`openspec/backlog.md`): `promotion-pipeline` (`POST /promote` + GitHub Action OIDC +
@@ -48,44 +48,49 @@ pnpm que no sea `--frozen-lockfile`). Para agregar/actualizar deps: `pnpm add �
 shell, commiteás `pnpm-lock.yaml`, y los agentes reproducen con
 `pnpm install --frozen-lockfile`.
 
-## Cómo correr el servicio (pilot scaffold)
-
-Slice mínimo del servicio: Express + MCP facade con los tools de lectura (`recall`,
-`get_memory`, `get_context`) como stubs tipados. Sin DB ni auth todavía (changes B/C).
+## Levantar el stack (Local Dev — Docker)
 
 ```bash
-pnpm install        # instalar dependencias
-pnpm dev            # arrancar en watch (tsx) — expone GET /health y POST /mcp
-pnpm test           # correr la suite de Vitest
-pnpm build          # compilar TypeScript a dist/
-pnpm start          # correr el build (node dist/index.js)
-pnpm lint           # ESLint (flat config)
-```
-
-Variables de entorno en `.env.example` (`PORT`, `HOST`, `NODE_ENV`, `LOG_LEVEL`).
-`GET /health` responde `{ "status": "ok" }`.
-
-## Levantar en 2 comandos (Local Dev — Docker)
-
-```bash
-cp .env.dev.example .env
 docker compose up --build
+pnpm smoke          # prueba de humo (requiere Node 22 + pnpm en el host)
 ```
 
-Compose starts postgres:16, runs numbered migrations + the dev seed (one-shot `migrate`
-service), then starts the app. When ready:
+Compose levanta Postgres (pgvector), corre las migraciones + el seed de desarrollo y arranca la app.
+Detalles, scripts y desarrollo en el host: ver [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ```
 GET http://localhost:3000/health
 → 200  { "status": "ok" }
 ```
 
-Gate 1 (Cognito) is STUBBED by `DevAuthenticator` (`AUTH_DEV_BYPASS=true`); Gate 2,
-RBAC, and audit run for real against the seeded local DB. Every request to `POST /mcp`
-must carry the seeded git remote header; no `Authorization` header is needed locally.
+El Gate 1 (Cognito) queda stubbeado por `AUTH_DEV_BYPASS=true`; Gate 2, RBAC y audit corren de verdad
+contra la DB local con seed. Cada request a `POST /mcp` debe llevar el header del git remote sembrado;
+en local no hace falta `Authorization`.
 
-> **Dev bypass is local-only.** The config `superRefine` refuses to load when
-> `AUTH_DEV_BYPASS=true` AND `NODE_ENV=production` — the server exits 1 at boot.
+> **Los bypass/stubs son solo de dev.** `AUTH_DEV_BYPASS`, `JUDGE_STUB`, `PROMOTE_OIDC_DEV_BYPASS` y
+> `EMBEDDER_STUB` con `NODE_ENV=production` (y `RATE_LIMIT_ENABLED=false`) hacen que la config se
+> rechace: el server sale con código 1 al arrancar.
+
+### Variables de entorno (`src/config/index.ts`)
+
+| Variable | Default | Notas |
+|---|---|---|
+| `PORT`, `HOST`, `NODE_ENV`, `LOG_LEVEL` | `3000`, `0.0.0.0`, `development`, `info` | servidor |
+| `DATABASE_URL` | — (requerida) | Postgres |
+| `AUTH_DEV_BYPASS` | `false` | solo dev |
+| `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID_ALLOWLIST`, `COGNITO_REQUIRED_SCOPE` | — | requeridas si `AUTH_DEV_BYPASS` no es `true` |
+| `JUDGE_STUB`, `JUDGE_STUB_VERDICT` | `false`, `uncertain` | veredicto: `accepted` / `rejected` / `uncertain` |
+| `BEDROCK_MODEL_ID` | — | requerida si `JUDGE_STUB` no es `true` |
+| `PROMOTE_OIDC_DEV_BYPASS` | `false` | solo dev |
+| `GITHUB_OIDC_AUDIENCE` | — | requerida si `PROMOTE_OIDC_DEV_BYPASS` no es `true` |
+| `EMBEDDER_STUB` | `false` | solo dev |
+| `BEDROCK_EMBEDDING_MODEL_ID` | — | requerida si `EMBEDDER_STUB` no es `true` |
+| `AWS_REGION` | — | requerida si algún cliente Bedrock real está activo |
+| `BEDROCK_MAX_ATTEMPTS`, `BEDROCK_TIMEOUT_MS` | `3`, `15000` | cliente Bedrock |
+| `SEMANTIC_FALLBACK_MIN_RESULTS`, `SEMANTIC_FALLBACK_K` | `5`, `8` | recall semántico de respaldo |
+| `RATE_LIMIT_ENABLED` | `true` | `false` prohibido en producción |
+| `RATE_LIMIT_MCP_WINDOW_MS`, `RATE_LIMIT_MCP_MAX` | `60000`, `120` | límite de `/mcp` |
+| `RATE_LIMIT_PROMOTE_WINDOW_MS`, `RATE_LIMIT_PROMOTE_MAX` | `60000`, `10` | límite de `/promote` |
 
 ### Sample POST /mcp — recall (JSON-RPC tools/call)
 
@@ -93,7 +98,7 @@ must carry the seeded git remote header; no `Authorization` header is needed loc
 curl -sS http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -H 'X-Git-Remote: https://github.com/crombie-dev/lpms-cloud.git' \
+  -H 'X-Git-Remote: https://github.com/crombie-llc/gmemo-demo.git' \
   -d '{
         "jsonrpc": "2.0",
         "id": 1,
@@ -108,7 +113,7 @@ curl -sS http://localhost:3000/mcp \
 curl -sS http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -H 'X-Git-Remote: https://github.com/crombie-dev/lpms-cloud.git' \
+  -H 'X-Git-Remote: https://github.com/crombie-llc/gmemo-demo.git' \
   -d '{
         "jsonrpc": "2.0",
         "id": 2,

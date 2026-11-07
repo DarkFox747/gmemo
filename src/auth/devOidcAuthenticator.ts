@@ -20,10 +20,10 @@ import type { OidcVerifier, PromotePrincipal } from './oidcAuthenticator.js';
 /**
  * Fixed identity — kept in lockstep with migrations/seed.dev.sql
  * (machine_credential.principal_name) and the repo row's remote_url
- * (https://github.com/crombie-dev/lpms-cloud.git).
+ * (https://github.com/crombie-llc/gmemo-demo.git).
  */
 export const DEV_PROMOTE_PRINCIPAL: PromotePrincipal = {
-  repository: 'crombie-dev/lpms-cloud', // == machine_credential.principal_name (seed)
+  repository: 'crombie-llc/gmemo-demo', // == machine_credential.principal_name (seed)
   ref: 'refs/heads/main',
 };
 

@@ -5,7 +5,7 @@
  *
  *  1. DevOidcAuthenticator — DEV-only stub that always returns the fixed
  *     DEV_PROMOTE_PRINCIPAL regardless of the Authorization header (or its
- *     absence). Verified shape: repository='crombie-dev/lpms-cloud',
+ *     absence). Verified shape: repository='crombie-llc/gmemo-demo',
  *     ref='refs/heads/main'.
  *
  *  2. GithubOidcAuthenticator — real implementation with an injected fake
@@ -40,7 +40,7 @@ function makeRejectingVerifier(err: unknown = new Error('jwt-verify-failed')): O
   return { verify: vi.fn<[string], Promise<Record<string, unknown>>>().mockRejectedValue(err) };
 }
 
-const VALID_CLAIMS = { repository: 'org/repo', ref: 'refs/heads/main', iss: 'github', aud: 'lpms' };
+const VALID_CLAIMS = { repository: 'org/repo', ref: 'refs/heads/main', iss: 'github', aud: 'gmemo' };
 const VALID_HEADER = 'Bearer eyJhbGciOiJSUzI1NiJ9.fake.token';
 
 // ---------------------------------------------------------------------------
@@ -66,7 +66,7 @@ describe('DevOidcAuthenticator', () => {
   });
 
   it('DEV_PROMOTE_PRINCIPAL.repository equals the seed machine_credential principal_name', () => {
-    expect(DEV_PROMOTE_PRINCIPAL.repository).toBe('crombie-dev/lpms-cloud');
+    expect(DEV_PROMOTE_PRINCIPAL.repository).toBe('crombie-llc/gmemo-demo');
   });
 
   it('DEV_PROMOTE_PRINCIPAL.ref is the expected main branch ref', () => {

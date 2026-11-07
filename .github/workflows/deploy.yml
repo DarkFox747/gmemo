@@ -43,10 +43,10 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: lpms-pilot-app
-  ECS_CLUSTER: lpms-pilot
-  ECS_SERVICE: lpms-pilot-app
-  TASK_FAMILY: lpms-pilot-app
+  ECR_REPOSITORY: gmemo-pilot-app
+  ECS_CLUSTER: gmemo-pilot
+  ECS_SERVICE: gmemo-pilot-app
+  TASK_FAMILY: gmemo-pilot-app
   CONTAINER_NAME: app
 
 jobs:

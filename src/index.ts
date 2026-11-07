@@ -215,7 +215,7 @@ const app = createApp(services, {
 });
 
 const server = app.listen(config.PORT, config.HOST, () => {
-  logger.info(`lpms-cloud listening on http://${config.HOST}:${config.PORT}`);
+  logger.info(`gmemo listening on http://${config.HOST}:${config.PORT}`);
   logger.info(`NODE_ENV=${config.NODE_ENV} LOG_LEVEL=${config.LOG_LEVEL}`);
 });
 

@@ -19,7 +19,7 @@ import type { Authenticator, Principal } from '../mcp/context.js';
 export const DEV_PRINCIPAL: Principal = {
   subject: 'dev-local-user', // == app_user.idp_subject (seed)
   clientId: 'dev-local-client', // not consumed by Gate 2 / RBAC
-  scopes: ['lpms.memory/read'], // representative; Authorizer ignores scopes
+  scopes: ['gmemo.memory/read'], // representative; Authorizer ignores scopes
 };
 
 export class DevAuthenticator implements Authenticator {

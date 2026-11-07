@@ -138,6 +138,11 @@ describeWithDb('migration integration — 0003_staging.sql', () => {
     await pool.query(
       `DELETE FROM schema_migrations WHERE version = '0003_staging'`,
     );
+    // 0004 alters staging_item, which was just dropped; clear its ledger entry
+    // too so later suites re-apply it on top of a fresh 0003.
+    await pool.query(
+      `DELETE FROM schema_migrations WHERE version = '0004_promotion_gaps'`,
+    );
 
     // Delete seeded project row — cascades to repo and memory (both ON DELETE CASCADE).
     await pool.query(

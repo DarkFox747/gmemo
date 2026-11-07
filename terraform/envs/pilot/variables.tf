@@ -102,7 +102,7 @@ variable "github_oidc_audience" {
 # DNS + TLS
 # ---------------------------------------------------------------------------
 variable "domain_name" {
-  description = "FQDN the pilot answers on (e.g. lpms-pilot.yourdomain.dev)."
+  description = "FQDN the pilot answers on (e.g. gmemo-pilot.yourdomain.dev)."
   type        = string
 }
 

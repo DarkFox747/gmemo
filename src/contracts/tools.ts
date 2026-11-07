@@ -1,5 +1,5 @@
 // Request/response types for the MCP read and write tools.
-// Mirrors lpms_facade_contract_v1.md §2–§5 exactly.
+// Mirrors gmemo_facade_contract_v1.md §2–§5 exactly.
 // Import these types in tool handlers and zod schemas to keep shapes in sync.
 
 import type { MemoryRecord, MemoryRelation, MemoryType } from './memory.js';

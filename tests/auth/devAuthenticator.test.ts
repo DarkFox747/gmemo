@@ -38,7 +38,7 @@ describe('DevAuthenticator', () => {
     // clientId is representative; Gate 2 / RBAC do not consume it
     expect(DEV_PRINCIPAL.clientId).toBe('dev-local-client');
     // scopes are representative; RdsAuthorizer derives roles from RDS, not from token claims
-    expect(DEV_PRINCIPAL.scopes).toEqual(['lpms.memory/read']);
+    expect(DEV_PRINCIPAL.scopes).toEqual(['gmemo.memory/read']);
   });
 
   it('never throws — both a valid-looking and a garbage header resolve', async () => {

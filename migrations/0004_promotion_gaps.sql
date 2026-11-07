@@ -4,7 +4,7 @@
 --   2. staging_status += 'partially_promoted'         — mixed-outcome session.
 --   3. quarantine table                               — judge-rejected sink.
 -- Faithful to docs/04-escritura-staging-promocion.md (§Pipeline, §Cuarentena)
--- and docs/artefactos/lpms_schema_v2.sql conventions (UUID pgcrypto, budget CHECKs).
+-- and docs/artefactos/gmemo_schema_v2.sql conventions (UUID pgcrypto, budget CHECKs).
 -- pgvector is intentionally NOT added here — dimension is a hybrid-search decision.
 -- Idempotent: safe to apply more than once (guards on all DDL). Standalone: needs
 -- only DATABASE_URL. ADD VALUE runs inside the migrator's txn safely on PG16 because

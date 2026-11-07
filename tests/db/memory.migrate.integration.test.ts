@@ -157,9 +157,9 @@ describeWithDb('migration integration — 0002_memory.sql', () => {
     await pool!.query(
       `INSERT INTO memory
          (project_id, type, title, summary, body, provenance, author_identity, content_hash)
-       VALUES ($1, 'decision', 'Indexing strategies', 'Improve query performance with indexes',
+       VALUES ($1::uuid, 'decision', 'Indexing strategies', 'Improve query performance with indexes',
                'We decided to add composite indexes for the main query patterns.',
-               'manual_ui', 'integ-test-user', 'integ-test-hash-' || $1)`,
+               'manual_ui', 'integ-test-user', 'integ-test-hash-' || $1::text)`,
       [projectId],
     );
 

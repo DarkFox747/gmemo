@@ -1,6 +1,6 @@
 # 10 — Deploy del Pilot en AWS (runbook ejecutado)
 
-Registro del primer deploy end-to-end del pilot LPMS a AWS, desde una cuenta
+Registro del primer deploy end-to-end del pilot gmemo a AWS, desde una cuenta
 vacía hasta un MCP server autenticado, con TLS y verificado. Complementa el
 runbook de referencia en `terraform/README.md` con lo que **efectivamente se
 ejecutó**, los valores reales y las decisiones tomadas.
@@ -39,7 +39,7 @@ aplicaron **4 fixes de durabilidad/destrucción antes del apply**:
 
 | # | Archivo | Cambio |
 |---|---------|--------|
-| 1 | `modules/data/main.tf` | RDS: `deletion_protection=true`, `skip_final_snapshot=false`, `final_snapshot_identifier="lpms-pilot-final"`, `backup_retention_period=7` |
+| 1 | `modules/data/main.tf` | RDS: `deletion_protection=true`, `skip_final_snapshot=false`, `final_snapshot_identifier="gmemo-pilot-final"`, `backup_retention_period=7` |
 | 2 | `modules/data/main.tf` | Secrets Manager: `recovery_window_in_days` 0 → 7 |
 | 3 | `bootstrap/main.tf` | DynamoDB: `deletion_protection_enabled=true` |
 | 4 | `modules/service/main.tf` | Eliminado el registro Route53 AAAA (VPC es IPv4-only; el AAAA a un ALB IPv4 es inválido) |
@@ -82,9 +82,9 @@ Outputs clave: ver `terraform output` (ECR url, cluster, cognito pool/client, pi
 ```powershell
 $pw = aws ecr get-login-password --region us-east-1
 docker login --username AWS --password $pw <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
-docker build -t lpms-pilot-app .
-docker tag lpms-pilot-app:latest "<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/lpms-pilot-app:latest"
-docker push "<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/lpms-pilot-app:latest"
+docker build -t gmemo-pilot-app .
+docker tag gmemo-pilot-app:latest "<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/gmemo-pilot-app:latest"
+docker push "<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/gmemo-pilot-app:latest"
 ```
 
 > En PowerShell, piping del token a `docker login --password-stdin` corrompe el
@@ -130,7 +130,7 @@ Passwords de Cognito seteadas out-of-band con `admin-set-user-password`
 terraform apply -var-file=pilot.tfvars -var="desired_count=1"
 
 # Target health → "healthy"
-aws elbv2 describe-target-health --target-group-arn (aws elbv2 describe-target-groups --names lpms-pilot-tg --region us-east-1 --query "TargetGroups[0].TargetGroupArn" --output text) --region us-east-1 --query "TargetHealthDescriptions[].TargetHealth.State"
+aws elbv2 describe-target-health --target-group-arn (aws elbv2 describe-target-groups --names gmemo-pilot-tg --region us-east-1 --query "TargetGroups[0].TargetGroupArn" --output text) --region us-east-1 --query "TargetHealthDescriptions[].TargetHealth.State"
 ```
 
 Prueba E2E (Gate1 + Gate2 + MCP):
@@ -162,7 +162,7 @@ Root `terraform/cicd/` + `.github/workflows/deploy.yml`. Automatiza SOLO deploy
 de **código de app** (build → push → roll del servicio); la infra sigue siendo
 `apply` manual (rol de altísimo privilegio, cambios infrecuentes).
 
-- OIDC provider de GitHub Actions + rol `lpms-pilot-ci-deploy`.
+- OIDC provider de GitHub Actions + rol `gmemo-pilot-ci-deploy`.
 - Trust scopeado a `repo:<GITHUB_ORG>/<REPO>:ref:refs/heads/main` (solo main, sin wildcard).
 - Permisos mínimos: ECR push al repo + ECS register/update del servicio +
   `iam:PassRole` scopeado exacto a los 2 roles (execution + task). Sin ec2/rds/iam-create.
@@ -175,7 +175,7 @@ El workflow asume el rol vía la repo variable `AWS_ROLE_ARN`.
 ### Estado real del rol OIDC — RIESGO ACEPTADO ⚠️
 
 En la práctica el pipeline usa el rol **`<OIDC_ROLE_NAME>`** (no el
-`lpms-pilot-ci-deploy` del diseño). La **trust policy está bien acotada**
+`gmemo-pilot-ci-deploy` del diseño). La **trust policy está bien acotada**
 (`repo:<GITHUB_ORG>/<REPO>:ref:refs/heads/main`, sin managed policies), PERO su
 policy inline es amplia (un rol de `terraform apply` completo): `ecs:*`,
 `lambda:*`, `rds:*`, `ec2:*`, `elasticloadbalancing:*`, `logs/cloudwatch:*`,
@@ -205,7 +205,7 @@ gate antes de cada deploy.
 
 ## Day-2 (referencia rápida)
 
-- **Nuevo deploy manual:** `docker build/push` + `aws ecs update-service --cluster lpms-pilot --service lpms-pilot-app --force-new-deployment`
+- **Nuevo deploy manual:** `docker build/push` + `aws ecs update-service --cluster gmemo-pilot --service gmemo-pilot-app --force-new-deployment`
 - **Pausar (costo 0):** `terraform apply -var-file=pilot.tfvars -var="desired_count=0"`
-- **Logs:** `aws logs tail /lpms/pilot/app --follow`
+- **Logs:** `aws logs tail /gmemo/pilot/app --follow`
 - **Nuevo usuario/repo:** volver a correr la tarea ECS de `provision` con un `PROVISION_JSON` actualizado (es idempotente).

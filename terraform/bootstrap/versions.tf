@@ -18,7 +18,7 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project = "lpms"
+      Project = "gmemo"
       Env     = "bootstrap"
     }
   }

@@ -57,6 +57,7 @@ override.tf.json
 
 # Orchestrator tooling and personal material (never published)
 .claude/
+CLAUDE.md
 .claude.json
 .mcp.json
 entrevistas/

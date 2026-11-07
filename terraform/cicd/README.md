@@ -15,8 +15,8 @@ manual (see `../README.md`).
 | Resource | Purpose |
 |----------|---------|
 | `aws_iam_openid_connect_provider.github` | Trusts `token.actions.githubusercontent.com` (assumes it does not yet exist). Thumbprint fetched dynamically via the `tls` provider — never hardcoded. |
-| `aws_iam_role.ci_deploy` (`lpms-pilot-ci-deploy`) | Trust policy scoped to `aud = sts.amazonaws.com` and `sub = repo:<GITHUB_ORG>/<REPO>:ref:refs/heads/main` — **only `main` of the trusted repo**. 1h max session. |
-| Inline deploy policy | ECR auth + push to `lpms-pilot-app`, `ecs:RegisterTaskDefinition`/`DescribeTaskDefinition`, `ecs:UpdateService`/`DescribeServices`/`DescribeTasks` on the `lpms-pilot` cluster/service, and `iam:PassRole` scoped to exactly the two existing ECS roles. |
+| `aws_iam_role.ci_deploy` (`gmemo-pilot-ci-deploy`) | Trust policy scoped to `aud = sts.amazonaws.com` and `sub = repo:<GITHUB_ORG>/<REPO>:ref:refs/heads/main` — **only `main` of the trusted repo**. 1h max session. |
+| Inline deploy policy | ECR auth + push to `gmemo-pilot-app`, `ecs:RegisterTaskDefinition`/`DescribeTaskDefinition`, `ecs:UpdateService`/`DescribeServices`/`DescribeTasks` on the `gmemo-pilot` cluster/service, and `iam:PassRole` scoped to exactly the two existing ECS roles. |
 
 State lives in the **existing** S3 backend (`<TFSTATE_BUCKET>`) under a
 distinct key `cicd/terraform.tfstate`, so it never collides with the pilot infra
@@ -94,7 +94,7 @@ stability is the success gate.
 To confirm the running task is pinned to the immutable sha tag:
 
 ```bash
-aws ecs describe-services --cluster lpms-pilot --services lpms-pilot-app \
+aws ecs describe-services --cluster gmemo-pilot --services gmemo-pilot-app \
   --query 'services[0].taskDefinition'
 aws ecs describe-task-definition --task-definition <that-arn> \
   --query 'taskDefinition.containerDefinitions[0].image'   # → …:<git-sha>
@@ -107,10 +107,10 @@ aws ecs describe-task-definition --task-definition <that-arn> \
 | Statement | Actions | Resource | Why not tighter |
 |-----------|---------|----------|-----------------|
 | `EcrAuth` | `ecr:GetAuthorizationToken` | `*` | AWS API does not support resource-level perms; grants no data access alone. |
-| `EcrPushToPilotRepo` | layer upload + `PutImage` + read-back | `repository/lpms-pilot-app` | Single repo ARN. |
+| `EcrPushToPilotRepo` | layer upload + `PutImage` + read-back | `repository/gmemo-pilot-app` | Single repo ARN. |
 | `EcsTaskDefinition` | `RegisterTaskDefinition`, `DescribeTaskDefinition` | `*` | AWS API does not support resource-level perms for these. |
 | `EcsUpdateAndDescribeService` | `UpdateService`, `DescribeServices` | exact service ARN | — |
-| `EcsDescribeTasks` | `DescribeTasks` | `task/lpms-pilot/*` + `ecs:cluster` condition | Task ARNs are ephemeral; scoped to the pilot cluster. |
+| `EcsDescribeTasks` | `DescribeTasks` | `task/gmemo-pilot/*` + `ecs:cluster` condition | Task ARNs are ephemeral; scoped to the pilot cluster. |
 | `PassEcsRolesOnly` | `iam:PassRole` | exactly the 2 ECS role ARNs + `iam:PassedToService=ecs-tasks.amazonaws.com` | Required by RegisterTaskDefinition. See residual risk. |
 
 **No** `ec2:*`, `rds:*`, `route53:*`, `secretsmanager:*`, `iam:Create*`, or

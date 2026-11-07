@@ -63,6 +63,6 @@ github_oidc_audience = "https://github.com/your-org"
 # create_hosted_zone = true creates the zone and outputs name_servers for
 # NS delegation at the registrar (required before ACM validation succeeds).
 # ---------------------------------------------------------------------------
-domain_name        = "lpms-pilot.example.com"
+domain_name        = "gmemo-pilot.example.com"
 route53_zone_name  = "example.com"
 create_hosted_zone = false

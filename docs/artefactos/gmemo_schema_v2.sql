@@ -1,5 +1,5 @@
 -- =====================================================================
--- LPMS Cloud — Esquema de datos v2 (PostgreSQL 16)
+-- gmemo — Esquema de datos v2 (PostgreSQL 16)
 -- Cambios sobre v1:
 --   + memoria estructurada: summary, fields (jsonb) y campos por tipo.
 --   + trazabilidad de origen: origin_branch (nombre literal de la rama), origin_pr.

@@ -35,5 +35,5 @@ variable "rds_sg_id" {
 variable "secret_name" {
   description = "Secrets Manager secret name for the app credentials (DATABASE_URL JSON key)."
   type        = string
-  default     = "lpms/pilot/app"
+  default     = "gmemo/pilot/app"
 }

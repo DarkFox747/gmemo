@@ -179,7 +179,7 @@ describeWithDb('PgPromotionRepository integration', () => {
    * Throws if not found (test setup error).
    */
   async function fetchItem(sessionId: string, itemId: string): Promise<PromotionItemRow> {
-    const items: PromotionItemRow[] = await repo!.fetchPromotableItems(sessionId);
+    const items: PromotionItemRow[] = await repo!.fetchPromotableItems(sessionId, projectId);
     const item = items.find((i) => i.id === itemId);
     if (!item) throw new Error(`Item ${itemId} not found in session ${sessionId} promotable items`);
     return item;
@@ -261,8 +261,16 @@ describeWithDb('PgPromotionRepository integration', () => {
   afterAll(async () => {
     if (!pool) return;
 
-    // Deleting the project row cascades to:
-    //   repo, memory, staging_session → staging_item, quarantine (all CASCADE).
+    // Remove staging items first: cascading the project delete would NULL
+    // target_memory_id (ON DELETE SET NULL) on amend items and violate
+    // ck_item_optarget. Remaining children (repo, memory, sessions, quarantine)
+    // are removed by the project cascade.
+    await pool.query(
+      `DELETE FROM staging_item
+        WHERE session_id IN (SELECT id FROM staging_session WHERE project_id =
+              (SELECT id FROM project WHERE slug = $1))`,
+      [PROJECT_SLUG],
+    );
     await pool.query(`DELETE FROM project WHERE slug = $1`, [PROJECT_SLUG]);
 
     await pool.end();
@@ -756,7 +764,7 @@ describeWithDb('PgPromotionRepository integration', () => {
 
     // Fetch via direct SQL (item may have been quarantined before = judge_state='rejected'
     // so fetchPromotableItems would still return it since promoted_at IS NULL).
-    const items: PromotionItemRow[] = await repo!.fetchPromotableItems(SESS_MAIN);
+    const items: PromotionItemRow[] = await repo!.fetchPromotableItems(SESS_MAIN, projectId);
     const item = items.find((i) => i.id === itemId);
     expect(item).toBeTruthy();
 
@@ -803,7 +811,7 @@ describeWithDb('PgPromotionRepository integration', () => {
       body: 'Body containing -----BEGIN RSA PRIVATE KEY----- fake secret.',
     });
 
-    const items: PromotionItemRow[] = await repo!.fetchPromotableItems(SESS_MAIN);
+    const items: PromotionItemRow[] = await repo!.fetchPromotableItems(SESS_MAIN, projectId);
     const item = items.find((i) => i.id === itemId);
     expect(item).toBeTruthy();
 
@@ -886,7 +894,7 @@ describeWithDb('PgPromotionRepository integration', () => {
     });
 
     // Must appear before apply
-    const before: PromotionItemRow[] = await repo!.fetchPromotableItems(SESS_MAIN);
+    const before: PromotionItemRow[] = await repo!.fetchPromotableItems(SESS_MAIN, projectId);
     expect(before.some((i) => i.id === itemId)).toBe(true);
 
     // Apply it
@@ -901,7 +909,7 @@ describeWithDb('PgPromotionRepository integration', () => {
     await repo!.applyAccepted(item, ctx, null);
 
     // Must NOT appear after apply (promoted_at IS NOT NULL)
-    const after: PromotionItemRow[] = await repo!.fetchPromotableItems(SESS_MAIN);
+    const after: PromotionItemRow[] = await repo!.fetchPromotableItems(SESS_MAIN, projectId);
     expect(after.some((i) => i.id === itemId)).toBe(false);
   });
 });

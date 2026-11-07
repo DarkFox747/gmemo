@@ -14,7 +14,7 @@ resource "aws_route53_zone" "main" {
   name = var.route53_zone_name
 
   tags = {
-    Name = "lpms-pilot-zone"
+    Name = "gmemo-pilot-zone"
   }
 }
 
@@ -35,7 +35,7 @@ resource "aws_acm_certificate" "main" {
   }
 
   tags = {
-    Name = "lpms-pilot-cert"
+    Name = "gmemo-pilot-cert"
   }
 }
 

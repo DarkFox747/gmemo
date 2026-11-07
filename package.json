@@ -1,7 +1,7 @@
 {
-  "name": "lpms-cloud",
+  "name": "gmemo",
   "version": "0.1.0",
-  "description": "LPMS Cloud MCP Facade — read-tool scaffold",
+  "description": "gmemo MCP facade",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "engines": {
@@ -15,11 +15,12 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest",
-    "lint": "eslint src tests",
+    "lint": "eslint src tests scripts",
     "format": "prettier --write .",
     "migrate": "tsx src/db/migrate.ts",
     "provision": "tsx src/db/provision.ts",
-    "seed:dev": "tsx src/db/seed.ts"
+    "seed:dev": "tsx src/db/seed.ts",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1100.0",

@@ -3,7 +3,7 @@
 # implemented modules below). Every SDD sub-agent reads this BEFORE working to avoid re-exploring.
 schema: project-map-v1
 
-project: lpms-cloud
+project: gmemo
 stage: pilot-memory-loop-closed-locally   # 7 changes archived (…+ promotion-schema-gaps + promotion-pipeline); read + propose-to-staging + local promote-to-memory all working
 summary: >-
   Two-layer shared-memory service exposed through a single MCP facade. Layer 1
@@ -28,7 +28,7 @@ modules:
     graph_tools: [trace_call_path, get_architecture, search_graph]
     not_exposed_to_agents: [save, update, delete, promote]
     rbac: viewer+ for reads; contributor/service_agent for writes; per-request vs project_membership
-    design_ref: docs/artefactos/lpms_facade_contract_v1.md
+    design_ref: docs/artefactos/gmemo_facade_contract_v1.md
   memory-layer1:
     purpose: Authoritative governed decision memory (7 typed records).
     types: [decision, constraint, gotcha, pattern, integration_note, domain_rule, outcome]
@@ -74,7 +74,7 @@ modules:
 
 # --- Data model (schema v2 — validated) ---
 data_model:
-  source: docs/artefactos/lpms_schema_v2.sql
+  source: docs/artefactos/gmemo_schema_v2.sql
   tenancy: [app_user, project, repo (remote_url = natural key), project_membership, machine_credential]
   memory:
     memory: authoritative record; tsvector GIN; fields jsonb; status enum; content_hash; ttl_days; origin_branch/pr
@@ -85,7 +85,7 @@ data_model:
     staging_item: op, judge_state, sanitize_flags, content_hash; CHECK add<->target_memory_id
   audit:
     access_log: every read (query_hash, not raw text) + every write
-  known_gaps_for_prod:      # ALL CLOSED
+  known_gaps_for_prod:   #      # ALL CLOSED
     - "CLOSED (0004): staging_item.promoted_at / promoted_memory_id (idempotent promotion)"
     - "CLOSED (0004): partially_promoted status"
     - "CLOSED (0004): quarantine table (self-contained, sweep-safe)"
@@ -113,9 +113,9 @@ tests:
 # --- Key file index ---
 key_files:
   design_authoritative:
-    - path: docs/artefactos/lpms_facade_contract_v1.md
+    - path: docs/artefactos/gmemo_facade_contract_v1.md
       note: Formal facade contract v1 — tool signatures, RBAC table, staging behavior, budgets. CLOSED.
-    - path: docs/artefactos/lpms_schema_v2.sql
+    - path: docs/artefactos/gmemo_schema_v2.sql
       note: PostgreSQL 16 DDL — all tables, enums, indexes, CHECK constraints. Data-model source of truth. v2 VALIDATED.
   design_narrative:
     - path: docs/01-vision-y-capas.md
@@ -134,41 +134,46 @@ key_files:
     contracts: src/contracts/{memory,tools}.ts (mirror facade contract v1)
     errors: src/errors/{appError,toToolResult}.ts (opacity model)
     config: src/config/index.ts (zod, fail-fast)
-    auth_implemented: change auth-two-gate (archived) — placeholders REMOVED; real seams live:
+    auth_implemented:   #   # change auth-two-gate (archived) — placeholders REMOVED; real seams live
       - src/auth/authenticator.ts (Gate 1 Cognito JWKS) + src/auth/tenantResolver.ts (X-Git-Remote->repo->project)
       - src/auth/authorizer.ts (Gate 2 app_user + project_membership RBAC -> ActorIdentity)
       - src/auth/auditLogger.ts (access_log, server-side query_hash) + src/db/* (pool, migrate, authRepository)
       - migrations/0001_auth_tenancy.sql (6 auth/tenancy tables); service-agent path fail-CLOSED (deferred)
-    data_layer_implemented: change data-model (archived) — read tools serve REAL RDS memory:
+    data_layer_implemented:   # change data-model (archived) — read tools serve REAL RDS memory
       - migrations/0002_memory.sql (memory + memory_revision + memory_relation; content_tsv english; D8 indexes)
       - src/db/memoryRepository.ts (recall FTS+time-decay+keyset, getMemoryByHandle, getContextRecords)
       - src/mcp/handle.ts (opaque handle codec + stale) + src/mcp/memoryMapper.ts (row->contract, source:"main")
       - AppServices = AuthServices & { memoryRepository }; 3 handlers wired
-    write_path_implemented: change write-path (archived) — agents can PROPOSE (write to staging):
+    write_path_implemented:   # change write-path (archived) — agents can PROPOSE (write to staging)
       - migrations/0003_staging.sql (staging_session ULID PK + partial-unique one-open-per-key; staging_item op↔target/budget CHECKs, UNIQUE(session_id,content_hash))
       - src/db/stagingRepository.ts (findOrCreateOpenSession upsert+reselect+7d TTL, insertStagingItem dedup, listStagingItems, discardStagingItem — tenant-scoped) + src/db/ulid.ts
       - src/mcp/tools/{remember,listStaged,discardStaged}.ts + registerWriteTools; remember 8-step (fields policy → op/target → stale→uncertain → secret-scan → hash → session → insert)
       - RBAC write-roles (contributor/service_agent/project_admin; viewer denied) atomic with ToolName widening; AuditLogger.recordWrite (remember AND discard, action:'stage', hash-only)
       - src/security/secretScan.ts (9 categories, fail-closed, category-only logging) + src/mcp/fieldsPolicy.ts (per-type allowed keys) + recall staging-mix (source:"staged", first page only)
-    schema_groundwork_done: change promotion-schema-gaps (archived) — migration 0004 closed all prod schema gaps
+    schema_groundwork_done:   # change promotion-schema-gaps (archived) — migration 0004 closed all prod schema gaps
       - staging_item.promoted_at + promoted_memory_id (FK memory ON DELETE SET NULL); staging_status += partially_promoted
       - quarantine table (self-contained snapshot, project_id-attributable, budget CHECKs, no FK to staging → sweep-safe)
-    promote_path_implemented: change promotion-pipeline (archived) — memory loop CLOSED locally (write-to-main):
+    promote_path_implemented:   # change promotion-pipeline (archived) — memory loop CLOSED locally (write-to-main)
       - src/db/promotionRepository.ts (PgPromotionRepository: 4 op→SQL applies add/amend/supersede/deprecate, per-item txns, FOR UPDATE + current_revision==target_revision gate, ON CONFLICT dedup, content_tsv never written, quarantine snapshot, finalizeSession, apply-time project_id re-assertion)
       - src/promote/promoteService.ts (orchestration: sanitize incl. fields → judge/reuse → apply|quarantine|leave-uncertain → terminal state; fail-closed; idempotent)
       - src/judge/{judge,deterministicJudge,bedrockJudge}.ts (Judge seam; BedrockJudge fail-closed skeleton, no aws-sdk); src/auth/{oidcAuthenticator,devOidcAuthenticator}.ts (OIDC seam; ref==source_branch + repo==claim enforced)
       - src/http/promote.ts + app.ts (POST /promote); RdsAuthorizer.authorizePromote (machine_credential); findRepoByGithubSlug + findActiveMachineCredential; recordPromote audit; 5 config guards (superRefine + NODE_ENV double-check); seed dev machine_credential + demo session/item
-    hybrid_search_implemented: change hybrid-search (archived) — two-phase lexical-first recall:
+    hybrid_search_implemented:   # change hybrid-search (archived) — two-phase lexical-first recall
       - migration 0005 (CREATE EXTENSION vector; memory.embedding vector(1024); HNSW partial index vector_cosine_ops WHERE embedding IS NOT NULL)
       - src/embedder/{embedder,stubEmbedder,bedrockEmbedder}.ts (Embedder seam; EMBEDDING_DIM=1024; deterministic stub no-dep; BedrockEmbedder skeleton THROWS) + src/db/vector.ts (toVectorParam, non-finite→null)
       - memoryRepository.recallSemantic (vector NN, tenant-scoped, HNSW; existing BM25 recall UNCHANGED); recall handler two-phase (BM25 → if cursor null & total_matches<N: embed fail-soft + recallSemantic + dedupe append; order staged→BM25→semantic)
       - PromoteService writes embedding fail-soft on add/amend/supersede (deprecate skip); config EMBEDDER_STUB + SEMANTIC_FALLBACK_MIN_RESULTS(5)/K(8) guarded
-    real_bedrock_implemented: change real-bedrock-clients (archived) — real Bedrock clients behind seams:
+    real_bedrock_implemented:   # change real-bedrock-clients (archived) — real Bedrock clients behind seams
       - src/bedrock/client.ts (BedrockInvoker narrow seam over .send; makeBedrockRuntimeClient({region,maxAttempts}); sendWithTimeout via Node22 AbortController, no extra deps)
       - src/embedder/bedrockEmbedder.ts (real Titan v2 InvokeModelCommand {inputText,dimensions:1024,normalize:true}; decode body; assert 1024 FINITE; THROW on any error — fail-soft stays in callers)
       - src/judge/bedrockJudge.ts (real ConverseCommand; renderItem XML-delimited untrusted fields + anti-injection system prompt; word-boundary parseVerdict; evaluate() fail-closed→uncertain w/ error logging)
       - config: AWS_REGION (+anyRealBedrock superRefine), BEDROCK_MAX_ATTEMPTS(3), BEDROCK_TIMEOUT_MS(15000); reuse BEDROCK_MODEL_ID/BEDROCK_EMBEDDING_MODEL_ID; JUDGE_STUB_VERDICT default→uncertain; dep @aws-sdk/client-bedrock-runtime; tests inject {send} fake (no live AWS). 442 tests
       - operator env: AWS_REGION + titan-embed-text-v2:0 + fully-qualified judge model id (e.g. us.anthropic.claude-3-5-haiku-...); task role bedrock:InvokeModel + model access
+    workspace_and_demo_files:
+      pnpm_workspace: pnpm-workspace.yaml (workspace root config; packages/*)
+      web_package: packages/web (@gmemo/web — manifest-only, future React web UI; no code yet)
+      smoke: scripts/smoke.ts (run with `pnpm smoke`)
+      rate_limit_guard_test: tests/config/rateLimitGuard.test.ts
     deferred_next:
       - AWS infra DELIVERED (change terraform-infra DONE): single-AZ pilot with real Cognito + HTTPS + Fargate + RDS pg16 + Bedrock; see terraform/ for runbook
       - promotion AWS infra: real GitHub-OIDC JWKS + API Gateway IAM authorizer + Action YAML + machine_credential provisioning; quarantine sweep/retention (expires_at NULL); 3-way merge; Web UI uncertain queue
@@ -179,7 +184,7 @@ open_decisions:
   pilot_blocking:
     - SDD/OpenSpec phases of Crombie undefined -> dev capture skill cannot anchor recall/remember (GAP #1).
     - Onboarding project<->repo ticket workflow must be operational.
-    - FTS config: 'english' vs 'simple' (proposed: english).
+    - "FTS config: 'english' vs 'simple' (proposed: english)."
     - Quarantine retention: 1 vs 2 months.
     - Ticket provisioning: API-automated vs manual-after-approval.
   architecture_to_verify:

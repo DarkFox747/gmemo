@@ -1,4 +1,6 @@
-# SDD Backlog — LPMS Cloud
+# SDD Backlog — gmemo
+
+Rename note: LPMS Cloud → gmemo (C0 demo-baseline, 2026-11-07); archived changes keep the original name.
 
 Deferred work items, ordered. Promote to a `/sdd-new <name>` change when ready.
 
@@ -60,7 +62,7 @@ Deferred work items, ordered. Promote to a `/sdd-new <name>` change when ready.
 
 ## Deferred from promote-oidc
 - **M-02 rate limit** on `POST /promote` (`express-rate-limit`) before live traffic.
-- Operator: set `GITHUB_OIDC_AUDIENCE` (tie to deployed host) + workflow var `LPMS_OIDC_AUDIENCE`
+- Operator: set `GITHUB_OIDC_AUDIENCE` (tie to deployed host) + workflow var `GMEMO_OIDC_AUDIENCE`
   + promote endpoint URL; register `machine_credential` (runbook SQL, LOWERCASE repo slug); run migration 0006.
 - Web UI human-review queue for `uncertain`; quarantine sweep/retention; 3-way merge for stale targets.
 

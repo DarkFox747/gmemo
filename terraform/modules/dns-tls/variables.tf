@@ -1,5 +1,5 @@
 variable "domain_name" {
-  description = "FQDN the pilot answers on (e.g. lpms-pilot.example-fake.dev)."
+  description = "FQDN the pilot answers on (e.g. gmemo-pilot.example-fake.dev)."
   type        = string
 }
 

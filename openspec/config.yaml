@@ -3,8 +3,8 @@
 schema: sdd-config-v1
 
 project:
-  name: lpms-cloud
-  display_name: LPMS Cloud — Shared Memory Service
+  name: gmemo
+  display_name: gmemo — Shared Memory Service
   description: >-
     Crombie-internal shared memory service for AI agents (Claude Code, Cowork,
     Atenea). Evolves the local SQLite LPMS into a centralized AWS/RDS Postgres
@@ -22,7 +22,7 @@ stack:
     engine: PostgreSQL 16 (AWS RDS, Multi-AZ)
     extensions: [pgcrypto]
     planned_extensions: [pgvector]     # semantic search, deferred
-    schema_version: v2                 # docs/artefactos/lpms_schema_v2.sql
+    schema_version: v2                 # docs/artefactos/gmemo_schema_v2.sql
   protocol: MCP (Model Context Protocol) facade
   auth:
     identity_provider: AWS Cognito (federated to Google Workspace, @<COMPANY_DOMAIN> allowlist)
@@ -104,5 +104,5 @@ docs_index:
   - docs/07-captura-dev-y-skill.md
   - docs/08-onboarding-y-operacion.md
   - docs/09-decisiones-abiertas.md
-  - docs/artefactos/lpms_facade_contract_v1.md
-  - docs/artefactos/lpms_schema_v2.sql
+  - docs/artefactos/gmemo_facade_contract_v1.md
+  - docs/artefactos/gmemo_schema_v2.sql

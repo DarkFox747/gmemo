@@ -13,3 +13,15 @@ npm-debug.log*
 Dockerfile
 docker-compose.yml
 .dockerignore
+packages/**
+!packages/web/package.json
+terraform
+.github
+scripts
+.claude
+.claude.json
+.mcp.json
+entrevistas
+prompt.md
+PROMPT-demo-entrega4.md
+.sanitize-patterns

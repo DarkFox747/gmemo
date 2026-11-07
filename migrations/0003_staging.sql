@@ -1,5 +1,5 @@
 -- Migration 0003: staging session + item tables.
--- Faithful subset of docs/artefactos/lpms_schema_v2.sql — the three staging enums
+-- Faithful subset of docs/artefactos/gmemo_schema_v2.sql — the three staging enums
 -- and the two staging tables (staging_session, staging_item) with partial unique
 -- index, budget CHECKs, and op↔target CHECK.
 -- staging_op already exists from 0002 (memory_revision.op); re-guarded here so

@@ -12,7 +12,7 @@ ON CONFLICT (idp_subject) DO NOTHING;
 -- 2) project
 INSERT INTO project (id, slug, name, created_by)
 VALUES ('00000000-0000-0000-0000-000000000010',
-        'lpms-cloud', 'LPMS Cloud (local dev)',
+        'gmemo', 'gmemo (local dev)',
         '00000000-0000-0000-0000-000000000001')
 ON CONFLICT (slug) DO NOTHING;
 
@@ -20,16 +20,16 @@ ON CONFLICT (slug) DO NOTHING;
 INSERT INTO repo (id, project_id, remote_url, provider, slug, default_branch)
 VALUES ('00000000-0000-0000-0000-000000000020',
         '00000000-0000-0000-0000-000000000010',
-        'https://github.com/crombie-dev/lpms-cloud.git',
-        'github', 'lpms-cloud', 'main')
+        'https://github.com/crombie-llc/gmemo-demo.git',
+        'github', 'gmemo-demo', 'main')
 ON CONFLICT (remote_url) DO NOTHING;
 
--- 4) project_membership — viewer is sufficient for all read tools.
+-- 4) project_membership — contributor (read + stage; Decision 3).
 INSERT INTO project_membership (id, project_id, user_id, role, granted_by)
 VALUES ('00000000-0000-0000-0000-000000000030',
         '00000000-0000-0000-0000-000000000010',
         '00000000-0000-0000-0000-000000000001',
-        'viewer', '00000000-0000-0000-0000-000000000001')
+        'contributor', '00000000-0000-0000-0000-000000000001')
 ON CONFLICT (project_id, user_id) DO NOTHING;
 
 -- 5) memory rows — one each: constraint, domain_rule, decision, gotcha.
@@ -71,14 +71,14 @@ ON CONFLICT (project_id, content_hash) DO NOTHING;
 
 -- 6) machine_credential — enables authorizePromote for the dev OIDC principal.
 --    principal_name MUST equal DEV_PROMOTE_PRINCIPAL.repository (see src/auth/devOidcAuthenticator.ts)
---    and must match findRepoByGithubSlug('crombie-dev/lpms-cloud') → repo remote_url canonical slug.
+--    and must match findRepoByGithubSlug('crombie-llc/gmemo-demo') → repo remote_url canonical slug.
 --    token_hash is a non-secret dev placeholder (OIDC bypass active; never used in real auth).
 --    revoked_at omitted (NULL = active); expires 10 years out so the harness never needs rotation.
 INSERT INTO machine_credential
   (id, project_id, principal_name, token_hash, role, created_by, expires_at)
 VALUES ('00000000-0000-0000-0000-000000000050',
         '00000000-0000-0000-0000-000000000010',
-        'crombie-dev/lpms-cloud',
+        'crombie-llc/gmemo-demo',
         'dev-oidc-not-a-real-secret', 'service_agent',
         '00000000-0000-0000-0000-000000000001', now() + interval '3650 days')
 ON CONFLICT DO NOTHING;

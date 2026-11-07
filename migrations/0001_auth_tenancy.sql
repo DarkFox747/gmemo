@@ -1,5 +1,5 @@
 -- Migration 0001: auth + tenancy tables
--- Faithful subset of docs/artefactos/lpms_schema_v2.sql — the 4 enums used by
+-- Faithful subset of docs/artefactos/gmemo_schema_v2.sql — the 4 enums used by
 -- the auth/audit tables and the 6 tenancy/audit tables themselves.
 -- This file is idempotent: safe to apply more than once (guards on all DDL).
 

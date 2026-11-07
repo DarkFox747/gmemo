@@ -1,5 +1,5 @@
 -- Migration 0002: memory READ core (memory + memory_revision + memory_relation).
--- Faithful subset of docs/artefactos/lpms_schema_v2.sql — the enums used by the
+-- Faithful subset of docs/artefactos/gmemo_schema_v2.sql — the enums used by the
 -- three read tables and the tables/indexes themselves. Staging tables are NOT
 -- created (change B is read-only; see design D1).
 -- ONLY deviation from schema v2: content_tsv uses the 'english' dictionary

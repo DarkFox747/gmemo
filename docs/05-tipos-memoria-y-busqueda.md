@@ -2,7 +2,7 @@
 
 ## Qué se guarda — regla madre
 Se guarda **el porqué que no se puede reconstruir leyendo el código**. Si es derivable del código actual,
-NO va a LPMS (lo cubre el grafo). Anti-criterio: nada de estado transitorio, lo obvio del código, ni docs
+NO va a gmemo (lo cubre el grafo). Anti-criterio: nada de estado transitorio, lo obvio del código, ni docs
 reformuladas. Test de captura: "¿un dev/agente nuevo perdería tiempo o repetiría un error sin esto?".
 
 ## Tipos

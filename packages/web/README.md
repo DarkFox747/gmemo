@@ -1,4 +1,4 @@
-# @lpms/web (placeholder)
+# @gmemo/web (placeholder)
 
 Web UI de administración y curación (S3 + CloudFront en prod). Aún no scaffoldeada.
 

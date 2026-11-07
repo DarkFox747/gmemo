@@ -1,4 +1,4 @@
-// Shared memory record types — mirrors lpms_facade_contract_v1.md §1 exactly.
+// Shared memory record types — mirrors gmemo_facade_contract_v1.md §1 exactly.
 // These types are the single source of truth for every tool's response shape.
 // Do NOT add fields not present in the contract (no status, no internal IDs).
 

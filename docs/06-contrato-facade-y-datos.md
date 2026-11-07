@@ -1,6 +1,6 @@
 # 06 · Contrato del facade y modelo de datos
 
-Contrato completo en `artefactos/lpms_facade_contract_v1.md`. Esquema en `artefactos/lpms_schema_v2.sql`
+Contrato completo en `artefactos/gmemo_facade_contract_v1.md`. Esquema en `artefactos/gmemo_schema_v2.sql`
 (validado contra la gramática de PostgreSQL con pglast).
 
 ## Superficie del agente

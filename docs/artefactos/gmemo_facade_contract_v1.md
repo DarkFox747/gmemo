@@ -1,4 +1,4 @@
-# LPMS Cloud — Contrato del facade MCP (v1)
+# gmemo — Contrato del facade MCP (v1)
 
 Superficie de tools que ve el agente, con sus parámetros, forma de respuesta,
 presupuestos, enforcement de RBAC y comportamiento de errores.

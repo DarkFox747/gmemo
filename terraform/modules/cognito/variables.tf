@@ -1,13 +1,13 @@
 variable "user_pool_name" {
   description = "Cognito user pool name."
   type        = string
-  default     = "lpms-pilot-pool"
+  default     = "gmemo-pilot-pool"
 }
 
 variable "app_client_name" {
   description = "Cognito app client name."
   type        = string
-  default     = "lpms-pilot-client"
+  default     = "gmemo-pilot-client"
 }
 
 variable "authorized_user_emails" {

@@ -1,4 +1,10 @@
-# Terraform Runbook — LPMS Pilot
+# Terraform Runbook — gmemo Pilot
+
+> **ADVERTENCIA — renombrado de recursos (LPMS → gmemo).** Ejecutar `terraform apply`
+> sobre el piloto ya desplegado con los nombres antiguos **REEMPLAZA** recursos:
+> RDS (pérdida de datos salvo snapshot), secreto de Secrets Manager, cluster/servicio
+> ECS, ALB, repositorio ECR, log group y roles IAM. Haz snapshot/export antes del
+> `apply`, o conserva los nombres antiguos mediante tfvars.
 
 Cheapest-viable single-AZ AWS pilot with real Cognito (Gate 1) and HTTPS
 (Route53 + ACM). Runs `NODE_ENV=production` — all bypass flags OFF.
@@ -74,16 +80,16 @@ Cognito is free under 50k MAUs. ACM public certificates are free. No NAT
 cd terraform/bootstrap
 
 # Create a terraform.tfvars (gitignored) with a globally-unique bucket name:
-#   state_bucket_name = "lpms-pilot-tfstate-<your-account-id-suffix>"
+#   state_bucket_name = "gmemo-pilot-tfstate-<your-account-id-suffix>"
 # OR pass via -var:
 
 terraform init
 terraform apply \
-  -var="state_bucket_name=lpms-pilot-tfstate-<suffix>"
+  -var="state_bucket_name=gmemo-pilot-tfstate-<suffix>"
 
 # Copy the outputs into terraform/envs/pilot/backend.hcl:
 terraform output state_bucket_name   # → bucket value
-terraform output lock_table_name     # → dynamodb_table value (default: lpms-pilot-tflock)
+terraform output lock_table_name     # → dynamodb_table value (default: gmemo-pilot-tflock)
 ```
 
 Edit `terraform/envs/pilot/backend.hcl` and replace `CHANGE_ME_AFTER_BOOTSTRAP`
@@ -103,7 +109,7 @@ cp pilot.tfvars.example pilot.tfvars   # gitignored — safe to add real values
 
 Edit `pilot.tfvars` with real values:
 - `alb_ingress_cidrs` — your operator IP CIDR(s), e.g. `["1.2.3.4/32"]`
-- `domain_name` — the FQDN the pilot answers on (e.g. `lpms-pilot.yourdomain.dev`)
+- `domain_name` — the FQDN the pilot answers on (e.g. `gmemo-pilot.yourdomain.dev`)
 - `route53_zone_name` — your Route53 hosted zone (e.g. `yourdomain.dev`)
 - `authorized_user_emails` — email addresses to provision as Cognito users
 - `bedrock_model_id` — your Haiku model ID
@@ -182,8 +188,8 @@ aws ecr get-login-password --region "$REGION" \
 
 # Build and push from the repo root
 cd "$(git rev-parse --show-toplevel)"
-docker build -t lpms-pilot-app .
-docker tag lpms-pilot-app:latest "$ECR_URL:latest"
+docker build -t gmemo-pilot-app .
+docker tag gmemo-pilot-app:latest "$ECR_URL:latest"
 docker push "$ECR_URL:latest"
 ```
 
@@ -277,7 +283,7 @@ VALUES (gen_random_uuid(), '<cognito-sub-uuid>', 'you@<COMPANY_DOMAIN>', 'contri
 
 -- 3. Create the project row (project_membership has a FK on project.id)
 INSERT INTO project (id, slug, name, created_at)
-VALUES (gen_random_uuid(), 'lpms-pilot', 'lpms-pilot', now());
+VALUES (gen_random_uuid(), 'gmemo-pilot', 'gmemo-pilot', now());
 
 -- 4. Create project membership
 INSERT INTO project_membership (id, project_id, user_id, role, created_at)
@@ -304,7 +310,7 @@ terraform apply -var-file=pilot.tfvars -var="desired_count=1"
 # Verify the health check passes:
 aws elbv2 describe-target-health \
   --target-group-arn $(aws elbv2 describe-target-groups \
-    --names lpms-pilot-tg --query 'TargetGroups[0].TargetGroupArn' --output text)
+    --names gmemo-pilot-tg --query 'TargetGroups[0].TargetGroupArn' --output text)
 # Expect: HealthStatus = "healthy"
 ```
 
@@ -376,10 +382,10 @@ aws cognito-idp admin-set-user-mfa-preference \
 ### Deploy a new image
 
 ```bash
-docker build -t lpms-pilot-app . && docker push "$ECR_URL:latest"
+docker build -t gmemo-pilot-app . && docker push "$ECR_URL:latest"
 
 # Force ECS to pull the new image (Terraform ignores task_definition changes):
-aws ecs update-service --cluster lpms-pilot --service lpms-pilot-app --force-new-deployment
+aws ecs update-service --cluster gmemo-pilot --service gmemo-pilot-app --force-new-deployment
 ```
 
 ### Pause the service (zero cost while idle)
@@ -391,7 +397,7 @@ terraform apply -var-file=pilot.tfvars -var="desired_count=0"
 ### View logs
 
 ```bash
-aws logs tail /lpms/pilot/app --follow
+aws logs tail /gmemo/pilot/app --follow
 ```
 
 ### Rotate the DB password
@@ -400,9 +406,9 @@ Update Secrets Manager manually and ECS will pick it up on next task launch:
 
 ```bash
 aws secretsmanager put-secret-value \
-  --secret-id lpms/pilot/app \
-  --secret-string '{"DATABASE_URL":"postgresql://lpms_master:<new-password>@<endpoint>/lpms"}'
-aws ecs update-service --cluster lpms-pilot --service lpms-pilot-app --force-new-deployment
+  --secret-id gmemo/pilot/app \
+  --secret-string '{"DATABASE_URL":"postgresql://gmemo_master:<new-password>@<endpoint>/gmemo"}'
+aws ecs update-service --cluster gmemo-pilot --service gmemo-pilot-app --force-new-deployment
 ```
 
 ---
@@ -451,7 +457,7 @@ judge queue, quarantine sweep.
 ### Overview
 
 `/promote` is authenticated via GitHub Actions OIDC: no long-lived shared
-secret is stored. The LPMS service verifies the token's `iss`, `aud`, `exp`,
+secret is stored. The gmemo service verifies the token's `iss`, `aud`, `exp`,
 and signature against GitHub's JWKS, then asserts that an active
 `machine_credential` row exists for the OIDC `repository` claim within the
 target project.
@@ -467,13 +473,16 @@ confirmed.
 2. The `repo` row (`remote_url = 'https://github.com/<owner>/<repo>.git'`) is
    registered and linked to the project.
    **Important:** register the remote URL in lowercase (e.g.
-   `https://github.com/crombie-dev/lpms-cloud.git`). The service normalizes
+   `https://github.com/crombie-llc/gmemo-demo.git`). The service normalizes
    the OIDC `repository` claim to lowercase before lookup.
 3. The Fargate task's `GITHUB_OIDC_AUDIENCE` environment variable is set to
    the pilot promote endpoint URL (e.g. `https://<pilot-domain>/promote`).
 4. The GitHub repo/org has the following variables configured:
-   - `LPMS_PROMOTE_URL`     — full HTTPS URL of the `/promote` endpoint.
-   - `LPMS_OIDC_AUDIENCE`   — same value as `GITHUB_OIDC_AUDIENCE` in the service.
+   - `GMEMO_PROMOTE_URL`     — full HTTPS URL of the `/promote` endpoint.
+   - `GMEMO_OIDC_AUDIENCE`   — same value as `GITHUB_OIDC_AUDIENCE` in the service.
+
+   Note: existing repository variables must be renamed to `GMEMO_*` in GitHub
+   settings out-of-band (Terraform does not manage them).
 
 ### Idempotent provisioning SQL
 
@@ -486,7 +495,7 @@ multiple times (`ON CONFLICT DO NOTHING`).
 -- Replace :project_slug and :owner_repo with real values.
 --
 -- principal_name must equal the GitHub OIDC 'repository' claim exactly:
---   e.g. 'crombie-dev/lpms-cloud'  (no 'https://', no '.git')
+--   e.g. 'crombie-llc/gmemo-demo'  (no 'https://', no '.git')
 --
 -- token_hash uses the sentinel value 'oidc:no-shared-secret' because this
 -- credential is authenticated by JWKS signature, not a stored secret.
@@ -501,7 +510,7 @@ INSERT INTO machine_credential
 VALUES
   (
     (SELECT id FROM project WHERE slug = :project_slug),
-    :owner_repo,                    -- e.g. 'crombie-dev/lpms-cloud'
+    :owner_repo,                    -- e.g. 'crombie-llc/gmemo-demo'
     'oidc:no-shared-secret',        -- sentinel; JWKS-authenticated, no stored secret
     'service_agent',
     now() + interval '1 year'

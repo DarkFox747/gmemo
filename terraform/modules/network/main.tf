@@ -7,7 +7,7 @@ resource "aws_vpc" "main" {
   enable_dns_hostnames = true
 
   tags = {
-    Name = "lpms-pilot-vpc"
+    Name = "gmemo-pilot-vpc"
   }
 }
 
@@ -18,7 +18,7 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "lpms-pilot-igw"
+    Name = "gmemo-pilot-igw"
   }
 }
 
@@ -31,7 +31,7 @@ resource "aws_subnet" "public_a" {
   availability_zone = "${var.aws_region}a"
 
   tags = {
-    Name = "lpms-pilot-public-a"
+    Name = "gmemo-pilot-public-a"
   }
 }
 
@@ -41,7 +41,7 @@ resource "aws_subnet" "public_b" {
   availability_zone = "${var.aws_region}b"
 
   tags = {
-    Name = "lpms-pilot-public-b"
+    Name = "gmemo-pilot-public-b"
   }
 }
 
@@ -54,7 +54,7 @@ resource "aws_subnet" "private_a" {
   availability_zone = "${var.aws_region}a"
 
   tags = {
-    Name = "lpms-pilot-private-a"
+    Name = "gmemo-pilot-private-a"
   }
 }
 
@@ -64,7 +64,7 @@ resource "aws_subnet" "private_b" {
   availability_zone = "${var.aws_region}b"
 
   tags = {
-    Name = "lpms-pilot-private-b"
+    Name = "gmemo-pilot-private-b"
   }
 }
 
@@ -80,7 +80,7 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "lpms-pilot-public-rt"
+    Name = "gmemo-pilot-public-rt"
   }
 }
 
@@ -101,7 +101,7 @@ resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "lpms-pilot-private-rt"
+    Name = "gmemo-pilot-private-rt"
   }
 }
 
@@ -120,7 +120,7 @@ resource "aws_route_table_association" "private_b" {
 # :80 is kept only for the HTTP→HTTPS 301 redirect; no plaintext app traffic.
 # ---------------------------------------------------------------------------
 resource "aws_security_group" "alb" {
-  name        = "lpms-pilot-alb-sg"
+  name        = "gmemo-pilot-alb-sg"
   description = "ALB: HTTPS (443) + HTTP (80, redirect only) from allowed CIDRs."
   vpc_id      = aws_vpc.main.id
 
@@ -149,7 +149,7 @@ resource "aws_security_group" "alb" {
   }
 
   tags = {
-    Name = "lpms-pilot-alb-sg"
+    Name = "gmemo-pilot-alb-sg"
   }
 }
 
@@ -158,7 +158,7 @@ resource "aws_security_group" "alb" {
 # (Fargate runs in public subnet with a public IP; reachable only from ALB.)
 # ---------------------------------------------------------------------------
 resource "aws_security_group" "fargate" {
-  name        = "lpms-pilot-fargate-sg"
+  name        = "gmemo-pilot-fargate-sg"
   description = "Fargate: inbound 3000 from ALB SG only; egress unrestricted (IGW)."
   vpc_id      = aws_vpc.main.id
 
@@ -179,7 +179,7 @@ resource "aws_security_group" "fargate" {
   }
 
   tags = {
-    Name = "lpms-pilot-fargate-sg"
+    Name = "gmemo-pilot-fargate-sg"
   }
 }
 
@@ -187,7 +187,7 @@ resource "aws_security_group" "fargate" {
 # RDS Security Group — inbound :5432 from Fargate SG only
 # ---------------------------------------------------------------------------
 resource "aws_security_group" "rds" {
-  name        = "lpms-pilot-rds-sg"
+  name        = "gmemo-pilot-rds-sg"
   description = "RDS: inbound 5432 from Fargate SG only."
   vpc_id      = aws_vpc.main.id
 
@@ -208,6 +208,6 @@ resource "aws_security_group" "rds" {
   }
 
   tags = {
-    Name = "lpms-pilot-rds-sg"
+    Name = "gmemo-pilot-rds-sg"
   }
 }

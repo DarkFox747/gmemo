@@ -12,7 +12,7 @@ import { registerReadTools, registerWriteTools } from './tools/index.js';
 
 export function createMcpServer(deps: Deps): McpServer {
   const server = new McpServer({
-    name: 'lpms-cloud',
+    name: 'gmemo',
     version: '0.1.0',
   });
 

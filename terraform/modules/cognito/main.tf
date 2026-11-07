@@ -37,7 +37,7 @@ resource "aws_cognito_user_pool" "main" {
   }
 
   tags = {
-    Name = "lpms-pilot-user-pool"
+    Name = "gmemo-pilot-user-pool"
   }
 }
 

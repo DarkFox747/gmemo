@@ -39,7 +39,7 @@ export interface BedrockJudgeOptions {
  *
  * Untrusted fields (title/summary/body) are wrapped in XML-style delimiters
  * to provide structural context for the anti-injection clause in SYSTEM_PROMPT.
- * Field size budgets match DB CHECK constraints (docs/artefactos/lpms_schema_v2.sql):
+ * Field size budgets match DB CHECK constraints (docs/artefactos/gmemo_schema_v2.sql):
  * title≤120, summary≤200, body≤2000 — so the total prompt size is bounded.
  */
 function renderItem(item: JudgeItem): string {

@@ -2,7 +2,7 @@
 # ECR repository
 # ---------------------------------------------------------------------------
 resource "aws_ecr_repository" "app" {
-  name                 = "lpms-pilot-app"
+  name                 = "gmemo-pilot-app"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -10,7 +10,7 @@ resource "aws_ecr_repository" "app" {
   }
 
   tags = {
-    Name = "lpms-pilot-app"
+    Name = "gmemo-pilot-app"
   }
 }
 
@@ -18,11 +18,11 @@ resource "aws_ecr_repository" "app" {
 # CloudWatch log group
 # ---------------------------------------------------------------------------
 resource "aws_cloudwatch_log_group" "app" {
-  name              = "/lpms/pilot/app"
+  name              = "/gmemo/pilot/app"
   retention_in_days = 30
 
   tags = {
-    Name = "lpms-pilot-app"
+    Name = "gmemo-pilot-app"
   }
 }
 
@@ -30,10 +30,10 @@ resource "aws_cloudwatch_log_group" "app" {
 # ECS cluster
 # ---------------------------------------------------------------------------
 resource "aws_ecs_cluster" "main" {
-  name = "lpms-pilot"
+  name = "gmemo-pilot"
 
   tags = {
-    Name = "lpms-pilot"
+    Name = "gmemo-pilot"
   }
 }
 
@@ -54,11 +54,11 @@ data "aws_iam_policy_document" "ecs_assume_role" {
 # Execution role — ECR pull + CloudWatch Logs + Secrets Manager (scoped to secret)
 # ---------------------------------------------------------------------------
 resource "aws_iam_role" "execution" {
-  name               = "lpms-pilot-execution-role"
+  name               = "gmemo-pilot-execution-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
 
   tags = {
-    Name = "lpms-pilot-execution-role"
+    Name = "gmemo-pilot-execution-role"
   }
 }
 
@@ -76,7 +76,7 @@ data "aws_iam_policy_document" "execution_secrets" {
 }
 
 resource "aws_iam_role_policy" "execution_secrets" {
-  name   = "lpms-pilot-execution-secrets"
+  name   = "gmemo-pilot-execution-secrets"
   role   = aws_iam_role.execution.id
   policy = data.aws_iam_policy_document.execution_secrets.json
 }
@@ -85,11 +85,11 @@ resource "aws_iam_role_policy" "execution_secrets" {
 # Task role — least-privilege Bedrock only (InvokeModel + Converse on model ARNs)
 # ---------------------------------------------------------------------------
 resource "aws_iam_role" "task" {
-  name               = "lpms-pilot-task-role"
+  name               = "gmemo-pilot-task-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
 
   tags = {
-    Name = "lpms-pilot-task-role"
+    Name = "gmemo-pilot-task-role"
   }
 }
 
@@ -106,7 +106,7 @@ data "aws_iam_policy_document" "task_bedrock" {
 }
 
 resource "aws_iam_role_policy" "task_bedrock" {
-  name   = "lpms-pilot-task-bedrock"
+  name   = "gmemo-pilot-task-bedrock"
   role   = aws_iam_role.task.id
   policy = data.aws_iam_policy_document.task_bedrock.json
 }
@@ -117,7 +117,7 @@ resource "aws_iam_role_policy" "task_bedrock" {
 # Only DATABASE_URL is a secrets entry; everything else is non-secret environment.
 # ---------------------------------------------------------------------------
 resource "aws_ecs_task_definition" "app" {
-  family                   = "lpms-pilot-app"
+  family                   = "gmemo-pilot-app"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = tostring(var.task_cpu)
@@ -177,7 +177,7 @@ resource "aws_ecs_task_definition" "app" {
   ])
 
   tags = {
-    Name = "lpms-pilot-app"
+    Name = "gmemo-pilot-app"
   }
 }
 
@@ -185,14 +185,14 @@ resource "aws_ecs_task_definition" "app" {
 # ALB — internet-facing, 2 public subnets
 # ---------------------------------------------------------------------------
 resource "aws_lb" "main" {
-  name               = "lpms-pilot-alb"
+  name               = "gmemo-pilot-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [var.alb_sg_id]
   subnets            = var.public_subnet_ids
 
   tags = {
-    Name = "lpms-pilot-alb"
+    Name = "gmemo-pilot-alb"
   }
 }
 
@@ -200,7 +200,7 @@ resource "aws_lb" "main" {
 # Target group — ip target type, port 3000, health check /health
 # ---------------------------------------------------------------------------
 resource "aws_lb_target_group" "app" {
-  name        = "lpms-pilot-tg"
+  name        = "gmemo-pilot-tg"
   port        = 3000
   protocol    = "HTTP"
   target_type = "ip"
@@ -216,7 +216,7 @@ resource "aws_lb_target_group" "app" {
   }
 
   tags = {
-    Name = "lpms-pilot-tg"
+    Name = "gmemo-pilot-tg"
   }
 }
 
@@ -275,7 +275,7 @@ resource "aws_route53_record" "alb_a" {
 # ECS service
 # ---------------------------------------------------------------------------
 resource "aws_ecs_service" "app" {
-  name            = "lpms-pilot-app"
+  name            = "gmemo-pilot-app"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.app.arn
   desired_count   = var.desired_count
@@ -306,6 +306,6 @@ resource "aws_ecs_service" "app" {
   ]
 
   tags = {
-    Name = "lpms-pilot-app"
+    Name = "gmemo-pilot-app"
   }
 }

@@ -67,6 +67,18 @@ describe('createMcpServer — tool registration', () => {
     expect(registeredNames).toEqual(expectedNames);
   });
 
+  it('reports serverInfo name gmemo', async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    const mcpServer = createMcpServer(makeStubDeps());
+    await mcpServer.connect(serverTransport);
+
+    client = new Client({ name: 'test-client', version: '1.0.0' });
+    await client.connect(clientTransport);
+
+    expect(client.getServerVersion()?.name).toBe('gmemo');
+  });
+
   it('each tool has a non-empty inputSchema', async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
