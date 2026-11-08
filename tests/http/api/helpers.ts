@@ -34,6 +34,8 @@ import {
   ScriptedDirectPromote,
 } from '../../memory/directFakes.js';
 import { FakeJudge } from '../../promote/fakes.js';
+import type { AdminSummaryRepository } from '../../../src/db/adminSummaryRepository.js';
+import type { AdminSummaryDto } from '../../../src/http/api/types.js';
 
 // ---------------------------------------------------------------------------
 // Seed: two projects, one admin each, plus every non-admin shape.
@@ -139,6 +141,17 @@ export function bearer(user: { subject: string }): string {
   return `Bearer ${user.subject}`;
 }
 
+/** Admin summary fake (C7): one summary per project id; records every lookup. */
+export class FakeAdminSummaryRepository implements AdminSummaryRepository {
+  summaries = new Map<string, AdminSummaryDto>();
+  calls: string[] = [];
+
+  async getAdminSummary(projectId: string): Promise<AdminSummaryDto | null> {
+    this.calls.push(projectId);
+    return this.summaries.get(projectId) ?? null;
+  }
+}
+
 export interface ApiTestKit {
   app: express.Express;
   authRepo: InMemoryAuthRepository;
@@ -160,6 +173,8 @@ export interface ApiTestKit {
     quarantine: FakeQuarantineRepository;
     judge: FakeJudge;
   };
+  /** Backing fake of the admin summary route (C7). */
+  adminSummaryRepo: FakeAdminSummaryRepository;
 }
 
 export function makeApiTestApp(
@@ -182,6 +197,8 @@ export function makeApiTestApp(
     quarantine: new FakeQuarantineRepository(),
     judge: new FakeJudge(),
   };
+
+  const adminSummaryRepo = new FakeAdminSummaryRepository();
 
   const deps: ApiRouterDeps = {
     authenticator,
@@ -209,6 +226,7 @@ export function makeApiTestApp(
       judge: direct.judge,
       routing: DIRECT_ROUTING,
     }),
+    adminSummaryRepository: adminSummaryRepo,
     ...overrides,
   };
 
@@ -218,6 +236,6 @@ export function makeApiTestApp(
   app.use('/api', apiErrorHandler);
   return {
     app, authRepo, authenticator, queueRepo, promotionRepo, embedder, quarantineRepo, quarantinePromote,
-    lifecycleRepo, direct,
+    lifecycleRepo, direct, adminSummaryRepo,
   };
 }

@@ -10,13 +10,13 @@ contrato del facade en `docs/artefactos/gmemo_facade_contract_v1.md`.
 src/            # servidor (Express + facade MCP, TypeScript)
 migrations/     # migraciones SQL numeradas + seed.dev.sql
 scripts/        # smoke.ts (prueba de humo)
-packages/web/   # @gmemo/web — futura web de administración/curación (solo manifest + README)
+packages/web/   # @gmemo/web — web de gobierno (React + Vite, C7)
 terraform/      # IaC
 docs/           # diseño + memoria de decisiones
 ```
 
-El servidor vive en la raíz del repo. `packages/web` es un workspace pnpm aparte; para agregarle dependencias:
-`pnpm add <pkg> --filter @gmemo/web`.
+El servidor vive en la raíz del repo. `packages/web` es un workspace pnpm aparte; sus dependencias las agrega
+un humano (`pnpm add <pkg> --filter @gmemo/web`) y commitea el lockfile.
 
 ## Requisitos
 
@@ -111,7 +111,10 @@ Las variables de la app dentro de compose están definidas en `docker-compose.ym
 | `pnpm build` | compila TypeScript a `dist/` |
 | `pnpm start` | corre el build (`node dist/index.js`) |
 | `pnpm test` | Vitest (en watch; usar `pnpm test -- --run` para una sola pasada) |
-| `pnpm lint` | ESLint sobre `src`, `tests` y `scripts` |
+| `pnpm lint` | ESLint sobre `src`, `tests`, `scripts` y `packages/web` (incluye la regla anti-HTML de la web) |
+| `pnpm dev:web` | web en Vite (:5173) con proxy de `/api` a :3000 |
+| `pnpm build:web` | build de la web a `packages/web/dist` |
+| `pnpm typecheck:web` | type-check de la web (Vite no type-chequea) |
 | `pnpm format` | Prettier |
 | `pnpm migrate` | aplica las migraciones numeradas |
 | `pnpm provision` | provisiona roles de la base |
@@ -126,6 +129,9 @@ Las variables de la app dentro de compose están definidas en `docker-compose.ym
 ```bash
 pnpm test -- --run
 ```
+
+Línea de verificación completa: `pnpm build && pnpm typecheck:web && pnpm build:web && pnpm test -- --run && pnpm lint`.
+Los tests de la web (`packages/web/src/**/*.test.ts`) corren en el mismo Vitest: cliente API y funciones puras.
 
 Los tests de integración con DB necesitan `DATABASE_URL` apuntando al Postgres de compose (ver
 `.env.dev.example`); sin esa variable se saltean.
@@ -374,6 +380,23 @@ fallback SPA para rutas sin extensión. El fallback nunca intercepta `/api`, `/m
 Las respuestas HTML llevan una CSP estricta same-origin y `Cache-Control: no-cache`; las respuestas JSON
 no cambian. El server no arranca si la carpeta no tiene `index.html`. La variable está prohibida con
 `NODE_ENV=production` (la config falla al arrancar).
+
+#### Web de gobierno (C7)
+
+- **Compose:** `docker compose up --build` construye la web en la etapa `web-builder` del Dockerfile, la copia a
+  `/app/web` y compose fija `WEB_STATIC_DIR=/app/web`: la web queda en `http://localhost:3000/`.
+- **Host con recarga en caliente:** server con `AUTH_DEV_BYPASS=true` en :3000 (`pnpm dev` o compose) y
+  `pnpm dev:web` (Vite en :5173, proxy de `/api` → :3000). Abrir `http://localhost:5173/`.
+- **Usuarios demo** (selector *Usuario de desarrollo*, envía `X-Dev-User`): `tl@demo.local` (líder técnico,
+  `project_admin` de *Portal de Clientes*), `dev@demo.local` (colaborador), `viewer@demo.local` (lector). El
+  colaborador y el lector ven el estado "Sin permisos" en las pantallas de líder técnico; en Cuarentena solo ven
+  sus propias unidades y sin Restaurar. La web no guarda tokens ni manda `Authorization`; el server ignora
+  `X-Dev-User` en producción.
+- **CSP:** el build sólo emite `<script type="module" src>` y `<link rel="stylesheet">` (sin inline), compatible
+  con la CSP de arriba. El modo dev de Vite inyecta un preámbulo inline de React Refresh; Express nunca sirve el
+  dev server, así que eso no aplica a la CSP.
+- **Texto, nunca HTML:** todo texto del servidor se renderiza como texto React. ESLint prohíbe
+  `dangerouslySetInnerHTML`/`innerHTML` en `packages/web` y `packages/web/src/security.test.ts` lo verifica.
 
 ### Producción: S3 + CloudFront
 

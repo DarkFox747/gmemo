@@ -345,6 +345,26 @@ async function main(): Promise<void> {
     }
     if (typeof body.count !== 'number') fail('sweep response has no numeric count');
   });
+
+  // C7: read-only administration summary (no secrets; project_admin only).
+  const adminSummaryPath = `/api/v1/projects/${DEMO_PROJECT_ID}/admin-summary`;
+  await step('api admin-summary as tech lead', async () => {
+    const res = await request(adminSummaryPath, { method: 'GET', headers: { 'X-Dev-User': DEMO_TL } });
+    if (res.status !== 200) fail(`HTTP ${res.status} from admin-summary`);
+    const text = await res.text();
+    if (/token/i.test(text)) fail('admin-summary response mentions a token');
+    const body = JSON.parse(text) as { members?: unknown; repos?: unknown; credentials?: unknown };
+    if (!Array.isArray(body.members) || body.members.length === 0) fail('admin-summary has no members');
+    if (!Array.isArray(body.repos)) fail('admin-summary has no repos array');
+    if (!Array.isArray(body.credentials)) fail('admin-summary has no credentials array');
+  });
+
+  await step('api admin-summary as viewer is opaque 404', async () => {
+    const res = await request(adminSummaryPath, { method: 'GET', headers: { 'X-Dev-User': DEMO_VIEWER } });
+    if (res.status !== 404) fail(`HTTP ${res.status}, expected 404`);
+    const text = await res.text();
+    if (text !== '{"error":"Not found"}') fail(`body is ${text}, expected {"error":"Not found"}`);
+  });
 }
 
 main().catch((err: unknown) => {

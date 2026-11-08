@@ -29,6 +29,7 @@ import type { QuarantineReasonCode } from '../quarantine/reason.js';
 import type { QuarantineServiceLike } from '../quarantine/quarantineService.js';
 import type { LifecycleServiceLike } from '../lifecycle/types.js';
 import type { DirectMemoryServiceLike } from '../memory/types.js';
+import type { AdminSummaryRepository } from '../db/adminSummaryRepository.js';
 
 // ---------------------------------------------------------------------------
 // Core identity / context types
@@ -126,7 +127,9 @@ export type ApiAction =
   | 'memory.read'
   | 'memory.preview'
   | 'memory.create'
-  | 'memory.amend';
+  | 'memory.amend'
+  /** C7 read-only administration view. */
+  | 'admin_summary.read';
 
 /** Audit detail for REST actions - ids and counters only, never titles, bodies or reasons. */
 export interface ApiAuditDetail {
@@ -350,6 +353,8 @@ export interface AppServices extends AuthServices {
   lifecycleService: LifecycleServiceLike;
   /** Direct memory management: list/detail/preview/create/amend (C5, HU-13). */
   directMemoryService: DirectMemoryServiceLike;
+  /** Read-only administration summary (C7) — consumed by the /api admin route. */
+  adminSummaryRepository: AdminSummaryRepository;
 }
 
 /**

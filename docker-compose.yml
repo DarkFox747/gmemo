@@ -44,6 +44,7 @@ services:
       PORT: "3000"
       HOST: "0.0.0.0"
       LOG_LEVEL: debug
+      WEB_STATIC_DIR: /app/web       # dev only — rejected under NODE_ENV=production (C2 guard); serves the web at http://localhost:3000/
       # COGNITO_* intentionally omitted -- optional under the dev bypass.
     depends_on:
       db:

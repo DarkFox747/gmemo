@@ -70,6 +70,7 @@ import type { ReviewServiceLike } from '../../src/http/api/types.js';
 import type { QuarantineServiceLike } from '../../src/quarantine/quarantineService.js';
 import type { LifecycleServiceLike } from '../../src/lifecycle/types.js';
 import type { DirectMemoryServiceLike } from '../../src/memory/types.js';
+import type { AdminSummaryRepository } from '../../src/db/adminSummaryRepository.js';
 import type { Judge, JudgeItem } from '../../src/judge/judge.js';
 import type { OidcVerifier, PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
 import { PromoteService } from '../../src/promote/promoteService.js';
@@ -544,6 +545,11 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     amend: () => Promise.resolve({ kind: 'not_found' as const }),
   };
 
+  // Stub admin summary (C7): every project is not found.
+  const stubAdminSummaryRepository: AdminSummaryRepository = {
+    getAdminSummary: () => Promise.resolve(null),
+  };
+
   return {
     authenticator: stubAuthenticator,
     tenantResolver: stubTenantResolver,
@@ -562,6 +568,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     quarantineService: stubQuarantineService,
     lifecycleService: stubLifecycleService,
     directMemoryService: stubDirectMemoryService,
+    adminSummaryRepository: stubAdminSummaryRepository,
     ...overrides,
   };
 }

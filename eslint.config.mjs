@@ -7,7 +7,7 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   prettierConfig,
   {
-    ignores: ['dist/**', 'node_modules/**'],
+    ignores: ['dist/**', 'node_modules/**', 'packages/web/dist/**'],
   },
   {
     rules: {
@@ -22,6 +22,30 @@ export default tseslint.config(
           caughtErrorsIgnorePattern: '^_',
         },
       ],
+    },
+  },
+  {
+    // Web UI (C7): server text is rendered as React text only (stored-XSS defence, C1 R1-SEC8).
+    files: ['packages/web/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+          message: 'Render server text as text (C1 R1-SEC8).',
+        },
+        {
+          selector: 'MemberExpression[property.name=/^(innerHTML|outerHTML)$/]',
+          message: 'No HTML sinks.',
+        },
+        {
+          selector: 'CallExpression[callee.property.name=/^(insertAdjacentHTML|write|writeln)$/]',
+          message: 'No HTML sinks.',
+        },
+      ],
+      'no-eval': 'error',
+      'no-implied-eval': 'error',
+      'no-new-func': 'error',
     },
   },
 );

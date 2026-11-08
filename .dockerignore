@@ -15,6 +15,12 @@ docker-compose.yml
 .dockerignore
 packages/**
 !packages/web/package.json
+!packages/web/index.html
+!packages/web/vite.config.ts
+!packages/web/tsconfig.json
+!packages/web/public/**
+!packages/web/src/**
+packages/web/src/**/*.test.ts
 terraform
 .github
 scripts

@@ -13,6 +13,7 @@ import type {
   Principal,
   ProjectContext,
   ProjectMember,
+  ProjectRole,
 } from '../../mcp/context.js';
 import type { AuthRepository } from '../../db/authRepository.js';
 import type { MemoryType } from '../../contracts/memory.js';
@@ -22,6 +23,7 @@ import type { QuarantineServiceLike } from '../../quarantine/quarantineService.j
 import type { LifecycleServiceLike } from '../../lifecycle/types.js';
 import type { MemoryStatus } from '../../db/memoryAdminRepository.js';
 import type { DirectMemoryServiceLike } from '../../memory/types.js';
+import type { AdminSummaryRepository } from '../../db/adminSummaryRepository.js';
 
 /**
  * Approve outcomes the caller can fix by reloading the item.
@@ -96,6 +98,8 @@ export interface ApiRouterDeps {
   lifecycleService: LifecycleServiceLike;
   /** Direct memory management: list, detail, preview, create, amend (C5). */
   directMemoryService: DirectMemoryServiceLike;
+  /** Read-only administration summary (C7). */
+  adminSummaryRepository: AdminSummaryRepository;
 }
 
 export interface ApiRouterOptions {
@@ -359,3 +363,36 @@ export type DirectWriteResponseDto =
       reasonCode: QuarantineReasonCode | null;
       criterion: QuarantineCriterion | null;
     };
+
+// ---------------------------------------------------------------------------
+// Administration summary (C7, read-only; never a token or token hash)
+// ---------------------------------------------------------------------------
+
+export interface AdminSummaryDto {
+  project: { id: string; slug: string; name: string; createdAt: string };
+  repos: Array<{
+    id: string;
+    remoteUrl: string;
+    slug: string | null;
+    provider: string | null;
+    defaultBranch: string;
+    createdAt: string;
+  }>;
+  members: Array<{
+    userId: string;
+    email: string;
+    displayName: string | null;
+    role: ProjectRole;
+    grantedAt: string;
+    disabled: boolean;
+  }>;
+  credentials: Array<{
+    id: string;
+    principalName: string;
+    role: ProjectRole;
+    createdAt: string;
+    expiresAt: string;
+    revokedAt: string | null;
+    status: 'active' | 'expired' | 'revoked';
+  }>;
+}

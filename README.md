@@ -1,77 +1,48 @@
-# gmemo — Memoria global del diseño
+# gmemo — Memoria compartida y gobernada para agentes de desarrollo
 
-Notas de trabajo del diseño de **gmemo**, la evolución de LPMS (memoria local por dev)
-a un **servicio de memoria compartida de Crombie** hosteado en AWS. Sirven para guiar futuras
-sesiones: capturan **decisiones + el porqué**, no solo el qué.
+**gmemo** es la *Plataforma de Memoria Compartida y Gobernada para Agentes de Desarrollo de Software*, Trabajo Final de Grado de la Universidad Siglo 21. Es la evolución de LPMS (memoria local por dev) a un servicio de memoria compartida para equipos de desarrollo: los agentes de IA recuerdan decisiones, restricciones y reglas del proyecto, pero solo **proponen** conocimiento nuevo; nada llega a la memoria principal sin pasar por validación automática y, cuando corresponde, por una persona.
 
-## Estado (al 2026-07-30)
+## Funcionalidades
 
-**Diseño** cerrado: esquema v2, contrato del facade v1, hosting/infra, captura del dev. Atenea diferida (ver 07).
+- **Fachada MCP**: `recall`, `remember`, `get_memory`, `get_context`, `list_staged` y `discard_staged` sobre `POST /mcp`.
+- **Staging**: los agentes escriben a una sesión de preparación, nunca a la memoria principal.
+- **Pipeline de promoción + juez**: `POST /promote` sanea y evalúa cada propuesta con un juez (Bedrock, o determinista en desarrollo).
+- **Cola de revisión humana**: lo dudoso y los tipos obligatorios (`MANDATORY_REVIEW_TYPES`) esperan la decisión de un administrador.
+- **Cuarentena**: lo rechazado por seguridad se retiene con vencimiento y se puede restaurar.
+- **Ciclo de vida**: revalidación periódica, retiro y reversión de memorias.
+- **Gestión directa**: alta, edición y retiro de memorias por un administrador, con historial de revisiones.
+- **Búsqueda híbrida RRF**: texto completo + vectores (pgvector) fusionados con Reciprocal Rank Fusion.
+- **Web de gobierno**: cola de revisión, detalle, cuarentena, memoria del proyecto y administración.
 
-**Implementación — pilot / read + write path (5 changes SDD archivados en `openspec/changes/archive/`):**
-- `scaffold-runtime-mcp-facade` — Express + facade MCP + Vitest.
-- `auth-two-gate` — Cognito (Gate 1) + RBAC RDS (Gate 2) + audit + migración `0001`.
-- `data-model` — tablas de memoria (`0002`) + `MemoryRepository`; `recall`/`get_memory`/`get_context` devuelven datos reales.
-- `dev-harness` — Docker + compose + seed + bypass de Cognito solo-dev (guardado contra prod). Ver "Levantar en 2 comandos".
-- `write-path` — staging (`0003`) + `StagingRepository` + `remember`/`list_staged`/`discard_staged` (los agentes **proponen** a staging, nunca escriben a main) + RBAC de escritura + audit (`remember` y `discard`) + secret-scan fail-closed + `recall` mezcla `source:"staged"`.
-
-555 tests en verde (89 de integración DB se saltean sin `DATABASE_URL`; 466 en la ejecución unitaria) · gestor de paquetes **pnpm** exclusivo.
-Decisiones antes abiertas, ahora resueltas: FTS `english`, framework de test (Vitest), fases SDD (este framework).
-
-**Pendiente / backlog** (`openspec/backlog.md`): `promotion-pipeline` (`POST /promote` + GitHub Action OIDC +
-juez Bedrock + cuarentena, requiere cerrar 4 gaps de schema + retención de cuarentena 1 vs 2 meses),
-pgvector, helmet + rate-limit, bump de pnpm ≥10.16 para activar `minimumReleaseAge`, correr
-`docker compose up --build` una vez.
-
-## Índice
-
-| Archivo | Tema |
-|---|---|
-| `docs/01-vision-y-capas.md` | Objetivo de negocio, modelo de dos capas, engram vs codebase-memory-mcp |
-| `docs/02-hosting-infra-aws.md` | Hosting seguro, ALB vs API Gateway vs AgentCore, servicios AWS, deploy |
-| `docs/03-auth-identidad-rbac.md` | OAuth/Cognito (2 compuertas), 3 flujos de identidad, RBAC, multi-repo |
-| `docs/04-escritura-staging-promocion.md` | Read+stage, sesiones, 4 ops, binding por rama, pipeline, juez, cuarentena |
-| `docs/05-tipos-memoria-y-busqueda.md` | 7 tipos + criterio de captura, búsqueda híbrida, alcance, TTL |
-| `docs/06-contrato-facade-y-datos.md` | recall/remember/get_memory/get_context + presupuestos + modelo de datos |
-| `docs/07-captura-dev-y-skill.md` | Modelo de captura del dev, hallazgos de engram, librarian (descartado), Atenea |
-| `docs/08-onboarding-y-operacion.md` | Onboarding proyecto↔repo (por ticket), build del grafo en CI, offboarding |
-| `docs/09-decisiones-abiertas.md` | Lo que falta definir, ordenado por prioridad |
-| `docs/artefactos/` | schema .sql, contrato .md, diagramas .png, comparación .xlsx |
-
-## Gestor de paquetes: SOLO pnpm
-
-Este repo usa **pnpm exclusivamente** (`pnpm@9.15.0`, fijado en
-`package.json → packageManager`). **No usar npm ni bun.** Está enforced en tres capas:
-`engines` + `.npmrc engine-strict=true` (npm/yarn fallan por versión), y el hook
-`.claude/hooks/guard-package-manager.js` (bloquea npm/yarn/bun y cualquier install de
-pnpm que no sea `--frozen-lockfile`). Para agregar/actualizar deps: `pnpm add …` en tu
-shell, commiteás `pnpm-lock.yaml`, y los agentes reproducen con
-`pnpm install --frozen-lockfile`.
-
-## Levantar el stack (Local Dev — Docker)
+## Inicio rápido
 
 ```bash
 docker compose up --build
-pnpm smoke          # prueba de humo (requiere Node 22 + pnpm en el host)
+pnpm demo
 ```
 
-Compose levanta Postgres (pgvector), corre las migraciones + el seed de desarrollo y arranca la app.
-Detalles, scripts y desarrollo en el host: ver [`DEVELOPMENT.md`](DEVELOPMENT.md).
-
-```
-GET http://localhost:3000/health
-→ 200  { "status": "ok" }
-```
-
-El Gate 1 (Cognito) queda stubbeado por `AUTH_DEV_BYPASS=true`; Gate 2, RBAC y audit corren de verdad
-contra la DB local con seed. Cada request a `POST /mcp` debe llevar el header del git remote sembrado;
-en local no hace falta `Authorization`.
+Luego abrir **http://localhost:3000/** (web de gobierno; el selector *Usuario de desarrollo* elige `tl@`, `dev@` o `viewer@demo.local`). `pnpm demo` recorre el flujo completo contra el stack local. Requiere Docker; Node 22 y pnpm solo para los scripts del host.
 
 > **Los bypass/stubs son solo de dev.** `AUTH_DEV_BYPASS`, `JUDGE_STUB`, `PROMOTE_OIDC_DEV_BYPASS` y
 > `EMBEDDER_STUB` con `NODE_ENV=production` (y `RATE_LIMIT_ENABLED=false`) hacen que la config se
 > rechace: el server sale con código 1 al arrancar.
 
-### Variables de entorno (`src/config/index.ts`)
+## Documentación
+
+- [`docs/demo/INSTRUCTIVO.md`](docs/demo/INSTRUCTIVO.md): instructivo de la demo, paso a paso.
+- [`DEVELOPMENT.md`](DEVELOPMENT.md): desarrollo, scripts, tests y ejemplos de API.
+- [`docs/demo/metricas.md`](docs/demo/metricas.md): métricas del proyecto.
+- [`docs/demo/capturas/`](docs/demo/capturas/): capturas de la web de gobierno.
+- [`openspec/`](openspec/): especificaciones y changes SDD (incluye `backlog.md`).
+- [`packages/web/README.md`](packages/web/README.md): web de gobierno.
+
+## Gestor de paquetes: SOLO pnpm
+
+Este repo usa **pnpm exclusivamente** (versión fijada en `package.json`, campo `packageManager`); npm, yarn y bun están bloqueados.
+
+## Configuración
+
+Variables de entorno (`src/config/index.ts`):
 
 | Variable | Default | Notas |
 |---|---|---|
@@ -99,41 +70,20 @@ en local no hace falta `Authorization`.
 | `REVALIDATION_DAYS` | `60` | días hasta que una memoria aplicada pasa a `pending_revalidation` (`revalidate_at`; `outcome` nunca vence); entero 1..3650 |
 | `JOBS_TOKEN` | — | opcional, ≥32 caracteres: bearer de `/internal/jobs/*`. Sin token los jobs solo se habilitan en `development`; en producción sin token quedan deshabilitados (404) |
 
-### Sample POST /mcp — recall (JSON-RPC tools/call)
+## Índice de diseño
 
-```bash
-curl -sS http://localhost:3000/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -H 'X-Git-Remote: https://github.com/crombie-llc/gmemo-demo.git' \
-  -d '{
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": { "name": "recall", "arguments": { "query": "pnpm package manager" } }
-      }'
-```
-
-### Sample POST /mcp — get_context (JSON-RPC tools/call)
-
-```bash
-curl -sS http://localhost:3000/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -H 'X-Git-Remote: https://github.com/crombie-llc/gmemo-demo.git' \
-  -d '{
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": { "name": "get_context", "arguments": {} }
-      }'
-```
-
-The `X-Git-Remote` header is load-bearing: `RdsTenantResolver` uses it to resolve the
-tenant (project + repo). A missing or unregistered remote returns a generic
-`PERMISSION_DENIED` — no tenant enumeration.
-
----
+| Archivo | Tema |
+|---|---|
+| `docs/01-vision-y-capas.md` | Objetivo de negocio, modelo de dos capas, engram vs codebase-memory-mcp |
+| `docs/02-hosting-infra-aws.md` | Hosting seguro, ALB vs API Gateway vs AgentCore, servicios AWS, deploy |
+| `docs/03-auth-identidad-rbac.md` | OAuth/Cognito (2 compuertas), 3 flujos de identidad, RBAC, multi-repo |
+| `docs/04-escritura-staging-promocion.md` | Read+stage, sesiones, 4 ops, binding por rama, pipeline, juez, cuarentena |
+| `docs/05-tipos-memoria-y-busqueda.md` | 7 tipos + criterio de captura, búsqueda híbrida, alcance, TTL |
+| `docs/06-contrato-facade-y-datos.md` | recall/remember/get_memory/get_context + presupuestos + modelo de datos |
+| `docs/07-captura-dev-y-skill.md` | Modelo de captura del dev, hallazgos de engram, librarian (descartado), Atenea |
+| `docs/08-onboarding-y-operacion.md` | Onboarding proyecto↔repo (por ticket), build del grafo en CI, offboarding |
+| `docs/09-decisiones-abiertas.md` | Lo que falta definir, ordenado por prioridad |
+| `docs/artefactos/` | schema .sql, contrato .md, diagramas .png, comparación .xlsx |
 
 ## Principios rectores (no negociables)
 

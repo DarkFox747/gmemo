@@ -31,7 +31,7 @@ Compose aplica las migraciones y el seed de desarrollo (servicio `migrate`) y ar
 | API REST de la web | `http://localhost:3000/api/v1` (por ejemplo `/api/v1/me`) |
 | Promoción por merge | `POST http://localhost:3000/promote` |
 | Jobs programados (modo abierto solo en desarrollo) | `POST http://localhost:3000/internal/jobs/revalidation-sweep`, `/quarantine-purge`, `/web-session-reaper` |
-| Web (cuando esté C7) | `http://localhost:3000/` |
+| Web de gobierno (C7) | `http://localhost:3000/` (rutas por hash: `#/review`, `#/quarantine`, `#/memory`, `#/admin`) |
 | Postgres (depuración) | `localhost:5433`, base `gmemo` (credenciales de desarrollo en `docker-compose.yml`) |
 
 ## 5. Usuarios de desarrollo y cambio de rol
@@ -45,7 +45,7 @@ El login real (Cognito) está sustituido por un *bypass* de desarrollo que es im
 | `viewer@demo.local` | `viewer` | Solo lectura; las rutas de administración responden un 404 opaco |
 
 - **API REST**: el usuario se elige con la cabecera `X-Dev-User: tl@demo.local`.
-- **Web** (C7): selector "Usuario de desarrollo" en la barra superior.
+- **Web**: selector "Usuario de desarrollo" en la barra superior (líder técnico / colaborador / lector); envía `X-Dev-User` y recarga la pantalla. La web no guarda tokens.
 - **MCP**: el *bypass* usa un principal fijo (`dev-local-user`, "Local Dev User", rol `contributor`); el proyecto se resuelve con la cabecera `X-Git-Remote` y la sesión de staging con `X-Git-Branch`.
 
 ## 6. Guion paso a paso
@@ -81,17 +81,63 @@ El script lo muestra tal cual:
 
 Todo lo que ocurre después (sanitización, juez, cola, cuarentena, aplicación idempotente) es el código real.
 
-### 6.3 En la web (Pantallas web, C7)
+### 6.3 En la web (`http://localhost:3000/`)
 
-Con el usuario `tl@demo.local`, antes y después de `pnpm demo`:
+Abrir `http://localhost:3000/` con el stack recién levantado. La barra superior tiene el selector **Proyecto**
+("Portal de Clientes"), el selector **Usuario de desarrollo** y el rol con las iniciales. La barra lateral muestra
+las insignias de pendientes (cola) y de entradas en cuarentena.
 
-1. **Cola de revisión**: 4 unidades del seed (2 dudosas: contradicción y falta de anclaje; 2 de revisión obligatoria). Tras el script, la decisión nueva ya no está (fue aprobada).
-2. **Detalle de revisión**: abrir la dudosa "Cache customer profile reads in Redis for 5 minutes"; el Juez explica la contradicción y muestra la unidad relacionada; aprobar con "Marcar la unidad relacionada como reemplazada".
-3. **Cuarentena**: una entrada por motivo (datos sensibles con `[REDACTADO]`, instrucciones embebidas, duplicación, rechazo del juez, rechazo del líder técnico). La de rechazo del líder técnico se puede restaurar y, al ser una regla de dominio, vuelve a la cola de revisión obligatoria.
-4. **Memoria del proyecto**: pestañas Activas / Pendientes de revalidación (las 2 vencidas tras el job), historial de versiones (por ejemplo la restricción de datos personales, versión 3) y alta/edición con vista previa del Juez.
-5. **Administración**: proyecto, dos repositorios, miembros con rol y la credencial de servicio del segundo repositorio (sin secretos).
+| Pantalla | Ruta | Captura |
+|---|---|---|
+| Cola de revisión (Fig. 12) | `#/review` | [`capturas/1-cola-de-revision.png`](capturas/1-cola-de-revision.png) |
+| Detalle de revisión (Fig. 13) | `#/review/<itemId>` | [`capturas/2-detalle-de-revision.png`](capturas/2-detalle-de-revision.png) |
+| Cuarentena (Fig. 14) | `#/quarantine` (detalle `#/quarantine/<id>`) | [`capturas/3-cuarentena.png`](capturas/3-cuarentena.png) |
+| Memoria del proyecto (Fig. 16) | `#/memory` (`#/memory/new`, `#/memory/<id>`, `#/memory/<id>/edit`) | [`capturas/4-memoria-del-proyecto.png`](capturas/4-memoria-del-proyecto.png) |
+| Administración (Fig. 15) | `#/admin` | [`capturas/5-administracion.png`](capturas/5-administracion.png) |
 
-Las capturas se generan con `pnpm screenshots` (ver sección 8).
+Recorrido sugerido (antes de `pnpm demo`, con los datos del seed):
+
+1. **Selector de usuario.** Elegir *Lector (viewer@demo.local)*: la Cola de revisión, la Memoria del proyecto y
+   la Administración muestran **"Sin permisos"** (sin errores en la consola); en Cuarentena solo ve sus propias
+   entradas y no aparece Restaurar. Volver a *Líder técnico (tl@demo.local)*.
+2. **Cola de revisión** (`#/review`): cuatro contadores (Pendientes 4, Dudosas del Juez 2, Revisión obligatoria 2,
+   Resueltas en los últimos 7 días), filtros Todas / Dudosas / Revisión obligatoria / Decisiones / Restricciones y
+   la tabla con tipo, título, motivo (por ejemplo "Dudosa · contradicción"), barra de confianza, origen
+   `rama · PR n`, autor y fecha.
+3. **Detalle de revisión**: pulsar *Revisar* en "Cache customer profile reads in Redis for 5 minutes". La tarjeta
+   **Veredicto del Juez** muestra el estado (Dudosa), el criterio determinante (contradicción con una unidad activa),
+   la confianza frente al umbral 0,80 y la justificación; la tarjeta **Unidad relacionada** muestra la decisión
+   activa de 30 minutos.
+   - *Rechazar y enviar a cuarentena* con el motivo vacío muestra un error en el formulario y no envía nada.
+   - *Aprobar e incorporar* con la casilla "Marcar la unidad relacionada como reemplazada": aviso "Aprobada e
+     incorporada a la memoria", vuelta a la cola y la insignia baja a 3.
+   - Con un motivo, *Rechazar y enviar a cuarentena* la manda a Cuarentena (motivo "Rechazo del líder técnico").
+   - *Posponer* vuelve a la cola sin tocar la unidad. Si la unidad destino cambió mientras tanto, aparece un aviso
+     y aprobar responde con un mensaje de conflicto claro y el botón *Recargar*.
+4. **Cuarentena** (`#/quarantine`): una entrada por motivo, con el extracto en monoespaciado; la de datos sensibles
+   muestra `[REDACTADO]` y **no** ofrece Restaurar (su contenido se guardó redactado). *Ver* abre el detalle.
+   *Restaurar* (por ejemplo la de rechazo del líder técnico) pide confirmación ("Restaurar la unidad la vuelve a
+   someter a sanitización y evaluación") y el aviso indica el resultado: incorporada, en la cola de revisión o de
+   nuevo en cuarentena. El pie recuerda que las restauraciones se registran como etiquetas para medir los falsos
+   negativos del Juez.
+5. **Memoria del proyecto** (`#/memory`): pestañas *Activas* / *Pendientes de revalidación* (vacía hasta que corre el
+   job de revalidación, que ejecutan `pnpm demo` y `pnpm smoke`), filtro por tipo, búsqueda y *Cargar más*.
+   - *+ Nueva unidad*: elegir el tipo (los campos propios del tipo cambian), completar y pulsar *Previsualizar*: se
+     ve el resultado ("Se incorporará a la memoria al confirmar" o "Irá a cuarentena"), el **Veredicto del Juez** y el
+     contenido tal como se guardará. *Confirmar* solo se habilita para el contenido previsualizado; al confirmar se
+     abre el detalle con la versión 1 en el **Historial de versiones**.
+   - *Editar* repite la vista previa y crea la versión 2. *Retirar* pide un motivo (3 a 500 caracteres).
+   - En *Pendientes de revalidación*: *Confirmar* la vuelve a activar; *Retirar* la retira.
+   - *Retirar por PR*: número de PR y motivo, con una confirmación ("Se retirarán todas las unidades activas
+     originadas en la PR n") y el aviso con la cantidad retirada.
+6. **Administración** (`#/admin`, solo lectura): datos del proyecto, los dos repositorios con su rama de promoción,
+   miembros con rol y las credenciales de servicio con estado y vencimiento, **sin tokens ni hashes**. Las altas y
+   bajas se gestionan por ticket.
+
+Después de `pnpm demo`, la decisión nueva ya no está en la cola (fue aprobada), la anterior figura como reemplazada
+y las 2 memorias vencidas del seed aparecen en *Pendientes de revalidación*.
+
+Las capturas de `docs/demo/capturas/` se regeneran con `pnpm screenshots` sobre el stack recién levantado (sección 8).
 
 ## 7. Conectar un agente real (opcional)
 
@@ -113,7 +159,7 @@ El borrador queda en la sesión de `feature/notif-async`; para promoverlo, segui
 | `pnpm smoke` | Prueba de humo contra el stack levantado |
 | `pnpm demo` | El guion de extremo a extremo (sección 6) |
 | `pnpm eval` | Métricas sintéticas (TT-06): recall@5, MRR y nDCG@5 del `recall` híbrido (RRF) y tasas de falsos positivos/negativos del juez. Escribe [`metricas.md`](metricas.md). Usa **datos sintéticos** y los **stubs** del juez y del embedder; es determinista |
-| `pnpm screenshots` | Capturas de las 5 pantallas en `docs/demo/capturas/` (1440×900, escala 2). Si no están Playwright o el build web, avisa y termina sin error |
+| `pnpm screenshots` | Capturas de las 5 pantallas en `docs/demo/capturas/` (1440×900, escala 2) contra `http://localhost:3000` como `tl@demo.local`. Necesita `pnpm build:web` (para detectar el build) y el stack levantado; si faltan Playwright o el build, avisa y termina sin error |
 | `pnpm package:demo` | Genera `dist-demo/gmemo-demo.zip` y lo verifica (sección 12) |
 
 Tras ejecutar la suite con base de datos, el esquema queda reiniciado: volver a `docker compose down -v && docker compose up --build -d --wait` antes de `pnpm smoke` o `pnpm demo`.
@@ -124,19 +170,19 @@ Tras ejecutar la suite con base de datos, el esquema queda reiniciado: volver a 
 |---|---|---|---|
 | HU-03.4 | Rechazo de credenciales en la captura | MCP `remember` (escaneo de secretos antes de escribir) | — |
 | HU-04.2 | PR cerrado sin merge descarta su staging | `POST /promote` con `event: "closed_unmerged"` | — |
-| HU-05 | Sanitización: credenciales, instrucciones embebidas, datos personales enmascarados | Pipeline de `POST /promote` | Pantalla web (C7): Cuarentena |
-| HU-06.1–6.6 | Juez: aceptar, duplicado, contradicción/confianza, revisión obligatoria, segunda capa de seguridad | Pipeline de `POST /promote` (`DeterministicJudge` en local) | Pantalla web (C7): Cola de revisión |
-| HU-07 | Cola de revisión humana: listar, detalle, aprobar (con reemplazo) o rechazar | `GET /api/v1/projects/:id/review-queue`, `GET …/review-queue/:itemId`, `POST …/approve`, `POST …/reject` | Pantalla web (C7): Cola de revisión, Detalle de revisión |
+| HU-05 | Sanitización: credenciales, instrucciones embebidas, datos personales enmascarados | Pipeline de `POST /promote` | Cuarentena (`#/quarantine`) |
+| HU-06.1–6.6 | Juez: aceptar, duplicado, contradicción/confianza, revisión obligatoria, segunda capa de seguridad | Pipeline de `POST /promote` (`DeterministicJudge` en local) | Cola de revisión (`#/review`) |
+| HU-07 | Cola de revisión humana: listar, detalle, aprobar (con reemplazo) o rechazar | `GET /api/v1/projects/:id/review-queue`, `GET …/review-queue/:itemId`, `POST …/approve`, `POST …/reject` | Cola de revisión (`#/review`), Detalle de revisión (`#/review/<itemId>`) |
 | HU-08.1 | Recall híbrido (BM25 + vectores, RRF) | MCP `recall` | — |
 | HU-08.2, HU-09 | Solo se sirven memorias activas | MCP `recall`, `get_memory`, `get_context` | — |
 | HU-08.3 | Prioridad del repositorio de la consulta | MCP `recall` (`scope`) | — |
 | HU-08.4 | Borradores propios en el recall | MCP `recall` (`source: "staged"`), `list_staged`, `discard_staged` | — |
-| HU-10 | Cuarentena: listar, detalle, restaurar por el pipeline, purga por retención | `GET /api/v1/projects/:id/quarantine`, `GET …/:qid`, `POST …/:qid/restore`, `POST /internal/jobs/quarantine-purge` | Pantalla web (C7): Cuarentena |
-| HU-11.3 | Destino obsoleto → revisión obligatoria | MCP `remember` / `POST /promote` (`stale_target`) | Pantalla web (C7): Detalle de revisión |
-| HU-11.4 | Retiro masivo por PR revertido | `POST /api/v1/projects/:id/memories/retire-by-pr` | Pantalla web (C7): Memoria del proyecto |
-| HU-12 | Revalidación: vencimiento, confirmar o retirar | `POST /internal/jobs/revalidation-sweep`, `GET …/memories?status=pending_revalidation`, `POST …/memories/:mid/confirm`, `POST …/memories/:mid/retire` | Pantalla web (C7): Memoria del proyecto (Pendientes) |
-| HU-13 | Gestión directa con vista previa del juez e historial | `GET/POST …/memories`, `POST …/memories/preview`, `GET/PUT …/memories/:mid` | Pantalla web (C7): Memoria del proyecto |
-| — | Datos del usuario y proyectos | `GET /api/v1/me` | Pantalla web (C7): Administración |
+| HU-10 | Cuarentena: listar, detalle, restaurar por el pipeline, purga por retención | `GET /api/v1/projects/:id/quarantine`, `GET …/:qid`, `POST …/:qid/restore`, `POST /internal/jobs/quarantine-purge` | Cuarentena (`#/quarantine`) |
+| HU-11.3 | Destino obsoleto → revisión obligatoria | MCP `remember` / `POST /promote` (`stale_target`) | Detalle de revisión (`#/review/<itemId>`) |
+| HU-11.4 | Retiro masivo por PR revertido | `POST /api/v1/projects/:id/memories/retire-by-pr` | Memoria del proyecto (`#/memory`) |
+| HU-12 | Revalidación: vencimiento, confirmar o retirar | `POST /internal/jobs/revalidation-sweep`, `GET …/memories?status=pending_revalidation`, `POST …/memories/:mid/confirm`, `POST …/memories/:mid/retire` | Memoria del proyecto (`#/memory`, pestaña Pendientes de revalidación) |
+| HU-13 | Gestión directa con vista previa del juez e historial | `GET/POST …/memories`, `POST …/memories/preview`, `GET/PUT …/memories/:mid` | Memoria del proyecto (`#/memory`) |
+| — | Usuario, proyectos y administración de solo lectura (repositorios, miembros, credenciales sin secretos) | `GET /api/v1/me`, `GET /api/v1/projects/:id/admin-summary` | Barra superior y Administración (`#/admin`) |
 | TT-06 | Métricas de recuperación y del juez | `pnpm eval` → `docs/demo/metricas.md` | — |
 
 ## 10. Simplificaciones frente a la arquitectura AWS
@@ -169,4 +215,6 @@ Tras ejecutar la suite con base de datos, el esquema queda reiniciado: volver a 
 pnpm package:demo
 ```
 
-Genera `dist-demo/gmemo-demo.zip` con el código, `openspec/` y `docs/demo/`, sin dependencias (`node_modules`), control de versiones (`.git`), herramientas locales (`.claude`, `.mcp.json`, `CLAUDE.md`), material personal (entrevistas, prompts), compilados (`dist`) ni secretos (`.env`, `*.tfvars`, estado de Terraform; se conservan los `*.example`). Al final descomprime el zip en un directorio temporal y lo revisa con los patrones de saneamiento; si encuentra algo, falla.
+Genera `dist-demo/gmemo-demo.zip` con el código, `openspec/` y `docs/demo/`, sin dependencias (`node_modules`), control de versiones (`.git`), herramientas locales (`.claude`, `.mcp.json`, `CLAUDE.md`), material personal (entrevistas, prompts), compilados (`dist`) ni secretos (`.env`, `*.tfvars`, estado de Terraform; se conservan los `*.example`), claves (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`) ni configuración de otros agentes (`.codex/`, `.cursor/`, `.windsurf/`, `.aider*`). Al final descomprime el zip en un directorio temporal y lo revisa con los patrones de saneamiento; si encuentra algo, falla.
+
+La revisión **falla cerrada**: requiere el archivo local `.sanitize-patterns` (ignorado por git, una expresión regular extendida por línea). Si falta o está vacío, el script termina con error y no genera el paquete. Solo para un caso excepcional se puede continuar sin patrones con `ALLOW_NO_PATTERNS=1 pnpm package:demo`, que imprime una advertencia y deja solo la revisión de rutas prohibidas. Nunca se imprime el texto coincidente, solo las rutas de los archivos.

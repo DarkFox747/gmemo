@@ -1,5 +1,5 @@
-# ---- builder ----
-FROM node:22-alpine AS builder
+# ---- deps: one frozen install shared by the server and web builds ----
+FROM node:22-alpine AS deps
 WORKDIR /app
 
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
@@ -8,11 +8,18 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/web/package.json ./packages/web/package.json
 RUN pnpm install --frozen-lockfile
 
+# ---- builder: server ----
+FROM deps AS builder
 COPY tsconfig.json ./
 COPY src ./src
 RUN pnpm build
 # Drop devDependencies (tsx, tsc, vitest, ...) — prod-only node_modules in the runtime image.
 RUN pnpm prune --prod
+
+# ---- web-builder: governance web (C7), built in parallel by BuildKit ----
+FROM deps AS web-builder
+COPY packages/web ./packages/web
+RUN pnpm typecheck:web && pnpm build:web
 
 # ---- runtime ----
 FROM node:22-alpine AS runtime
@@ -30,6 +37,9 @@ COPY --from=builder /app/package.json ./package.json
 # does not place migrations/ under /app; the context copy is safe because
 # .dockerignore does not exclude migrations/.
 COPY migrations ./migrations
+# Web build (C7). Served only when WEB_STATIC_DIR=/app/web, which config rejects
+# under NODE_ENV=production, so it is inert in the production image.
+COPY --from=web-builder /app/packages/web/dist ./web
 
 # Fetch the Amazon RDS global CA bundle so NODE_EXTRA_CA_CERTS can trust RDS
 # under NODE_ENV=production (src/db/pool.ts: rejectUnauthorized: true).
