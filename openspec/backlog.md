@@ -127,4 +127,4 @@ Deferred work items, ordered. Promote to a `/sdd-new <name>` change when ready.
 6. ✅ Feature-branch session ↔ PR linking for `/promote` — done in change `feature-branch-promotion` (default-branch token + `pr_number`; server-side PR verification against GitHub remains out of scope).
 7. Web: gate the dev-user selector to dev builds; Cognito PKCE login; screen-level component tests (C7).
 8. Dev-user email allowlist (C2); refuse `judge_output_invalid` on human confirm (C5).
-9. Re-run `/sdd-init` to refresh `openspec/project-map.yaml` (area context, staleness anchor).
+9. ✅ `openspec/project-map.yaml` fully refreshed (sdd-map-refresh, commit anchor set). Area context still absent: `.claude/rules/tests.md` + `tests-area` skill describe node:test/npm and must be fixed or removed by the owner.

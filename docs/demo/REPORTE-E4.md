@@ -127,6 +127,6 @@ Ninguno: las dependencias de la web y Playwright ya se agregaron (commit `7b73fb
 | Dependencias web aprobadas | `7b73fb8` | — |
 | C8 `demo-kit` | `85f65c4`, `aae5ba4` | PASS (2 rondas) |
 | C7 `governance-web` | `bbd5417` | PASS |
-| C9 `feature-branch-promotion` | (este commit) | PASS (2 rondas) |
+| C9 `feature-branch-promotion` | `5769291` | PASS (2 rondas) |
 
 Los reportes completos (propuesta, specs, design, tasks, apply-progress, verify y archive) están en `openspec/changes/archive/`. Las specs vigentes están en `openspec/specs/`.
