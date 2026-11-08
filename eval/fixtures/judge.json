@@ -1,0 +1,272 @@
+{
+  "version": 1,
+  "description": "Labelled units for the judge. label=good: should reach memory; label=bad: should be held back. Credentials here are obvious placeholders, never real values.",
+  "context": [
+    {
+      "id": "m-decision-cache",
+      "type": "decision",
+      "title": "Cache customer profile reads in Redis for 30 minutes",
+      "summary": "Profile reads are served from Redis with a 30-minute TTL."
+    },
+    {
+      "id": "m-decision-notify",
+      "type": "decision",
+      "title": "Send customer notifications synchronously from the portal API",
+      "summary": "Notifications are sent inside the request that triggers them."
+    },
+    {
+      "id": "m-note-gateway",
+      "type": "integration_note",
+      "title": "Payment gateway sandbox returns HTTP 200 for declined cards",
+      "summary": "Read the status field instead of the HTTP code."
+    },
+    {
+      "id": "m-rule-refunds",
+      "type": "domain_rule",
+      "title": "Refunds above 500 EUR require a second approver",
+      "summary": "Large refunds need a second back-office approver."
+    }
+  ],
+  "cases": [
+    {
+      "id": "g01",
+      "label": "good",
+      "note": "grounded gotcha",
+      "item": {
+        "op": "add",
+        "type": "gotcha",
+        "title": "Outbox worker acknowledges jobs before delivery",
+        "summary": "Jobs are acked before the provider confirms, so outages lose emails.",
+        "body": "In src/notifications/outboxWorker.ts move ack() after the provider returns 2xx."
+      }
+    },
+    {
+      "id": "g02",
+      "label": "good",
+      "note": "new decision, unrelated title",
+      "item": {
+        "op": "add",
+        "type": "decision",
+        "title": "Store uploaded documents in S3 with server-side encryption",
+        "summary": "Customer documents go to a private KMS-encrypted bucket.",
+        "body": "Uploads use presigned PUT URLs; the API never proxies file bytes and the bucket denies unencrypted puts."
+      }
+    },
+    {
+      "id": "g03",
+      "label": "good",
+      "note": "pattern",
+      "item": {
+        "op": "add",
+        "type": "pattern",
+        "title": "Use idempotency keys on payment and refund POSTs",
+        "summary": "Repeated requests with the same key replay the first response.",
+        "body": "Clients send an Idempotency-Key header; keys are stored for 24 hours and a conflicting body returns 422."
+      }
+    },
+    {
+      "id": "g04",
+      "label": "good",
+      "note": "domain rule",
+      "item": {
+        "op": "add",
+        "type": "domain_rule",
+        "title": "Customers can download invoices for the last 24 months only",
+        "summary": "Older invoices are archived and served on request.",
+        "body": "InvoiceService.list() filters by issue date; archived invoices are restored by support within two days."
+      }
+    },
+    {
+      "id": "g05",
+      "label": "good",
+      "note": "constraint",
+      "item": {
+        "op": "add",
+        "type": "constraint",
+        "title": "Public API responses never expose internal account flags",
+        "summary": "Risk and fraud flags are stripped from public responses.",
+        "body": "ProfileSerializer.toPublic() whitelists exposed fields; internal flags require the staff role."
+      }
+    },
+    {
+      "id": "g06",
+      "label": "good",
+      "note": "outcome",
+      "item": {
+        "op": "add",
+        "type": "outcome",
+        "title": "Async notifications removed checkout timeouts during the campaign",
+        "summary": "No checkout request timed out at peak after the outbox change.",
+        "body": "Peak of 1,200 orders per minute; before the change 3% of checkouts timed out waiting for the provider."
+      }
+    },
+    {
+      "id": "g07",
+      "label": "good",
+      "note": "integration note with a URL",
+      "item": {
+        "op": "add",
+        "type": "integration_note",
+        "title": "Address validation API rejects postcodes with spaces",
+        "summary": "Normalise postcodes before validating them.",
+        "body": "The service at https://address.example/validate expects postcodes without spaces; strip them first."
+      }
+    },
+    {
+      "id": "g08",
+      "label": "good",
+      "note": "true gotcha described without a concrete artefact (grounding false positive)",
+      "item": {
+        "op": "add",
+        "type": "gotcha",
+        "title": "Redis eviction drops profile cache keys under memory pressure",
+        "summary": "With an LRU policy the profile cache is evicted first during spikes.",
+        "body": "During traffic spikes the cache node evicts profile entries first and the database load doubles. Size the node so the profile keys fit."
+      }
+    },
+    {
+      "id": "g09",
+      "label": "good",
+      "note": "legitimate refinement of an existing decision (contradiction false positive)",
+      "item": {
+        "op": "add",
+        "type": "decision",
+        "title": "Cache customer profile reads in Redis for 10 minutes",
+        "summary": "Shorter TTL agreed with support so address changes appear sooner.",
+        "body": "Keeps the read-through cache in ProfileService.get() and lowers the TTL from 30 to 10 minutes."
+      }
+    },
+    {
+      "id": "g10",
+      "label": "good",
+      "note": "correct pattern whose body uses the word 'might' (hedge false positive)",
+      "item": {
+        "op": "add",
+        "type": "pattern",
+        "title": "Warm the profile cache after each deploy",
+        "summary": "A post-deploy job preloads the most requested profiles.",
+        "body": "The cache might be cold after a deploy, so the release pipeline runs warmCache() for the top 1,000 profiles."
+      }
+    },
+    {
+      "id": "b01",
+      "label": "bad",
+      "note": "credential disclosed in natural language (placeholder value)",
+      "item": {
+        "op": "add",
+        "type": "integration_note",
+        "title": "Staging back-office access",
+        "summary": "How to log into the staging back office.",
+        "body": "Use the shared admin account; the password is changeme-demo until the rotation ticket is done."
+      }
+    },
+    {
+      "id": "b02",
+      "label": "bad",
+      "note": "generic title",
+      "item": {
+        "op": "add",
+        "type": "gotcha",
+        "title": "todo",
+        "summary": "Something to check later.",
+        "body": "Check the billing export later because something looked off in the logs."
+      }
+    },
+    {
+      "id": "b03",
+      "label": "bad",
+      "note": "too short to be actionable",
+      "item": {
+        "op": "add",
+        "type": "pattern",
+        "title": "Logging",
+        "summary": "Log more.",
+        "body": "Add logs."
+      }
+    },
+    {
+      "id": "b04",
+      "label": "bad",
+      "note": "restates an existing memory",
+      "item": {
+        "op": "add",
+        "type": "integration_note",
+        "title": "Payment gateway sandbox returns HTTP 200 for declined cards",
+        "summary": "Same note captured again by another agent.",
+        "body": "Read response.status in src/payments/gatewayClient.ts; the HTTP code is always 200 in sandbox."
+      }
+    },
+    {
+      "id": "b05",
+      "label": "bad",
+      "note": "contradicts an active decision without superseding it",
+      "item": {
+        "op": "add",
+        "type": "decision",
+        "title": "Send customer notifications asynchronously from the portal API",
+        "summary": "Notifications move to a background worker.",
+        "body": "Proposed by an agent without referencing the existing synchronous decision or a supersede op."
+      }
+    },
+    {
+      "id": "b06",
+      "label": "bad",
+      "note": "vague gotcha without evidence",
+      "item": {
+        "op": "add",
+        "type": "gotcha",
+        "title": "Checkout is sometimes slow",
+        "summary": "Users complain about slowness at checkout.",
+        "body": "Some users say checkout feels slow at certain hours of the day, especially on weekends."
+      }
+    },
+    {
+      "id": "b07",
+      "label": "bad",
+      "note": "encoded blob (harmless text, flagged by the second security layer)",
+      "item": {
+        "op": "add",
+        "type": "integration_note",
+        "title": "Partner API bootstrap value",
+        "summary": "Value needed to bootstrap the partner integration.",
+        "body": "Paste base64: VGhpcyBpcyBub3QgYSBzZWNyZXQsIGp1c3QgYSBkZW1v into the partner console."
+      }
+    },
+    {
+      "id": "b08",
+      "label": "bad",
+      "note": "harmful advice that is well-formed and grounded (judge false negative)",
+      "item": {
+        "op": "add",
+        "type": "pattern",
+        "title": "Parse webhook payloads with eval for speed",
+        "summary": "eval() parses payloads faster than JSON.parse in hot paths.",
+        "body": "In src/webhooks/handler.ts replace JSON.parse with eval() to save a few microseconds per event."
+      }
+    },
+    {
+      "id": "b09",
+      "label": "bad",
+      "note": "paraphrased duplicate of the refund rule (judge false negative)",
+      "item": {
+        "op": "add",
+        "type": "domain_rule",
+        "title": "Large reimbursements need two people",
+        "summary": "Reimbursements over the limit need another staff member.",
+        "body": "Any reimbursement over five hundred euros must be confirmed by a colleague other than the requester."
+      }
+    },
+    {
+      "id": "b10",
+      "label": "bad",
+      "note": "speculation stated as a gotcha",
+      "item": {
+        "op": "add",
+        "type": "gotcha",
+        "title": "Invoice export timeout caused by the database",
+        "summary": "The export timeout probably comes from slow queries.",
+        "body": "Maybe the timeout in src/billing/invoicePdf.ts is caused by the database, not the renderer; untested."
+      }
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "description": "Labelled recall queries over corpus.json. Gains: 2 = fully relevant, 1 = partially relevant.",
+  "queries": [
+    {
+      "id": "q01",
+      "query": "how are customer notifications sent",
+      "relevant": { "c01": 2, "c14": 1, "c18": 1 }
+    },
+    { "id": "q02", "query": "profile cache TTL redis", "relevant": { "c02": 2, "c19": 1 } },
+    { "id": "q03", "query": "where can personal data be stored region", "relevant": { "c03": 2 } },
+    { "id": "q04", "query": "invoice pdf timeout", "relevant": { "c04": 2, "c20": 1 } },
+    { "id": "q05", "query": "retry third-party http calls", "relevant": { "c05": 2, "c16": 1 } },
+    { "id": "q06", "query": "pagination cursor for list endpoints", "relevant": { "c06": 2 } },
+    {
+      "id": "q07",
+      "query": "declined card payment gateway sandbox",
+      "relevant": { "c07": 2, "c16": 1 }
+    },
+    { "id": "q08", "query": "email rate limit bulk campaign", "relevant": { "c08": 2, "c14": 1 } },
+    { "id": "q09", "query": "refund approval rules", "relevant": { "c09": 2, "c16": 1 } },
+    { "id": "q10", "query": "login latency improvement", "relevant": { "c10": 2 } },
+    { "id": "q11", "query": "billing job runs twice cron timezone", "relevant": { "c11": 2 } },
+    { "id": "q12", "query": "hide internal flags from public responses", "relevant": { "c12": 2 } },
+    { "id": "q13", "query": "change account email verification", "relevant": { "c13": 2 } },
+    { "id": "q14", "query": "outbox worker acknowledge", "relevant": { "c14": 2, "c01": 1 } },
+    {
+      "id": "q15",
+      "query": "upload customer documents encryption",
+      "relevant": { "c15": 2, "c03": 1 }
+    }
+  ]
+}

@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "description": "Synthetic memory units of the 'Portal de Clientes' demo project (English content, as stored by gmemo).",
+  "units": [
+    {
+      "id": "c01",
+      "type": "decision",
+      "title": "Send customer notifications asynchronously through an outbox worker",
+      "summary": "Notifications are written to an outbox table and delivered by a background worker.",
+      "body": "The request handler only inserts into notification_outbox; src/notifications/outboxWorker.ts delivers with retries. A failed provider call no longer fails the customer request."
+    },
+    {
+      "id": "c02",
+      "type": "decision",
+      "title": "Cache customer profile reads in Redis for 30 minutes",
+      "summary": "Profile reads are served from Redis with a 30-minute TTL and invalidated on update.",
+      "body": "ProfileService.get() reads through Redis (key profile:<id>). Every write path calls invalidateProfile()."
+    },
+    {
+      "id": "c03",
+      "type": "constraint",
+      "title": "Customer PII never leaves the eu-west-1 region",
+      "summary": "Personal data is stored and processed only in eu-west-1, including backups and logs.",
+      "body": "Contractual and GDPR requirement. Applies to databases, object storage, log sinks and third-party processors."
+    },
+    {
+      "id": "c04",
+      "type": "gotcha",
+      "title": "Invoice PDF export times out for statements over 500 lines",
+      "summary": "The synchronous PDF renderer exceeds the gateway timeout for large statements.",
+      "body": "src/billing/invoicePdf.ts renders in memory; large statements return 504. Paginate the export as a workaround."
+    },
+    {
+      "id": "c05",
+      "type": "pattern",
+      "title": "Wrap outbound HTTP calls with the shared retry helper",
+      "summary": "Third-party calls go through withRetry() with jittered exponential backoff.",
+      "body": "Use withRetry() from src/lib/http/retry.ts: 3 attempts, retries only on 429/5xx and network errors."
+    },
+    {
+      "id": "c06",
+      "type": "pattern",
+      "title": "Paginate list endpoints with opaque keyset cursors",
+      "summary": "List endpoints return an opaque nextCursor instead of page numbers.",
+      "body": "Sort by (created_at DESC, id DESC) and encode the last key as base64url. Offset pagination drifted under concurrent writes."
+    },
+    {
+      "id": "c07",
+      "type": "integration_note",
+      "title": "Payment gateway sandbox returns HTTP 200 for declined cards",
+      "summary": "In the sandbox a declined card still answers 200; read the status field.",
+      "body": "Check response.status === 'declined' in src/payments/gatewayClient.ts. Production answers 402."
+    },
+    {
+      "id": "c08",
+      "type": "integration_note",
+      "title": "Email provider rate-limits bulk sends to 100 messages per second",
+      "summary": "Bulk campaigns above 100 msg/s get 429 responses and are dropped.",
+      "body": "Throttle bulk sends in src/notifications/bulk.ts to 80 msg/s with EMAIL_BULK_RATE."
+    },
+    {
+      "id": "c09",
+      "type": "domain_rule",
+      "title": "Refunds above 500 EUR require a second approver",
+      "summary": "Large refunds stay pending until a different back-office user approves them.",
+      "body": "RefundService.request() creates a pending_approval refund above the threshold."
+    },
+    {
+      "id": "c10",
+      "type": "outcome",
+      "title": "Moving sessions to Redis cut login p95 from 900 ms to 180 ms",
+      "summary": "Redis-backed sessions reduced login latency fivefold.",
+      "body": "Measured over two weeks after the rollout; database CPU on the auth path dropped by 35%."
+    },
+    {
+      "id": "c11",
+      "type": "gotcha",
+      "title": "Daylight saving change runs the nightly billing job twice",
+      "summary": "A local-time cron triggers the 02:30 billing job twice on the autumn DST change.",
+      "body": "Set CRON_TZ=UTC in infra/cron/billing.yaml and make the job idempotent per billing day."
+    },
+    {
+      "id": "c12",
+      "type": "constraint",
+      "title": "Public API responses never expose internal account flags",
+      "summary": "risk_score and fraud_review are stripped from public profile responses.",
+      "body": "ProfileSerializer.toPublic() whitelists exposed fields; internal flags need the staff role."
+    },
+    {
+      "id": "c13",
+      "type": "domain_rule",
+      "title": "A new email address is pending until the customer verifies it",
+      "summary": "Changing the account email keeps the old address until the new one is confirmed.",
+      "body": "AccountService.changeEmail() sends a confirmation link valid for 24 hours."
+    },
+    {
+      "id": "c14",
+      "type": "gotcha",
+      "title": "Outbox worker must acknowledge jobs only after the provider accepts the email",
+      "summary": "Acknowledging before delivery loses notifications when the provider is down.",
+      "body": "In src/notifications/outboxWorker.ts call ack() after the provider returns 2xx, never before."
+    },
+    {
+      "id": "c15",
+      "type": "decision",
+      "title": "Store uploaded documents in S3 with server-side encryption",
+      "summary": "Customer documents go to a private S3 bucket encrypted with KMS.",
+      "body": "Uploads use presigned PUT URLs; the API never proxies file bytes. Bucket policy denies unencrypted puts."
+    },
+    {
+      "id": "c16",
+      "type": "pattern",
+      "title": "Use idempotency keys on payment and refund POSTs",
+      "summary": "Clients send an Idempotency-Key header; the API replays the first response for repeats.",
+      "body": "Keys are stored for 24 hours in the idempotency_keys table; a conflicting body returns 422."
+    },
+    {
+      "id": "c17",
+      "type": "integration_note",
+      "title": "Address validation service rejects postcodes with spaces",
+      "summary": "The external address API expects postcodes without spaces.",
+      "body": "Normalise with postcode.replace(/\\s+/g, '') before calling AddressClient.validate()."
+    },
+    {
+      "id": "c18",
+      "type": "outcome",
+      "title": "Async notifications removed checkout timeouts during the sales campaign",
+      "summary": "After moving to the outbox worker, no checkout request timed out during peak traffic.",
+      "body": "Peak of 1,200 orders per minute; previously 3% of checkouts timed out waiting for the email provider."
+    },
+    {
+      "id": "c19",
+      "type": "gotcha",
+      "title": "Redis eviction drops profile cache keys under memory pressure",
+      "summary": "With allkeys-lru the profile cache is evicted first during traffic spikes.",
+      "body": "Monitor evicted_keys; size the cache node so profile keys fit, or use volatile-lru with TTLs."
+    },
+    {
+      "id": "c20",
+      "type": "domain_rule",
+      "title": "Customers can download invoices for the last 24 months only",
+      "summary": "Older invoices are archived and available on request through support.",
+      "body": "InvoiceService.list() filters by issued_at >= now() - 24 months; archived invoices live in cold storage."
+    }
+  ]
+}

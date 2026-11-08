@@ -21,6 +21,10 @@
     "provision": "tsx src/db/provision.ts",
     "seed:dev": "tsx src/db/seed.ts",
     "smoke": "tsx scripts/smoke.ts",
+    "demo": "tsx scripts/demo-e2e.ts",
+    "eval": "tsx scripts/eval.ts",
+    "screenshots": "tsx scripts/screenshots.ts",
+    "package:demo": "sh scripts/package-demo.sh",
     "job:quarantine-purge": "tsx scripts/jobs/quarantine-purge.ts",
     "job:revalidation": "tsx scripts/jobs/revalidation.ts",
     "job:web-session-reaper": "tsx scripts/jobs/web-session-reaper.ts"

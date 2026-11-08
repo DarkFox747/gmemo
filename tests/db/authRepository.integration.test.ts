@@ -141,7 +141,7 @@ describeWithDb('PgAuthRepository integration (C2 reads + seed)', () => {
         name: 'AAA Active',
         role: 'viewer',
       },
-      { projectId: SEED_PROJECT, slug: 'gmemo', name: 'gmemo (local dev)', role: 'viewer' },
+      { projectId: SEED_PROJECT, slug: 'gmemo', name: 'Portal de Clientes', role: 'viewer' },
     ]);
   });
 
