@@ -149,6 +149,11 @@ describeWithDb('migration integration — 0004_promotion_gaps.sql', () => {
     await pool.query(
       `DELETE FROM schema_migrations WHERE version = '0004_promotion_gaps'`,
     );
+    // 0008 alters quarantine, which was just dropped; clear it too so later
+    // suites re-apply it on top of a fresh 0004.
+    await pool.query(
+      `DELETE FROM schema_migrations WHERE version = '0008_quarantine_management'`,
+    );
 
     // Delete seeded project row — cascades to repo, memory, staging_session,
     // and staging_item (all ON DELETE CASCADE from project).

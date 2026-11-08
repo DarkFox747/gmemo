@@ -82,7 +82,7 @@ describe('PromoteService.promote — rejected verdict → quarantine', () => {
     expect(outcome).toMatchObject({ status: 'rejected', quarantined: 1, applied: 0, uncertain: 0 });
     expect(repo.quarantineCalls).toHaveLength(1);
     expect(repo.quarantineCalls[0]!.q.reason).toBe('specificity');
-    expect(repo.quarantineCalls[0]!.q.redact).toBe(false);
+    expect(repo.quarantineCalls[0]!.q.redact).toBe('none');
     expect(repo.quarantineCalls[0]!.q.decision!.criterion).toBe('specificity');
     expect(repo.applyAcceptedCalls).toHaveLength(0);
     // The quarantine write is the only state write (no pre-quarantine recordDecision).
@@ -143,7 +143,7 @@ describe('PromoteService.promote — applyAccepted result routing', () => {
 
     expect(outcome).toMatchObject({ quarantined: 1, applied: 0 });
     expect(repo.quarantineCalls[0]!.q.reason).toBe('duplicate_content');
-    expect(repo.quarantineCalls[0]!.q.redact).toBe(false);
+    expect(repo.quarantineCalls[0]!.q.redact).toBe('none');
   });
 
   it('already → counted as applied', async () => {
@@ -159,17 +159,21 @@ describe('PromoteService.promote — applyAccepted result routing', () => {
 
 describe('PromoteService.promote — sanitize gate (secrets)', () => {
   it.each([
-    ['body', { body: `Found this key: ${AWS_KEY} — do not use.` }],
-    ['title', { title: '-----BEGIN RSA PRIVATE KEY----- key mgmt' }],
-    ['fields', { fields: { apiKey: AWS_KEY } }],
-  ])('secret in %s → secret_detected, redact; judge never called', async (_l, overrides) => {
+    ['body', { body: `Found this key: ${AWS_KEY} — do not use.` }, 'spans'],
+    // SEC-M1: a PEM header anywhere redacts the whole item.
+    ['title', { title: '-----BEGIN RSA PRIVATE KEY----- key mgmt' }, 'whole'],
+    ['fields', { fields: { apiKey: AWS_KEY } }, 'spans'],
+  ])('secret in %s → secret_detected, redact; judge never called', async (_l, overrides, redact) => {
     const { service, repo, judge } = makeService([makeItem('item-s', overrides)]);
 
     const outcome = await service.promote(SESSION_ID, META);
 
     expect(outcome.quarantined).toBe(1);
     expect(repo.quarantineCalls[0]!.q.reason).toBe('secret_detected');
-    expect(repo.quarantineCalls[0]!.q.redact).toBe(true);
+    expect(repo.quarantineCalls[0]!.q.redact).toBe(redact);
+    // The snapshot handed to the repository never carries the secret.
+    expect(JSON.stringify(repo.quarantineCalls[0]!.item)).not.toContain(AWS_KEY);
+    expect(JSON.stringify(repo.quarantineCalls[0]!.item)).not.toContain('BEGIN RSA PRIVATE KEY');
     expect(judge.evaluateCalls).toHaveLength(0);
     expect(repo.applyAcceptedCalls).toHaveLength(0);
   });

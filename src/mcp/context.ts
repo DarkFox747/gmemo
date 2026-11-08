@@ -25,6 +25,8 @@ import type { AuthRepository } from '../db/authRepository.js';
 import type { Embedder } from '../embedder/embedder.js';
 import type { Notifier } from '../notify/notifier.js';
 import type { ReviewServiceLike } from '../http/api/types.js';
+import type { QuarantineReasonCode } from '../quarantine/reason.js';
+import type { QuarantineServiceLike } from '../quarantine/quarantineService.js';
 
 // ---------------------------------------------------------------------------
 // Core identity / context types
@@ -53,6 +55,15 @@ export interface ActorIdentity {
 /** Actor proven to be project_admin of ProjectContext.projectId. */
 export interface AdminActor extends ActorIdentity {
   userId: string;
+}
+
+/** project_membership.role values. */
+export type ProjectRole = 'project_admin' | 'contributor' | 'viewer' | 'service_agent';
+
+/** Actor proven to be a member (any role) of ProjectContext.projectId (C3). */
+export interface ProjectMember extends ActorIdentity {
+  userId: string;
+  projectRole: ProjectRole;
 }
 
 /** Gate-2-only identity for /me. */
@@ -96,13 +107,15 @@ export type ToolName =
 export type ApiAction =
   | 'me.read'
   | 'review_queue.list' | 'review_queue.read'
-  | 'review_queue.approve' | 'review_queue.reject';
+  | 'review_queue.approve' | 'review_queue.reject'
+  | 'quarantine.list' | 'quarantine.read' | 'quarantine.restore';
 
 /** Audit detail for REST actions - ids and counters only, never titles, bodies or reasons. */
 export interface ApiAuditDetail {
   itemId?: string;
   memoryId?: string;
-  filter?: 'all' | 'uncertain' | 'mandatory';
+  /** Review-queue filter, or the quarantine reason filter. */
+  filter?: 'all' | 'uncertain' | 'mandatory' | QuarantineReasonCode;
   type?: MemoryType;
   resultCount?: number;
   decision?: 'approved' | 'rejected';
@@ -110,6 +123,18 @@ export interface ApiAuditDetail {
   rebasedFromRevision?: number;
   rebasedToRevision?: number;
   relatedSuperseded?: boolean;
+  quarantineId?: string;
+  outcome?: 'applied' | 'queued' | 'quarantined';
+  newQuarantineId?: string;
+}
+
+/** A completed platform job run (C3 jobs router / scripts). Counts only. */
+export interface JobAuditInput {
+  job: string;
+  count: number;
+  /** Counts keyed by project id — never content. */
+  detail?: Record<string, number>;
+  trigger: 'http' | 'script';
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +198,11 @@ export interface Authorizer {
    * Throws the same opaque AppError(PERMISSION_DENIED) on every failure.
    */
   authorizeProjectAdmin(principal: Principal, projectId: string): Promise<AdminActor>;
+  /**
+   * Gate 2 + any membership on a non-archived projectId. Platform roles do NOT bypass (C2 D4).
+   * Throws the same opaque AppError(PERMISSION_DENIED) on every failure.
+   */
+  authorizeProjectMember(principal: Principal, projectId: string): Promise<ProjectMember>;
 }
 
 /** SEAM — write access_log (contract §7); query_hash only, never raw text. */
@@ -225,6 +255,11 @@ export interface AuditLogger {
     ctx: RequestContext,
     p: { sessionId: string; discarded: number; prNumber: number },
   ): Promise<void>;
+  /**
+   * Records a completed platform job (actor_kind 'system', action 'admin',
+   * project_id null). Counts only.
+   */
+  recordJob(p: JobAuditInput): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +327,8 @@ export interface AppServices extends AuthServices {
   notifier: Notifier;
   /** Human review queue (HU-07) — consumed by the /api review routes. */
   reviewService: ReviewServiceLike;
+  /** Quarantine list/detail/restore (C3, HU-10) — consumed by the /api quarantine routes. */
+  quarantineService: QuarantineServiceLike;
 }
 
 /**

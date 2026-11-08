@@ -19,10 +19,13 @@ import type { MemoryType } from '../contracts/memory.js';
 import type { TenantContext } from '../mcp/context.js';
 import type { DecisionCriterion, JudgeContextItem, Verdict } from '../judge/judge.js';
 import { toVectorParam } from './vector.js';
-import { computeContentHash } from '../security/hash.js';
+import { computeContentHash, sha256Hex } from '../security/hash.js';
 import { logger } from '../observability/logger.js';
 import { QUEUED_PREDICATE } from './reviewQueueRepository.js';
 import type { ConflictCode } from '../http/api/types.js';
+import { classifyQuarantine, HUMAN_REVIEW_PREFIX } from '../quarantine/reason.js';
+import type { QuarantineRedaction } from '../quarantine/reason.js';
+import { WHOLE_REDACTION, isSecretFree } from '../security/secretRedact.js';
 
 export type { ConflictCode };
 
@@ -51,8 +54,11 @@ export interface PersistedDecision {
 export interface QuarantineInput {
   /** quarantine.judge_reason (code). */
   reason: string;
-  /** Sentinel title/summary/body AND fields '{}' when true. */
-  redact: boolean;
+  /**
+   * How the snapshot is stored: 'none' as given; 'spans' as given after an
+   * isSecretFree re-check (whole fallback); 'whole' = sentinel texts + fields {}.
+   */
+  redact: QuarantineRedaction;
   /** null on sanitize-stage quarantines (no judge decision exists). */
   decision: PersistedDecision | null;
   sanitizeFlags: SanitizeFlags;
@@ -199,13 +205,13 @@ export interface PromotionRepository {
   ): Promise<ApplyResult>;
 
   /**
-   * Snapshots the item in quarantine and marks it terminal (rejected).
-   * When q.redact=true, title/summary/body are replaced with the redact sentinel
-   * and fields with {} - in both the quarantine row and the staging row, and the
-   * quarantine content_hash is the hash of the redacted content.
-   * No-op (nothing written) when the item was applied or human-reviewed meanwhile.
+   * Snapshots the item in quarantine (classified, with expiry) and marks it
+   * terminal (rejected). The stored content (per q.redact) is written to both
+   * the quarantine row and the staging row; a redacted quarantine row carries
+   * the hash of the redacted content. Returns the new quarantine id, or null
+   * (nothing written) when the item was applied or human-reviewed meanwhile.
    */
-  quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<void>;
+  quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<string | null>;
 
   /** Sets the session terminal status after all items have been processed. */
   finalizeSession(
@@ -422,27 +428,35 @@ WHERE id = $2 AND promoted_at IS NULL
 
 // Q1: Quarantine snapshot (self-contained; NO FK to staging → sweep-safe).
 // $1=project_id $2=repo_id $3=origin_session_id $4=origin_item_id $5=op $6=type
-// $7=title $8=summary $9=body $10=fields(jsonb) $11=content_hash
-// $12=judge_reason $13=author_identity
+// $7=title $8=summary $9=body $10=fields(jsonb) $11=content_hash $12=judge_reason
+// $13=author_identity $14=criterion $15=reason_code $16=related_memory_id
+// $17=target_memory_id $18=target_revision $19=retention_days
 const INSERT_QUARANTINE_SQL = `
 INSERT INTO quarantine
   (project_id, repo_id, origin_session_id, origin_item_id, op, type,
-   title, summary, body, fields, content_hash, judge_reason, author_identity)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)
+   title, summary, body, fields, content_hash, judge_reason, author_identity,
+   criterion, reason_code, related_memory_id, target_memory_id, target_revision, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13,
+        $14::quarantine_criterion, $15::quarantine_reason_code, $16, $17, $18,
+        now() + make_interval(days => $19::int))
+RETURNING id
 `.trim();
 
 // Q2: Mark the staging item terminal and overwrite its content with the
 // (masked / redacted) snapshot so a redacted secret never lingers in staging.
-// content_hash is left untouched on terminal rows. Guarded (SEC M-3): an item
-// applied or human-reviewed meanwhile is not touched (0 rows → Q1 rolled back).
+// content_hash: kept for redact 'none' ($12 NULL); for 'spans'/'whole' it is
+// replaced (SEC-M2) so the hash of the secret-bearing content is not kept either.
+// Guarded (SEC M-3): an item applied or human-reviewed meanwhile is not touched
+// (0 rows → Q1 rolled back).
 // $1=judge_reason $2=judge_criterion $3=judge_confidence $4=related_memory_id
 // $5=mandatory_review $6=sanitize_flags(jsonb) $7=title $8=summary $9=body
-// $10=fields(jsonb) $11=item_id
+// $10=fields(jsonb) $11=item_id $12=content_hash|null
 const MARK_QUARANTINED_SQL = `
 UPDATE staging_item
 SET judge_state = 'rejected', judge_reason = $1, judge_criterion = $2,
     judge_confidence = $3, related_memory_id = $4, mandatory_review = $5,
-    sanitize_flags = $6::jsonb, title = $7, summary = $8, body = $9, fields = $10::jsonb
+    sanitize_flags = $6::jsonb, title = $7, summary = $8, body = $9, fields = $10::jsonb,
+    content_hash = COALESCE($12, content_hash)
 WHERE id = $11 AND promoted_at IS NULL AND reviewed_at IS NULL
 `.trim();
 
@@ -584,7 +598,19 @@ function requiresReview(
   return targetType !== item.type || mandatoryTypes.has(targetType as MemoryType);
 }
 
-const REDACT_SENTINEL = '[REDACTED: secret detected]';
+/**
+ * SEC-M2: staging content_hash for a redacted quarantine ('spans'/'whole'): the
+ * hash of the redacted content mixed with the item id. The id keeps it unique,
+ * so two items redacted to the same text (e.g. two whole sentinels) never hit
+ * UNIQUE(session_id, content_hash). null = keep the current hash ('none').
+ */
+export function stagingRedactedHash(
+  itemId: string,
+  redact: QuarantineRedaction,
+  redactedContentHash: string,
+): string | null {
+  return redact === 'none' ? null : sha256Hex(`${itemId}:${redactedContentHash}`);
+}
 
 /** Raw R0 lock row: item columns (no target_type) + session metadata. */
 interface RawQueuedItemRow extends Omit<RawPromotionItemRow, 'target_type'> {
@@ -642,8 +668,17 @@ export function toOrQuery(title: string, summary: string): string[] {
 // pg-backed implementation
 // ---------------------------------------------------------------------------
 
+export interface PromotionRepositoryOptions {
+  /** QUARANTINE_RETENTION_DAYS: expires_at = now() + this many days on every insert. */
+  quarantineRetentionDays: number;
+}
+
 export class PgPromotionRepository implements PromotionRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  // The options are required on purpose: a default would let retention drift from config.
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly opts: PromotionRepositoryOptions,
+  ) {}
 
   /**
    * Issues a ROLLBACK and swallows any error (e.g. already-aborted connection).
@@ -965,22 +1000,26 @@ export class PgPromotionRepository implements PromotionRepository {
 
   /**
    * Snapshots the item in quarantine and marks it terminal in staging.
-   * When q.redact=true (secret path), title/summary/body become the sentinel and
-   * fields becomes {} in BOTH tables; reason is category-only (no matched text).
-   * An item applied or human-reviewed meanwhile is left alone (no orphan snapshot).
+   * The stored content (none / spans re-checked / whole sentinel) is written to
+   * BOTH tables; reason is category-only (no matched text). An item applied or
+   * human-reviewed meanwhile is left alone (no orphan snapshot) → null.
    */
-  async quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<void> {
+  async quarantineItem(
+    item: PromotionItemRow,
+    ctx: ApplyContext,
+    q: QuarantineInput,
+  ): Promise<string | null> {
     const d = q.decision;
     // Reviewer M1: a non-redacted judge rejection (duplication / specificity)
     // keeps the judge justification on the staging row; quarantine keeps the code.
-    const stagingReason = !q.redact && d?.verdict === 'rejected' ? d.reason : q.reason;
+    const stagingReason = q.redact === 'none' && d?.verdict === 'rejected' ? d.reason : q.reason;
 
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
 
       // Q1: Self-contained snapshot (no FK to staging -> sweep-safe).
-      const snap = await this.insertQuarantineSnapshot(client, item, ctx, q.reason, q.redact);
+      const snap = await this.insertQuarantineSnapshot(client, item, ctx, q);
 
       // Q2: Mark staging item terminal (promoted_at stays NULL).
       const marked = await client.query(MARK_QUARANTINED_SQL, [
@@ -988,16 +1027,17 @@ export class PgPromotionRepository implements PromotionRepository {
         d?.relatedMemoryId ?? null, d?.mandatoryReview ?? false,
         JSON.stringify(q.sanitizeFlags),
         snap.title, snap.summary, snap.body, snap.fieldsJson,
-        item.id,
+        item.id, stagingRedactedHash(item.id, q.redact, snap.contentHash),
       ]);
       if ((marked.rowCount ?? 0) === 0) {
         // SEC M-3: applied or human-reviewed meanwhile — drop the Q1 snapshot too.
         await this.safeRollback(client);
         logger.warn('[promote] quarantine skipped: item resolved concurrently', { itemId: item.id });
-        return;
+        return null;
       }
 
       await client.query('COMMIT');
+      return snap.id;
     } catch (err) {
       await this.safeRollback(client);
       throw err;
@@ -1008,38 +1048,70 @@ export class PgPromotionRepository implements PromotionRepository {
 
   /**
    * Transaction-scoped quarantine core (Q1) shared by promotion (quarantineItem)
-   * and human review (rejectReviewItem). Returns the stored content so the
-   * caller can mirror it on the staging row.
+   * and human review (rejectReviewItem) — the single quarantine write choke
+   * point. Computes the stored content from the redaction mode, classifies the
+   * reason, records related/target and the expiry, and returns the new id plus
+   * the stored content so the caller can mirror it on the staging row.
    */
   private async insertQuarantineSnapshot(
     client: pg.PoolClient,
     item: PromotionItemRow,
     ctx: ApplyContext,
-    reason: string,
-    redact: boolean,
-  ): Promise<{ title: string; summary: string; body: string; fieldsJson: string }> {
-    const title = redact ? REDACT_SENTINEL : item.title;
-    const summary = redact ? REDACT_SENTINEL : item.summary;
-    const body = redact ? REDACT_SENTINEL : item.body;
-    const fields = redact ? {} : item.fields;
-    const fieldsJson = JSON.stringify(fields);
+    q: QuarantineInput,
+  ): Promise<{
+    id: string;
+    title: string;
+    summary: string;
+    body: string;
+    fieldsJson: string;
+    contentHash: string;
+  }> {
+    const given = { title: item.title, summary: item.summary, body: item.body, fields: item.fields };
+    let stored = given;
+    if (q.redact === 'whole') {
+      stored = { ...WHOLE_REDACTION, fields: {} };
+    } else if (q.redact === 'spans' && !isSecretFree(given)) {
+      // Defence in depth: sanitize already span-redacted; anything left → whole.
+      logger.warn('[promote] span redaction re-check failed — whole-field fallback', {
+        itemId: item.id,
+      });
+      stored = { ...WHOLE_REDACTION, fields: {} };
+    }
+    const fieldsJson = JSON.stringify(stored.fields);
     // SEC L-7: a redacted snapshot never carries the hash of the secret-bearing content.
-    const quarantineHash = redact
-      ? computeContentHash({
-          op: item.op, type: item.type, title, summary, body, fields,
-          target: item.target_memory_id,
-        })
-      : item.content_hash;
+    const quarantineHash =
+      q.redact === 'none'
+        ? item.content_hash
+        : computeContentHash({
+            op: item.op, type: item.type,
+            title: stored.title, summary: stored.summary, body: stored.body, fields: stored.fields,
+            target: item.target_memory_id,
+          });
 
-    await client.query(INSERT_QUARANTINE_SQL, [
+    const { criterion, reasonCode } = classifyQuarantine(q.reason, q.decision?.criterion ?? null);
+    // A routed decision is authoritative (only R3 carries one); a human reject
+    // keeps the related memory the reviewer saw.
+    const relatedMemoryId = q.decision ? q.decision.relatedMemoryId : item.related_memory_id;
+
+    const { rows } = await client.query<{ id: string }>(INSERT_QUARANTINE_SQL, [
       ctx.projectId, ctx.repoId,
       ctx.sessionId, item.id,
       item.op, item.type,
-      title, summary, body,
+      stored.title, stored.summary, stored.body,
       fieldsJson,
-      quarantineHash, reason, item.author_identity,
+      quarantineHash, q.reason, item.author_identity,
+      criterion, reasonCode, relatedMemoryId,
+      item.target_memory_id, item.target_revision,
+      this.opts.quarantineRetentionDays,
     ]);
-    return { title, summary, body, fieldsJson };
+    return {
+      id: rows[0]!.id,
+      title: stored.title,
+      summary: stored.summary,
+      body: stored.body,
+      fieldsJson,
+      contentHash: quarantineHash,
+    };
   }
 
   /** R0: locks a queued item of the project; null when it is not (or no longer) queued. */
@@ -1198,7 +1270,12 @@ export class PgPromotionRepository implements PromotionRepository {
       }
       const { item, ctx } = locked;
 
-      await this.insertQuarantineSnapshot(client, item, ctx, `human_review: ${i.reason}`, false);
+      await this.insertQuarantineSnapshot(client, item, ctx, {
+        reason: `${HUMAN_REVIEW_PREFIX}${i.reason}`,
+        redact: 'none',
+        decision: null,
+        sanitizeFlags: item.sanitize_flags,
+      });
 
       const marked = await client.query(MARK_REJECTED_SQL, [i.reviewerUserId, i.reason, item.id]);
       if ((marked.rowCount ?? 0) === 0) {

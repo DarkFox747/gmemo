@@ -2,13 +2,19 @@
  * Sanitize stage of the promotion pipeline (design C1, S1–S4). Pure, no I/O,
  * never logs: callers log ids only.
  *
- *   S1 bounds (same caps as capture) or any detector error → block sanitize_failed (redact)
- *   S2 credentials (scanForSecrets)                        → block secret_detected (redact, leak)
- *   S3 embedded instructions (scanForInjection)            → block embedded_instructions
+ *   S1 bounds (same caps as capture) or any detector error → block sanitize_failed (redact 'whole')
+ *   S2 credentials (scanForSecrets)                        → block secret_detected (redact 'spans', leak;
+ *                                                            'whole' when a PEM private key is found anywhere)
+ *   S3 embedded instructions (scanForInjection)            → block embedded_instructions (redact 'none')
  *   S4 personal data (maskPii / maskPiiInFields)           → masked content, item continues
  *
  * The PII mask is computed even when S3 blocks, so a non-redacted quarantine
  * snapshot never stores raw PII. Text is never truncated before scanning.
+ *
+ * S2 (C3) keeps the text: secret spans are replaced by [REDACTADO] FIRST, then PII
+ * is masked (masking could rewrite digits inside a key and leave fragments), then
+ * finalizeRedaction clamps and verifies, falling back to whole redaction on any doubt.
+ * The safe content is returned in `masked`.
  *
  * S2/S3 scan a normalized COPY (NFKC, format characters stripped) so zero-width
  * or fullwidth characters cannot split a pattern; stored content only changes by
@@ -22,9 +28,16 @@ import { scanForSecrets } from '../security/secretScan.js';
 import { scanForInjection } from '../security/injectionScan.js';
 import { maskPii, maskPiiInFields } from '../security/piiMask.js';
 import { normalizeForScan } from '../security/normalizeForScan.js';
+import {
+  TEXT_BUDGET,
+  WHOLE_REDACTION,
+  finalizeRedaction,
+  redactSecretSpans,
+} from '../security/secretRedact.js';
+import type { QuarantineRedaction } from '../quarantine/reason.js';
 
 /** Capture budgets (remember.ts / DB CHECK constraints). */
-const BUDGET = { title: 120, summary: 200, body: 2000, fieldsJson: 2000 } as const;
+const BUDGET = { ...TEXT_BUDGET, fieldsJson: 2000 } as const;
 
 export interface SanitizeContent {
   title: string;
@@ -35,7 +48,7 @@ export interface SanitizeContent {
 
 export interface SanitizeBlock {
   reason: 'secret_detected' | 'embedded_instructions' | 'sanitize_failed';
-  redact: boolean;
+  redact: QuarantineRedaction;
   leak: boolean;
   /** Detector category names only, never matched text. */
   categories: string[];
@@ -53,7 +66,7 @@ function failed(): SanitizeResult {
   return {
     flags: {},
     masked: null,
-    block: { reason: 'sanitize_failed', redact: true, leak: false, categories: [] },
+    block: { reason: 'sanitize_failed', redact: 'whole', leak: false, categories: [] },
   };
 }
 
@@ -80,10 +93,29 @@ export function sanitizeItem(item: SanitizeContent): SanitizeResult {
 
     const secrets = scanForSecrets(normalizeForScan(`${head}\n${fieldsJson}`));
     if (secrets.length > 0) {
+      if (secrets.includes('pem_private_key')) {
+        // SEC-M1: only the PEM header is detectable; the key body may sit in another
+        // field (header in title, body in body) where no span covers it → whole item.
+        return {
+          flags: { leak: true, secrets },
+          masked: { ...WHOLE_REDACTION, fields: {} },
+          block: { reason: 'secret_detected', redact: 'whole', leak: true, categories: secrets },
+        };
+      }
+      // Spans first, then PII (unclamped), then clamp + verify (fail-closed).
+      const redacted = redactSecretSpans(item);
+      const pii = maskUnclamped(redacted.content);
+      let safe = finalizeRedaction(pii.masked ?? redacted.content, redacted.ranges);
+      if (JSON.stringify(safe.fields).length > BUDGET.fieldsJson) {
+        // Sentinels can grow fields past the budget: drop them (whole item) rather than fail at the DB.
+        safe = { ...WHOLE_REDACTION, fields: {} };
+      }
+      const flags: SanitizeFlags = { leak: true, secrets };
+      if (pii.pii.length > 0) flags.pii = pii.pii;
       return {
-        flags: { leak: true, secrets },
-        masked: null,
-        block: { reason: 'secret_detected', redact: true, leak: true, categories: secrets },
+        flags,
+        masked: safe,
+        block: { reason: 'secret_detected', redact: 'spans', leak: true, categories: secrets },
       };
     }
 
@@ -100,7 +132,7 @@ export function sanitizeItem(item: SanitizeContent): SanitizeResult {
 
     const block: SanitizeBlock | null =
       injection.length > 0
-        ? { reason: 'embedded_instructions', redact: false, leak: false, categories: injection }
+        ? { reason: 'embedded_instructions', redact: 'none', leak: false, categories: injection }
         : null;
 
     return { flags, masked, block };
@@ -111,7 +143,8 @@ export function sanitizeItem(item: SanitizeContent): SanitizeResult {
   }
 }
 
-function maskContent(item: SanitizeContent): { masked: SanitizeContent | null; pii: string[] } {
+/** PII mask of every text and string leaf, without clamping (null = no PII found). */
+function maskUnclamped(item: SanitizeContent): { masked: SanitizeContent | null; pii: string[] } {
   const title = maskPii(item.title);
   const summary = maskPii(item.summary);
   const body = maskPii(item.body);
@@ -119,17 +152,25 @@ function maskContent(item: SanitizeContent): { masked: SanitizeContent | null; p
 
   const pii = union(title.categories, summary.categories, body.categories, fields.categories);
   if (pii.length === 0) return { masked: null, pii };
-
-  // Only email can grow (≈1 char per match): clamp back to the DB budgets.
   return {
-    masked: {
-      title: title.text.slice(0, BUDGET.title),
-      summary: summary.text.slice(0, BUDGET.summary),
-      body: body.text.slice(0, BUDGET.body),
-      fields: fields.fields,
-    },
+    masked: { title: title.text, summary: summary.text, body: body.text, fields: fields.fields },
     pii,
   };
+}
+
+/** Only email can grow (≈1 char per match): clamp back to the DB budgets. */
+function clampToBudget(c: SanitizeContent): SanitizeContent {
+  return {
+    title: c.title.slice(0, BUDGET.title),
+    summary: c.summary.slice(0, BUDGET.summary),
+    body: c.body.slice(0, BUDGET.body),
+    fields: c.fields,
+  };
+}
+
+function maskContent(item: SanitizeContent): { masked: SanitizeContent | null; pii: string[] } {
+  const r = maskUnclamped(item);
+  return { masked: r.masked ? clampToBudget(r.masked) : null, pii: r.pii };
 }
 
 /** Every string value of a JSON-like tree, depth-first (keys are policy-validated). */

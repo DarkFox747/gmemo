@@ -231,6 +231,25 @@ async function main(): Promise<void> {
     const text = await res.text();
     if (text !== '{"error":"Not found"}') fail(`body is ${text}, expected {"error":"Not found"}`);
   });
+
+  await step('api quarantine as tech lead', async () => {
+    const res = await request(`/api/v1/projects/${DEMO_PROJECT_ID}/quarantine`, {
+      method: 'GET',
+      headers: { 'X-Dev-User': DEMO_TL },
+    });
+    if (res.status !== 200) fail(`HTTP ${res.status} from quarantine`);
+    const body = (await res.json()) as { items?: unknown; truncated?: unknown };
+    if (!Array.isArray(body.items)) fail('quarantine response has no items array');
+    if (typeof body.truncated !== 'boolean') fail('quarantine response has no truncated flag');
+  });
+
+  await step('job quarantine-purge (dev open mode)', async () => {
+    const res = await request('/internal/jobs/quarantine-purge', { method: 'POST' });
+    if (res.status !== 200) fail(`HTTP ${res.status} from /internal/jobs/quarantine-purge`);
+    const body = (await res.json()) as { job?: unknown; count?: unknown };
+    if (body.job !== 'quarantine-purge') fail(`job is ${String(body.job)}, expected quarantine-purge`);
+    if (typeof body.count !== 'number') fail('purge response has no numeric count');
+  });
 }
 
 main().catch((err: unknown) => {

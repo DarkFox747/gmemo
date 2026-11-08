@@ -73,10 +73,9 @@ describeWithDb('PgStagingRepository integration', () => {
        ON CONFLICT (slug) DO NOTHING`,
       [PROJECT_SLUG_1],
     );
-    const { rows: proj1Rows } = await pool.query(
-      `SELECT id FROM project WHERE slug = $1`,
-      [PROJECT_SLUG_1],
-    );
+    const { rows: proj1Rows } = await pool.query(`SELECT id FROM project WHERE slug = $1`, [
+      PROJECT_SLUG_1,
+    ]);
     projectId1 = proj1Rows[0].id as string;
 
     await pool.query(
@@ -85,10 +84,9 @@ describeWithDb('PgStagingRepository integration', () => {
        ON CONFLICT (remote_url) DO NOTHING`,
       [projectId1, REPO_URL_1],
     );
-    const { rows: repo1Rows } = await pool.query(
-      `SELECT id FROM repo WHERE remote_url = $1`,
-      [REPO_URL_1],
-    );
+    const { rows: repo1Rows } = await pool.query(`SELECT id FROM repo WHERE remote_url = $1`, [
+      REPO_URL_1,
+    ]);
     repoId1 = repo1Rows[0].id as string;
 
     // -- Seed: project 2 + repo 2 (second tenant for scoping tests) --
@@ -98,10 +96,9 @@ describeWithDb('PgStagingRepository integration', () => {
        ON CONFLICT (slug) DO NOTHING`,
       [PROJECT_SLUG_2],
     );
-    const { rows: proj2Rows } = await pool.query(
-      `SELECT id FROM project WHERE slug = $1`,
-      [PROJECT_SLUG_2],
-    );
+    const { rows: proj2Rows } = await pool.query(`SELECT id FROM project WHERE slug = $1`, [
+      PROJECT_SLUG_2,
+    ]);
     projectId2 = proj2Rows[0].id as string;
 
     await pool.query(
@@ -110,10 +107,9 @@ describeWithDb('PgStagingRepository integration', () => {
        ON CONFLICT (remote_url) DO NOTHING`,
       [projectId2, REPO_URL_2],
     );
-    const { rows: repo2Rows } = await pool.query(
-      `SELECT id FROM repo WHERE remote_url = $1`,
-      [REPO_URL_2],
-    );
+    const { rows: repo2Rows } = await pool.query(`SELECT id FROM repo WHERE remote_url = $1`, [
+      REPO_URL_2,
+    ]);
     repoId2 = repo2Rows[0].id as string;
   });
 
@@ -122,10 +118,10 @@ describeWithDb('PgStagingRepository integration', () => {
 
     // Delete test project rows — cascades to repo, staging_session, staging_item
     // (all FK chains carry ON DELETE CASCADE).
-    await pool.query(
-      `DELETE FROM project WHERE slug IN ($1, $2)`,
-      [PROJECT_SLUG_1, PROJECT_SLUG_2],
-    );
+    await pool.query(`DELETE FROM project WHERE slug IN ($1, $2)`, [
+      PROJECT_SLUG_1,
+      PROJECT_SLUG_2,
+    ]);
 
     await pool.end();
   });
@@ -147,6 +143,20 @@ describeWithDb('PgStagingRepository integration', () => {
     expect(id1).toBe(id2);
     // ULID is 26 characters.
     expect(id1).toHaveLength(26);
+  });
+
+  it('SEC-L2: a reserved branch (restore/, web/) never opens a session', async () => {
+    for (const branch of ['restore/integ-reserved', 'web/integ-reserved']) {
+      const tenant = { projectId: projectId1, repoId: repoId1, branch };
+      await expect(repo!.findOrCreateOpenSession(tenant, 'integ-test-user')).rejects.toMatchObject({
+        code: 'INVALID_REFERENCE',
+      });
+      const { rows } = await pool!.query(
+        `SELECT count(*)::int AS n FROM staging_session WHERE project_id = $1 AND branch = $2`,
+        [projectId1, branch],
+      );
+      expect(rows[0].n).toBe(0);
+    }
   });
 
   // -------------------------------------------------------------------------

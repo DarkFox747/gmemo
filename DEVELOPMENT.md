@@ -117,6 +117,7 @@ Las variables de la app dentro de compose están definidas en `docker-compose.ym
 | `pnpm provision` | provisiona roles de la base |
 | `pnpm seed:dev` | carga el seed de desarrollo (solo dev) |
 | `pnpm smoke` | prueba de humo contra un stack corriendo |
+| `pnpm job:quarantine-purge` | borra las entradas de cuarentena vencidas (`expires_at < now()`) e imprime el conteo; lee solo `DATABASE_URL` |
 
 ## Tests
 
@@ -190,10 +191,91 @@ permiso), 400 `{"error":"Invalid request"}` (nunca repite la entrada), 409 `{"er
 al aprobar (`target_changed`, `target_inactive`, `duplicate_content`), 429 al superar
 `RATE_LIMIT_API_MAX`. Todas las respuestas llevan `Cache-Control: no-store`.
 
+### Cuarentena (HU-10)
+
+Cada entrada guarda el criterio (`pipeline`, `judge`, `human_review`), el motivo (`secret_detected`,
+`embedded_instructions`, `duplicate_content`, `judge_rejected`, `human_rejected`, `sanitize_failed`; el
+motivo fino del juez queda en `judgeReason`), la memoria relacionada, el target original (ops no-`add`) y
+`expires_at = now() + QUARANTINE_RETENTION_DAYS`. Ante una credencial solo se reemplazan los tramos del
+secreto por `[REDACTADO]` (el resto del texto se conserva); ante cualquier duda (tramo no localizable,
+secreto en una clave de `fields`, recorte que partiría el centinela, re-chequeo fallido) se redacta el campo
+o el ítem completo. Una clave privada PEM detectada en cualquier campo (o en `fields`) redacta siempre el
+ítem completo: solo el encabezado es detectable y el cuerpo de la clave podría estar en otro campo. El rechazo
+de segunda capa del juez (`security_second_layer`) se guarda siempre completo como `[REDACTADO]`.
+
+Al redactar (`spans` o `whole`) también se reemplaza el `content_hash` del `staging_item`: pasa a ser
+`sha256(<item id>:<hash del contenido redactado>)`. Así no queda el hash del contenido con el secreto, y dos
+ítems redactados al mismo texto (por ejemplo dos `[REDACTADO]` completos) no chocan con
+`UNIQUE(session_id, content_hash)`. Con redacción `none` el hash no cambia.
+
+Acceso: el `project_admin` ve todas las entradas del proyecto; cualquier otro miembro ve solo las que creó
+(`author_identity` = su subject) y, en el detalle, solo `reasonCode`/`criterion` (el `judgeReason` del juez es
+solo para el admin). Restaurar es solo para `project_admin`. Todo lo demás recibe el mismo 404.
+
+No se pueden restaurar entradas con contenido redactado: `reason_code` `secret_detected` o `sanitize_failed`,
+o título/resumen/cuerpo igual a `[REDACTADO]` (404, y `canRestore=false` en el detalle). Las ramas `restore/` y
+`web/` están reservadas: `remember` con `X-Git-Branch` en esos prefijos responde `INVALID_REFERENCE` y nunca
+abre sesión; si igual hubiera una sesión abierta en `restore/<id>`, restaurar responde 404 (nunca 500).
+Una entrada restaurada o vencida deja de verse en la API aunque el purge todavía no haya corrido.
+
+```bash
+P=00000000-0000-0000-0000-000000000010
+curl -sS "http://localhost:3000/api/v1/projects/$P/quarantine?reason=secret_detected" -H 'X-Dev-User: tl@demo.local'
+curl -sS http://localhost:3000/api/v1/projects/$P/quarantine/<id> -H 'X-Dev-User: tl@demo.local'
+# restaurar: crea un item en la sesión restore/<id> (autor original) y corre el MISMO pipeline + juez
+curl -sS -X POST http://localhost:3000/api/v1/projects/$P/quarantine/<id>/restore \
+  -H 'X-Dev-User: tl@demo.local' -H 'Content-Type: application/json' -d '{}'
+# → {"outcome":"applied","memoryId":...} | {"outcome":"queued","itemId":...} | {"outcome":"quarantined","quarantineId":<nueva>}
+```
+
+Restaurar una entrada ya restaurada da 404. Si el pipeline falla después de reclamar la entrada, el item
+queda `pending` en su sesión `restore/<id>` y el error se loguea con ambos ids (un reintento da 404). Riesgo
+residual documentado: no hay "des-reclamo" compensatorio; la entrada queda etiquetada como restaurada.
+
+**Medición del juez.** `restored_at IS NOT NULL` marca un candidato a falso positivo; el resultado de la
+restauración se obtiene uniendo `restored_item_id` con `staging_item` (`promoted_at`, `judge_state`):
+
+```sql
+SELECT criterion, reason_code, count(*) AS total,
+       count(*) FILTER (WHERE restored_at IS NOT NULL) AS restored
+FROM quarantine WHERE project_id = $1 GROUP BY 1, 2;
+```
+
+La etiqueta vive lo que vive la fila (la retención es la ventana de medición).
+
+**Backfill de 0008.** Las entradas previas se clasifican con la misma tabla que el código y reciben
+`expires_at = quarantined_at + 60 días`; las que ya tenían más de 60 días quedan purgables en la primera
+corrida del job.
+
+### Jobs internos (`/internal/jobs`)
+
+`POST /internal/jobs/quarantine-purge` borra las entradas con `expires_at < now()` y responde
+`{"job":"quarantine-purge","count":N,"detail":{"<projectId>":n}}` (queda auditado en `access_log` como
+`system`/`admin`, solo conteos). Con `JOBS_TOKEN` (≥32 caracteres, comparado en tiempo constante) el router
+está habilitado en cualquier entorno y el token se exige siempre. Sin token (modo abierto) solo se habilita
+con `NODE_ENV=development` explícito: `production`, `test` o `NODE_ENV` sin definir lo dejan deshabilitado
+(composición y router, `isJobsEnabled`/`isOpenMode`). Cualquier rechazo (deshabilitado, token ausente o
+incorrecto, job desconocido, otro método) es el mismo 404; un token rechazado deja un `warn` en el log (sin el
+token). Límite fijo de 10 requests/minuto por cliente (429 opaco).
+
+```bash
+# dev, sin JOBS_TOKEN (modo abierto)
+curl -sS -X POST http://localhost:3000/internal/jobs/quarantine-purge
+# con token
+curl -sS -X POST http://localhost:3000/internal/jobs/quarantine-purge -H "Authorization: Bearer $JOBS_TOKEN"
+# script (mismo servicio, audit trigger=script)
+DATABASE_URL=postgres://gmemo:gmemo@localhost:5433/gmemo pnpm job:quarantine-purge
+```
+
+**Producción (documentado, no implementado): EventBridge Scheduler.** Un schedule diario con target
+*API destination* `POST https://<host>/internal/jobs/quarantine-purge`, cuya *connection* guarda el bearer
+`JOBS_TOKEN` en Secrets Manager (auth tipo API key, header `Authorization: Bearer <token>`). La imagen de
+Fargate no incluye tsx, por eso el camino de producción es el HTTP y no el script.
+
 ### Web estática en dev
 
 Con `WEB_STATIC_DIR=<carpeta del build>` (por ejemplo `packages/web/dist`) Express sirve la web en `/`, con
-fallback SPA para rutas sin extensión. El fallback nunca intercepta `/api`, `/mcp`, `/promote` ni `/health`.
+fallback SPA para rutas sin extensión. El fallback nunca intercepta `/api`, `/mcp`, `/promote`, `/internal` ni `/health`.
 Las respuestas HTML llevan una CSP estricta same-origin y `Cache-Control: no-cache`; las respuestas JSON
 no cambian. El server no arranca si la carpeta no tiene `index.html`. La variable está prohibida con
 `NODE_ENV=production` (la config falla al arrancar).

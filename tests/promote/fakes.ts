@@ -41,6 +41,7 @@ import type {
   AuditLogger,
   TenantContext,
   RequestContext,
+  JobAuditInput,
   ToolName,
 } from '../../src/mcp/context.js';
 
@@ -183,13 +184,14 @@ export class FakePromotionRepository implements PromotionRepository {
     return Promise.resolve(result);
   }
 
-  quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<void> {
+  /** Generated quarantine id per call (`q-<itemId>-<n>`); records the redact mode in quarantineCalls. */
+  quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<string | null> {
     this.quarantineCalls.push({ item, ctx, q });
     const row = this.rows.get(item.id);
     if (row) {
       // Mirrors the repository: a non-redacted judge rejection keeps the
       // justification on the staging row; everything else stores the code.
-      const keepJustification = !q.redact && q.decision?.verdict === 'rejected';
+      const keepJustification = q.redact === 'none' && q.decision?.verdict === 'rejected';
       Object.assign(row, {
         judge_state: 'rejected',
         judge_reason: keepJustification ? q.decision!.reason : q.reason,
@@ -199,7 +201,7 @@ export class FakePromotionRepository implements PromotionRepository {
         sanitize_flags: q.sanitizeFlags,
       });
     }
-    return Promise.resolve();
+    return Promise.resolve(`q-${item.id}-${this.quarantineCalls.length}`);
   }
 
   finalizeSession(
@@ -378,6 +380,21 @@ export class FakeAuditLogger implements AuditLogger {
 
   recordPromote(ctx: RequestContext, p: RecordPromoteParams): Promise<void> {
     this.recordPromoteCalls.push({ ctx, p });
+    return Promise.resolve();
+  }
+
+  recordApi(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  recordAbandon(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  readonly recordJobCalls: JobAuditInput[] = [];
+
+  recordJob(p: JobAuditInput): Promise<void> {
+    this.recordJobCalls.push(p);
     return Promise.resolve();
   }
 }

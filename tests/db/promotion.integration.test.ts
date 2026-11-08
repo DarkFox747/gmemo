@@ -22,7 +22,7 @@
  *  - applyAccepted (deprecate): target status='deprecated', current_revision++,
  *      memory_revision('deprecate') uses snapshotted target content.
  *  - quarantineItem: quarantine row (self-contained) + staging_item.judge_state='rejected'.
- *  - quarantineItem redact=true: content replaced with sentinel string.
+ *  - quarantineItem redact 'whole': content replaced with sentinel string.
  *  - finalizeSession: promoted / rejected / partially_promoted transitions;
  *      second call on already-finalized session is a no-op.
  *
@@ -32,6 +32,7 @@
 import pg from 'pg';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { logger } from '../../src/observability/logger.js';
+import { sha256Hex } from '../../src/security/hash.js';
 import type {
   PromotionItemRow,
   ApplyContext,
@@ -207,7 +208,7 @@ describeWithDb('PgPromotionRepository integration', () => {
 
     // Instantiate repository under test.
     const { PgPromotionRepository } = await import('../../src/db/promotionRepository.js');
-    repo = new PgPromotionRepository(pool);
+    repo = new PgPromotionRepository(pool, { quarantineRetentionDays: 60 });
 
     // -- Seed: project --
     await pool.query(
@@ -785,22 +786,28 @@ describeWithDb('PgPromotionRepository integration', () => {
       sessionId: SESS_MAIN,
     };
 
-    await repo!.quarantineItem(item!, ctx, {
+    const quarantineId = await repo!.quarantineItem(item!, ctx, {
       reason: 'judge_rejected',
-      redact: false,
+      redact: 'none',
       decision: null,
       sanitizeFlags: {},
     } satisfies QuarantineInput);
 
     // Quarantine row exists with correct attribution
     const { rows: qRows } = await pool!.query(
-      `SELECT title, summary, body, judge_reason, author_identity,
-              origin_session_id, origin_item_id
+      `SELECT id, title, summary, body, judge_reason, author_identity,
+              origin_session_id, origin_item_id, criterion, reason_code,
+              extract(epoch FROM (expires_at - now())) / 86400 AS days_left
          FROM quarantine
         WHERE origin_item_id = $1`,
       [itemId],
     );
     expect(qRows).toHaveLength(1);
+    expect(quarantineId).toBe(qRows[0].id);
+    expect(qRows[0].criterion).toBe('judge');
+    expect(qRows[0].reason_code).toBe('judge_rejected');
+    expect(Number(qRows[0].days_left)).toBeGreaterThan(59.99);
+    expect(Number(qRows[0].days_left)).toBeLessThanOrEqual(60);
     expect(qRows[0].title).toBe('Quarantine test title');
     expect(qRows[0].summary).toBe('This item will be quarantined by the test.');
     expect(qRows[0].judge_reason).toBe('judge_rejected');
@@ -816,7 +823,7 @@ describeWithDb('PgPromotionRepository integration', () => {
     expect(itemRows[0].judge_state).toBe('rejected');
   });
 
-  it('quarantineItem with redact=true replaces title/summary/body with sentinel', async () => {
+  it('quarantineItem with redact whole replaces title/summary/body with sentinel', async () => {
     const itemId = await insertAddItem({
       sessionId: SESS_MAIN,
       contentHash: 'promo-integ-quarantine-redact-001',
@@ -839,7 +846,7 @@ describeWithDb('PgPromotionRepository integration', () => {
 
     await repo!.quarantineItem(item!, ctx, {
       reason: 'secret_detected',
-      redact: true,
+      redact: 'whole',
       decision: null,
       sanitizeFlags: { leak: true, secrets: ['aws_access_key'] },
     });
@@ -850,14 +857,14 @@ describeWithDb('PgPromotionRepository integration', () => {
       [itemId],
     );
     expect(qRows).toHaveLength(1);
-    expect(qRows[0].title).toBe('[REDACTED: secret detected]');
-    expect(qRows[0].summary).toBe('[REDACTED: secret detected]');
-    expect(qRows[0].body).toBe('[REDACTED: secret detected]');
+    expect(qRows[0].title).toBe('[REDACTADO]');
+    expect(qRows[0].summary).toBe('[REDACTADO]');
+    expect(qRows[0].body).toBe('[REDACTADO]');
     // Security fix: the secret hidden in fields is blanked too.
     expect(qRows[0].fields).toEqual({});
   });
 
-  it('quarantineItem with redact=true blanks fields in quarantine AND staging (secret in fields)', async () => {
+  it('quarantineItem with redact whole blanks fields in quarantine AND staging (secret in fields)', async () => {
     const itemId = await insertAddItem({
       sessionId: SESS_MAIN,
       contentHash: 'promo-integ-quarantine-redact-fields-001',
@@ -870,7 +877,7 @@ describeWithDb('PgPromotionRepository integration', () => {
 
     await repo!.quarantineItem(item, ctx, {
       reason: 'secret_detected',
-      redact: true,
+      redact: 'whole',
       decision: null,
       sanitizeFlags: { leak: true, secrets: ['aws_access_key'] },
     });
@@ -886,12 +893,42 @@ describeWithDb('PgPromotionRepository integration', () => {
       [itemId],
     );
     expect(st[0].fields).toEqual({});
-    expect(st[0].title).toBe('[REDACTED: secret detected]');
-    expect(st[0].body).toBe('[REDACTED: secret detected]');
+    expect(st[0].title).toBe('[REDACTADO]');
+    expect(st[0].body).toBe('[REDACTADO]');
     expect(st[0].judge_state).toBe('rejected');
     expect(st[0].sanitize_flags).toEqual({ leak: true, secrets: ['aws_access_key'] });
-    // content_hash is untouched on terminal rows
-    expect(st[0].content_hash).toBe('promo-integ-quarantine-redact-fields-001');
+    // SEC-M2: the hash of the secret-bearing content is replaced by
+    // sha256(item id : hash of the redacted content), the same value as quarantine's mixed with the id.
+    const { rows: qh } = await pool!.query(
+      `SELECT content_hash FROM quarantine WHERE origin_item_id = $1`, [itemId],
+    );
+    expect(st[0].content_hash).not.toBe('promo-integ-quarantine-redact-fields-001');
+    expect(st[0].content_hash).toBe(sha256Hex(`${itemId}:${qh[0].content_hash}`));
+  });
+
+  it('SEC-M2: two items whole-redacted in the same session do not collide on content_hash', async () => {
+    const ids = [
+      await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m2-a', body: 'm2 a AKIAIOSFODNN7EXAMPLE' }),
+      await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m2-b', body: 'm2 b AKIAIOSFODNN7EXAMPLE' }),
+    ];
+    const ctx: ApplyContext = {
+      projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
+    };
+    for (const id of ids) {
+      const qid = await repo!.quarantineItem(await fetchItem(SESS_MAIN, id), ctx, {
+        reason: 'secret_detected',
+        redact: 'whole',
+        decision: null,
+        sanitizeFlags: { leak: true, secrets: ['aws_access_key_id'] },
+      });
+      expect(qid).not.toBeNull();
+    }
+    const { rows } = await pool!.query(
+      `SELECT content_hash, body FROM staging_item WHERE id = ANY($1::uuid[])`, [ids],
+    );
+    expect(rows.map((r) => r.body)).toEqual(['[REDACTADO]', '[REDACTADO]']);
+    expect(new Set(rows.map((r) => r.content_hash)).size).toBe(2);
+    for (const r of rows) expect(['promo-integ-m2-a', 'promo-integ-m2-b']).not.toContain(r.content_hash);
   });
 
   it('quarantineItem writes the decision columns on the staging row', async () => {
@@ -907,7 +944,7 @@ describeWithDb('PgPromotionRepository integration', () => {
 
     await repo!.quarantineItem(item, ctx, {
       reason: 'duplicate_content',
-      redact: false,
+      redact: 'none',
       decision: {
         verdict: 'rejected',
         criterion: 'duplication',
@@ -1251,7 +1288,7 @@ describeWithDb('PgPromotionRepository integration', () => {
 
     for (const item of [applied, reviewed]) {
       await repo!.quarantineItem(item, mainCtx(), {
-        reason: 'specificity', redact: false, decision: null, sanitizeFlags: {},
+        reason: 'specificity', redact: 'none', decision: null, sanitizeFlags: {},
       });
     }
 
@@ -1285,7 +1322,7 @@ describeWithDb('PgPromotionRepository integration', () => {
     const item = await fetchItem(SESS_MAIN, itemId);
     await repo!.quarantineItem(item, mainCtx(), {
       reason: 'specificity',
-      redact: false,
+      redact: 'none',
       decision: {
         verdict: 'rejected', criterion: 'specificity', confidence: 0.9,
         reason: 'Too generic: no file, module or concrete behaviour named.',
@@ -1304,7 +1341,7 @@ describeWithDb('PgPromotionRepository integration', () => {
     const item = await fetchItem(SESS_MAIN, itemId);
     await repo!.quarantineItem(item, mainCtx(), {
       reason: 'security_second_layer',
-      redact: true,
+      redact: 'whole',
       decision: {
         verdict: 'rejected', criterion: 'security_second_layer', confidence: 0.9,
         reason: 'security_second_layer', relatedMemoryId: null, mandatoryReview: false,
@@ -1323,10 +1360,10 @@ describeWithDb('PgPromotionRepository integration', () => {
     });
     const item = await fetchItem(SESS_MAIN, itemId);
     await repo!.quarantineItem(item, mainCtx(), {
-      reason: 'secret_detected', redact: true, decision: null,
+      reason: 'secret_detected', redact: 'whole', decision: null,
       sanitizeFlags: { leak: true, secrets: ['aws_access_key_id'] },
     });
-    const sentinel = '[REDACTED: secret detected]';
+    const sentinel = '[REDACTADO]';
     const expected = computeContentHash({
       op: 'add', type: 'pattern', title: sentinel, summary: sentinel, body: sentinel,
       fields: {}, target: null,
@@ -1334,6 +1371,115 @@ describeWithDb('PgPromotionRepository integration', () => {
     const { rows: q } = await pool!.query(`SELECT content_hash FROM quarantine WHERE origin_item_id = $1`, [itemId]);
     expect(q[0].content_hash).toBe(expected);
     expect(q[0].content_hash).not.toBe('promo-integ-l7-original-hash');
+  });
+
+  it('C3: spans mode stores already-redacted content verbatim in both tables', async () => {
+    const itemId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-c3-spans-ok',
+      body: 'Deploy failed because the key [REDACTADO] was rotated.',
+    });
+    const item = await fetchItem(SESS_MAIN, itemId);
+    await repo!.quarantineItem(item, mainCtx(), {
+      reason: 'secret_detected', redact: 'spans', decision: null,
+      sanitizeFlags: { leak: true, secrets: ['aws_access_key_id'] },
+    });
+    const { rows: q } = await pool!.query(
+      `SELECT body, criterion, reason_code, content_hash FROM quarantine WHERE origin_item_id = $1`,
+      [itemId],
+    );
+    expect(q[0].body).toBe('Deploy failed because the key [REDACTADO] was rotated.');
+    expect(q[0].criterion).toBe('pipeline');
+    expect(q[0].reason_code).toBe('secret_detected');
+    // Redacted rows carry a recomputed hash, never the staged one.
+    expect(q[0].content_hash).not.toBe('promo-integ-c3-spans-ok');
+    const { rows: st } = await pool!.query(`SELECT body FROM staging_item WHERE id = $1`, [itemId]);
+    expect(st[0].body).toBe('Deploy failed because the key [REDACTADO] was rotated.');
+  });
+
+  it('C3: spans mode with a residual secret falls back to whole redaction and warns', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const itemId = await insertAddItem({
+        sessionId: SESS_MAIN,
+        contentHash: 'promo-integ-c3-spans-residual',
+        body: 'Still has AKIAIOSFODNN7EXAMPLE inside.',
+      });
+      const item = await fetchItem(SESS_MAIN, itemId);
+      await repo!.quarantineItem(item, mainCtx(), {
+        reason: 'secret_detected', redact: 'spans', decision: null,
+        sanitizeFlags: { leak: true, secrets: ['aws_access_key_id'] },
+      });
+      const { rows: q } = await pool!.query(
+        `SELECT title, summary, body, fields FROM quarantine WHERE origin_item_id = $1`, [itemId],
+      );
+      expect(q[0]).toEqual({ title: '[REDACTADO]', summary: '[REDACTADO]', body: '[REDACTADO]', fields: {} });
+      const { rows: st } = await pool!.query(`SELECT body FROM staging_item WHERE id = $1`, [itemId]);
+      expect(st[0].body).toBe('[REDACTADO]');
+      expect(warn).toHaveBeenCalledWith(
+        '[promote] span redaction re-check failed — whole-field fallback',
+        { itemId },
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('AKIAIOSFODNN7EXAMPLE');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('C3: classification, related and target columns on a routed R3 / amend quarantine', async () => {
+    const targetId = await insertMemory({ contentHash: 'promo-integ-c3-target-mem' });
+    const relatedId = await insertMemory({ contentHash: 'promo-integ-c3-related-mem' });
+    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c3-r3' });
+    const item = await fetchItem(SESS_MAIN, itemId);
+    // Simulate an amend snapshot (target columns come from the item).
+    const amend: PromotionItemRow = { ...item, op: 'amend', target_memory_id: targetId, target_revision: 3 };
+    await repo!.quarantineItem(amend, mainCtx(), {
+      reason: 'duplicate_content',
+      redact: 'none',
+      decision: {
+        verdict: 'rejected', criterion: 'duplication', confidence: 0.9,
+        reason: 'same as existing', relatedMemoryId: relatedId, mandatoryReview: false,
+      },
+      sanitizeFlags: {},
+    });
+    const { rows: q } = await pool!.query(
+      `SELECT criterion, reason_code, related_memory_id, target_memory_id, target_revision
+         FROM quarantine WHERE origin_item_id = $1`,
+      [itemId],
+    );
+    expect(q[0]).toEqual({
+      criterion: 'judge', reason_code: 'duplicate_content',
+      related_memory_id: relatedId, target_memory_id: targetId, target_revision: 3,
+    });
+  });
+
+  it('C3: R2 whole quarantine is classified judge / secret_detected', async () => {
+    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c3-r2' });
+    const item = await fetchItem(SESS_MAIN, itemId);
+    await repo!.quarantineItem(item, mainCtx(), {
+      reason: 'security_second_layer', redact: 'whole',
+      decision: {
+        verdict: 'rejected', criterion: 'security_second_layer', confidence: 0.9,
+        reason: 'security_second_layer', relatedMemoryId: null, mandatoryReview: false,
+      },
+      sanitizeFlags: { leak: true },
+    });
+    const { rows: q } = await pool!.query(
+      `SELECT criterion, reason_code, body FROM quarantine WHERE origin_item_id = $1`, [itemId],
+    );
+    expect(q[0]).toEqual({ criterion: 'judge', reason_code: 'secret_detected', body: '[REDACTADO]' });
+  });
+
+  it('C3: quarantineItem returns null when the item was resolved meanwhile', async () => {
+    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c3-null' });
+    const item = await fetchItem(SESS_MAIN, itemId);
+    await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
+    const id = await repo!.quarantineItem(item, mainCtx(), {
+      reason: 'specificity', redact: 'none', decision: null, sanitizeFlags: {},
+    });
+    expect(id).toBeNull();
+    const { rows } = await pool!.query(`SELECT 1 FROM quarantine WHERE origin_item_id = $1`, [itemId]);
+    expect(rows).toHaveLength(0);
   });
 
   it('Reviewer M2: after hash_conflict the quarantined staging row holds the masked text', async () => {
@@ -1411,7 +1557,7 @@ describeWithDb('PgPromotionRepository integration', () => {
     await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     await repo!.quarantineItem(item, mainCtx(), {
-      reason: 'specificity', redact: false, decision: null, sanitizeFlags: {},
+      reason: 'specificity', redact: 'none', decision: null, sanitizeFlags: {},
     });
     expect(warn).toHaveBeenCalledWith('[promote] quarantine skipped: item resolved concurrently', { itemId });
     warn.mockRestore();

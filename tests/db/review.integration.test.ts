@@ -148,7 +148,7 @@ describeWithDb('PgPromotionRepository human review integration', () => {
     const { runMigrations } = await import('../../src/db/migrate.js');
     await runMigrations(DATABASE_URL!);
     const { PgPromotionRepository: Repo } = await import('../../src/db/promotionRepository.js');
-    repo = new Repo(pool);
+    repo = new Repo(pool, { quarantineRetentionDays: 60 });
 
     const proj = async (slug: string) => {
       const { rows } = await pool.query(
@@ -506,7 +506,8 @@ describeWithDb('PgPromotionRepository human review integration', () => {
       }),
     ).toBe('rejected');
     const { rows: q } = await pool.query(
-      `SELECT judge_reason, project_id, origin_session_id, title FROM quarantine WHERE origin_item_id = $1`,
+      `SELECT judge_reason, project_id, origin_session_id, title, criterion, reason_code
+         FROM quarantine WHERE origin_item_id = $1`,
       [itemId],
     );
     expect(q).toEqual([
@@ -515,6 +516,8 @@ describeWithDb('PgPromotionRepository human review integration', () => {
         project_id: projectId,
         origin_session_id: sessionId,
         title: 'Review item title',
+        criterion: 'human_review',
+        reason_code: 'human_rejected',
       },
     ]);
     const st = await itemRow(itemId);

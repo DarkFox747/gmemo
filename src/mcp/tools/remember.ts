@@ -5,7 +5,8 @@
  * responsibility (Batch E wrapper in index.ts). This file only exports the
  * handler function.
  *
- * 8-step algorithm (write-path design.md §"rememberHandler"):
+ * 8-step algorithm (write-path design.md §"rememberHandler"), after a reserved-branch
+ * guard (restore/, web/ → INVALID_REFERENCE, SEC-L2):
  *  1. assertValidFields — unknown key → INVALID_REFERENCE
  *  2. op↔target validation — add+handle or non-add−handle → INVALID_REFERENCE
  *  3. Resolve target (non-add only); type ≠ target type → INVALID_REFERENCE;
@@ -25,12 +26,18 @@ import { assertValidFields } from '../fieldsPolicy.js';
 import { assertNoSecrets } from '../../security/secretScan.js';
 import { computeContentHash } from '../../security/hash.js';
 import { safeNotify } from '../../notify/notifier.js';
+import { isReservedBranch } from '../../db/stagingRepository.js';
 
 export async function rememberHandler(
   input: RememberRequest,
   ctx: RequestContext,
   deps: HandlerDeps,
 ): Promise<RememberResult> {
+  // SEC-L2: server-owned branch prefixes (restore/, web/) never get an agent session.
+  if (isReservedBranch(ctx.tenant.branch)) {
+    throw new AppError(ErrorCode.INVALID_REFERENCE);
+  }
+
   // Step 1: per-type fields validation
   assertValidFields(input.type, input.fields ?? {});
 

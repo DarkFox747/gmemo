@@ -30,11 +30,11 @@ import { ErrorCode } from '../../src/errors/appError.js';
 
 /** Project the handler's tenant is scoped to. */
 const PROJECT_ID = 'PLACEHOLDER';
-const REPO_ID    = 'PLACEHOLDER';
+const REPO_ID = 'PLACEHOLDER';
 
 const CTX: RequestContext = {
   tenant: { projectId: PROJECT_ID, repoId: REPO_ID, branch: 'main' },
-  actor:  { actorId: 'test-actor', roles: ['contributor'] },
+  actor: { actorId: 'test-actor', roles: ['contributor'] },
 };
 
 /** Valid UUID used as the target memory id for amend tests. */
@@ -431,4 +431,32 @@ describe('rememberHandler — secret scan over a normalized copy (SEC M-2)', () 
     ).rejects.toMatchObject({ code: ErrorCode.PERMISSION_DENIED });
     expect(stagingRepo.insertedItemCount).toBe(0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// SEC-L2: reserved branch prefixes (restore/, web/)
+// ---------------------------------------------------------------------------
+
+describe('rememberHandler — reserved branches (SEC-L2)', () => {
+  it.each(['restore/11111111-1111-4111-8111-111111111111', 'restore/x', 'web/anything', 'web/'])(
+    'branch %s → INVALID_REFERENCE, no session or item created',
+    async (branch) => {
+      const repo = new InMemoryStagingRepository();
+      const ctx: RequestContext = { ...CTX, tenant: { ...CTX.tenant, branch } };
+      await expect(rememberHandler(BASE_ADD, ctx, makeDeps([], repo))).rejects.toMatchObject({
+        code: ErrorCode.INVALID_REFERENCE,
+      });
+      expect(repo.insertedParams).toHaveLength(0);
+      expect(await repo.listStagingItems(ctx.tenant)).toEqual([]);
+    },
+  );
+
+  it.each(['restored/x', 'feature/restore/x', 'webapp/x', 'main'])(
+    'branch %s is not reserved',
+    async (branch) => {
+      const ctx: RequestContext = { ...CTX, tenant: { ...CTX.tenant, branch } };
+      const res = await rememberHandler(BASE_ADD, ctx, makeDeps());
+      expect(res.state).toBe('pending');
+    },
+  );
 });

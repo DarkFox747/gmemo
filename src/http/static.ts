@@ -7,7 +7,7 @@
  *
  * - A strict same-origin CSP + `Cache-Control: no-cache` on HTML responses only
  *   (the global helmet CSP stays off so JSON/MCP responses are unaffected).
- * - SPA fallback: GET/HEAD, extension-less paths, never /api, /mcp, /promote
+ * - SPA fallback: GET/HEAD, extension-less paths, never /api, /mcp, /promote, /internal
  *   or /health.
  */
 
@@ -20,7 +20,7 @@ export const WEB_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
   "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
-const NOT_SPA = /^\/(?:api|mcp|promote|health)(?:\/|$)/i;
+const NOT_SPA = /^\/(?:api|mcp|promote|health|internal)(?:\/|$)/i;
 
 function setHtmlHeaders(res: Response): void {
   res.set('Content-Security-Policy', WEB_CSP);

@@ -32,6 +32,7 @@ import type { PromotionRepository } from '../../src/db/promotionRepository.js';
 import type {
   ActorIdentity,
   AdminActor,
+  ProjectMember,
   AuthenticatedUser,
   Authorizer,
   Principal,
@@ -122,7 +123,7 @@ function makePromotionRepo(sessionId: string | null): PromotionRepository {
       memoryId: 'mem-t022',
       deduped: false,
     }),
-    quarantineItem: async () => {},
+    quarantineItem: async () => 'q-t022',
     finalizeSession: async () => {},
     approveReviewItem: async () => ({
       status: 'approved' as const,
@@ -389,6 +390,9 @@ describe('POST /promote', () => {
         throw new AppError(ErrorCode.PERMISSION_DENIED);
       },
       authorizeProjectAdmin: (_principal: Principal, _projectId: string): Promise<AdminActor> => {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      },
+      authorizeProjectMember: (_principal: Principal, _projectId: string): Promise<ProjectMember> => {
         throw new AppError(ErrorCode.PERMISSION_DENIED);
       },
     };

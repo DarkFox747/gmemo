@@ -21,6 +21,8 @@ import type { AuthenticateOptions, Authenticator, Principal } from '../../../src
 import type { ApiRouterDeps, ApiRouterOptions } from '../../../src/http/api/types.js';
 import { InMemoryAuthRepository } from '../../auth/fakes.js';
 import { FakeEmbedder, FakePromotionRepo, FakeQueueRepo } from '../../review/fakes.js';
+import { QuarantineService } from '../../../src/quarantine/quarantineService.js';
+import { FakeQuarantineRepository, ScriptedPromoteService } from '../../quarantine/fakes.js';
 
 // ---------------------------------------------------------------------------
 // Seed: two projects, one admin each, plus every non-admin shape.
@@ -133,6 +135,9 @@ export interface ApiTestKit {
   queueRepo: FakeQueueRepo;
   promotionRepo: FakePromotionRepo;
   embedder: FakeEmbedder;
+  /** Backing fakes of the default (real) QuarantineService. */
+  quarantineRepo: FakeQuarantineRepository;
+  quarantinePromote: ScriptedPromoteService;
 }
 
 export function makeApiTestApp(
@@ -144,6 +149,8 @@ export function makeApiTestApp(
   const queueRepo = new FakeQueueRepo();
   const promotionRepo = new FakePromotionRepo();
   const embedder = new FakeEmbedder();
+  const quarantineRepo = new FakeQuarantineRepository();
+  const quarantinePromote = new ScriptedPromoteService();
 
   const deps: ApiRouterDeps = {
     authenticator,
@@ -156,6 +163,10 @@ export function makeApiTestApp(
       embedder,
       confidenceThreshold: 0.8,
     }),
+    quarantineService: new QuarantineService({
+      quarantineRepository: quarantineRepo,
+      promoteService: quarantinePromote,
+    }),
     ...overrides,
   };
 
@@ -163,5 +174,7 @@ export function makeApiTestApp(
   app.use(express.json({ limit: '64kb' }));
   app.use('/api', makeApiRouter(deps, options));
   app.use('/api', apiErrorHandler);
-  return { app, authRepo, authenticator, queueRepo, promotionRepo, embedder };
+  return {
+    app, authRepo, authenticator, queueRepo, promotionRepo, embedder, quarantineRepo, quarantinePromote,
+  };
 }

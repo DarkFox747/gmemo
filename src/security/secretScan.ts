@@ -13,6 +13,14 @@ import { normalizeForScan } from './normalizeForScan.js';
 interface SecretPattern {
   readonly category: string;
   readonly pattern: RegExp;
+  /**
+   * Global regex used ONLY to locate spans for redaction (C3). It differs from
+   * the detector where the detector is prefix-only (slack, stripe) or stops
+   * before the token end (openai: `_`/`-` tail), matches a
+   * header only (PEM, extended to the END line in code) or would also cover the
+   * keyword (assignment: value only, never across a newline).
+   */
+  readonly range: RegExp;
 }
 
 /**
@@ -25,47 +33,58 @@ const SECRET_PATTERNS: ReadonlyArray<SecretPattern> = [
   {
     category: 'aws_access_key_id',
     pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/,
+    range: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
   },
   // PEM private-key header blocks (RSA, EC, PKCS8, etc.)
   {
     category: 'pem_private_key',
     pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+    range: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g,
   },
   // JWTs: header.payload.signature — header and payload both start with eyJ
   {
     category: 'jwt',
     pattern: /eyJ[A-Za-z0-9_-]{2,}\.eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]+/,
+    range: /eyJ[A-Za-z0-9_-]{2,}\.eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]+/g,
   },
   // GitHub tokens: gh followed by one scope char (p=PAT, o=OAuth, u=user, s=server, r=refresh)
   {
     category: 'github_token',
     pattern: /gh[pousr]_[A-Za-z0-9]{20,}/,
+    range: /gh[pousr]_[A-Za-z0-9]{20,}/g,
   },
   // Slack tokens: xox followed by one type char (b=bot, a=app, p=legacy, r=rtm, s=service)
   {
     category: 'slack_token',
     pattern: /xox[baprs]-/,
+    range: /xox[baprs]-[A-Za-z0-9-]*/g,
   },
   // Google API keys: AIza prefix + 35 URL-safe base64 chars
   {
     category: 'google_api_key',
     pattern: /AIza[0-9A-Za-z_-]{35}/,
+    range: /AIza[0-9A-Za-z_-]{35}/g,
   },
   // Stripe secret keys (sk_live_) and restricted keys (rk_live_)
   {
     category: 'stripe_secret_key',
     pattern: /(?:sk|rk)_live_/,
+    range: /(?:sk|rk)_live_[A-Za-z0-9]*/g,
   },
-  // OpenAI API keys: sk- prefix + 20+ alphanumeric chars
+  // OpenAI API keys: sk- prefix + 20+ alphanumeric chars. The range runs to the
+  // end of the token (`_`/`-` included, SEC-L1); the lookahead keeps it on the
+  // detector's own hits so words like "task-list" are never redacted.
   {
     category: 'openai_api_key',
     pattern: /sk-[A-Za-z0-9]{20,}/,
+    range: /sk-(?=[A-Za-z0-9]{20})[A-Za-z0-9_-]*/g,
   },
   // Generic secret-assignment heuristic: keyword followed by = or : then a long value.
   // Case-insensitive to catch PASSWORD=, Secret:, TOKEN =, api_key: etc.
   {
     category: 'secret_assignment',
     pattern: /(?:password|secret|token|api[_-]?key)\s*[=:]\s*\S{12,}/i,
+    range: /(?<=(?:password|secret|token|api[_-]?key)[ \t]*[=:][ \t]*)\S{12,}/gi,
   },
 ];
 
@@ -84,6 +103,67 @@ export function scanForSecrets(text: string): string[] {
     }
   }
   return found;
+}
+
+/** Half-open span [start, end) of a located secret. */
+export interface SecretRange {
+  start: number;
+  end: number;
+}
+
+/** Same bound as maskPii: callers cap content far below it; oversize fails closed. */
+const MAX_RANGE_INPUT_LENGTH = 10_000;
+
+/**
+ * End of a PEM block that starts at `from`: just past the matching END line, or
+ * the end of the text when the block is unterminated (redact to the end). A
+ * local regex + exec from `from` keeps the search linear (no lazy-regex ReDoS).
+ */
+function findPemEnd(text: string, from: number): number {
+  const endRe = /-----END [A-Z ]*PRIVATE KEY-----/g;
+  endRe.lastIndex = from;
+  const e = endRe.exec(text);
+  return e ? e.index + e[0].length : text.length;
+}
+
+/**
+ * Detects secrets (same categories as scanForSecrets) and locates their spans,
+ * merged (overlapping or adjacent spans fold) and sorted. Never logs.
+ * Callers must verify the redacted result: a detection without a span (e.g. an
+ * assignment split across a newline) is possible and must fail closed.
+ *
+ * @throws {RangeError} when text.length > 10_000 (callers fail closed).
+ */
+export function scanForSecretsWithRanges(text: string): {
+  categories: string[];
+  ranges: SecretRange[];
+} {
+  if (text.length > MAX_RANGE_INPUT_LENGTH) {
+    throw new RangeError('secret range input exceeds the allowed length');
+  }
+  const categories = scanForSecrets(text);
+  const found: SecretRange[] = [];
+  for (const { category, range } of SECRET_PATTERNS) {
+    // matchAll clones the regex, so the module-level lastIndex is never mutated.
+    for (const m of text.matchAll(range)) {
+      const start = m.index;
+      let end = start + m[0].length;
+      if (category === 'pem_private_key') end = findPemEnd(text, end);
+      if (end > start) found.push({ start, end });
+    }
+  }
+
+  found.sort((a, b) => a.start - b.start || a.end - b.end);
+  const ranges: SecretRange[] = [];
+  for (const r of found) {
+    const last = ranges[ranges.length - 1];
+    if (last && r.start <= last.end) {
+      last.end = Math.max(last.end, r.end);
+    } else {
+      ranges.push({ ...r });
+    }
+  }
+  return { categories, ranges };
 }
 
 /**

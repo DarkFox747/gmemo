@@ -4,7 +4,7 @@
  * the persistence and notification side effects. First matching row wins:
  *
  *   R1 criterion stale_target                → queue uncertain (mandatory)
- *   R2 rejected / security_second_layer      → quarantine, redact, leak
+ *   R2 rejected / security_second_layer      → quarantine, redact 'whole', leak
  *   R3 rejected / duplication                → quarantine duplicate_content (+ related id)
  *   R4 rejected / specificity                → quarantine specificity
  *   R5 uncertain / any                       → queue uncertain
@@ -20,6 +20,7 @@
 import type { MemoryType } from '../contracts/memory.js';
 import type { DecisionCriterion, Verdict } from '../judge/judge.js';
 import type { PersistedDecision, PromotionItemRow } from '../db/promotionRepository.js';
+import type { QuarantineRedaction } from '../quarantine/reason.js';
 
 export interface RoutingConfig {
   confidenceThreshold: number;
@@ -40,7 +41,8 @@ export type RouteOutcome =
   | {
       kind: 'quarantine';
       reason: QuarantineReason;
-      redact: boolean;
+      /** R2 'whole' (no locatable span); R3/R4 'none'. */
+      redact: QuarantineRedaction;
       leak: boolean;
       persist: PersistedDecision;
     };
@@ -107,7 +109,7 @@ export function routeDecision(
         return {
           kind: 'quarantine',
           reason: 'security_second_layer',
-          redact: true,
+          redact: 'whole',
           leak: true,
           persist: {
             ...base,
@@ -120,7 +122,7 @@ export function routeDecision(
         return {
           kind: 'quarantine',
           reason: 'duplicate_content',
-          redact: false,
+          redact: 'none',
           leak: false,
           persist: {
             ...base,
@@ -133,7 +135,7 @@ export function routeDecision(
         return {
           kind: 'quarantine',
           reason: 'specificity',
-          redact: false,
+          redact: 'none',
           leak: false,
           persist: { ...base, criterion: 'specificity', reason: d.reason, relatedMemoryId: null },
         };

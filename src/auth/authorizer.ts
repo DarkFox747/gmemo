@@ -36,6 +36,8 @@ import type {
   AuthenticatedUser,
   Authorizer,
   Principal,
+  ProjectMember,
+  ProjectRole,
   TenantContext,
   ToolName,
 } from '../mcp/context.js';
@@ -48,6 +50,8 @@ const WRITE_TOOLS: ReadonlySet<ToolName> =
   new Set(['remember', 'list_staged', 'discard_staged']);
 const WRITE_ROLES: ReadonlySet<string> =
   new Set(['project_admin', 'contributor', 'service_agent']);
+const PROJECT_ROLES: ReadonlySet<string> =
+  new Set<ProjectRole>(['project_admin', 'contributor', 'viewer', 'service_agent']);
 
 export class RdsAuthorizer implements Authorizer {
   constructor(private readonly repo: AuthRepository) {}
@@ -198,6 +202,48 @@ export class RdsAuthorizer implements Authorizer {
         actorId: principal.subject,
         userId: user.userId,
         roles,
+      };
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(ErrorCode.PERMISSION_DENIED, err);
+    }
+  }
+
+  /**
+   * Gate 2 + any membership on a non-archived projectId (C3 quarantine routes).
+   * A platform role without a membership row does NOT pass (D4). The caller
+   * decides admin-vs-author from projectRole, so one query answers both checks.
+   *
+   * @throws AppError(PERMISSION_DENIED) for every failure (absent, disabled,
+   *   no membership, unknown role, archived project, repository error) — byte-identical.
+   */
+  async authorizeProjectMember(principal: Principal, projectId: string): Promise<ProjectMember> {
+    try {
+      const user = await this.repo.findEnabledUserBySubject(principal.subject);
+      if (!user) {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+
+      const membershipRole = await this.repo.findMembershipRole(projectId, user.userId);
+      if (!membershipRole || !PROJECT_ROLES.has(membershipRole)) {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+
+      if (!(await this.repo.isProjectActive(projectId))) {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+
+      const roles: string[] = [];
+      if (user.globalRole) {
+        roles.push(user.globalRole);
+      }
+      roles.push(membershipRole);
+
+      return {
+        actorId: principal.subject,
+        userId: user.userId,
+        roles,
+        projectRole: membershipRole as ProjectRole,
       };
     } catch (err) {
       if (err instanceof AppError) throw err;

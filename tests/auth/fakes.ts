@@ -45,6 +45,8 @@ import type {
   ProjectContext,
   ApiAction,
   ApiAuditDetail,
+  JobAuditInput,
+  ProjectMember,
   RequestContext,
   TenantResolutionInput,
   ToolName,
@@ -65,6 +67,7 @@ import type {
   ReviewRejectInput,
 } from '../../src/db/promotionRepository.js';
 import type { ReviewServiceLike } from '../../src/http/api/types.js';
+import type { QuarantineServiceLike } from '../../src/quarantine/quarantineService.js';
 import type { Judge, JudgeItem } from '../../src/judge/judge.js';
 import type { OidcVerifier, PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
 import { PromoteService } from '../../src/promote/promoteService.js';
@@ -301,6 +304,14 @@ const STUB_ADMIN: AdminActor = {
   roles: ['project_admin'],
 };
 
+/** Default member returned by the stub authorizeProjectMember. */
+const STUB_MEMBER: ProjectMember = {
+  actorId: 'stub-sub',
+  userId: 'stub-user-id',
+  roles: ['project_admin'],
+  projectRole: 'project_admin',
+};
+
 /** Default user returned by the stub authorizeUser. */
 const STUB_USER: AuthenticatedUser = {
   actorId: 'stub-sub',
@@ -346,6 +357,9 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     authorizeProjectAdmin(_principal: Principal, _projectId: string): Promise<AdminActor> {
       return Promise.resolve(STUB_ADMIN);
     },
+    authorizeProjectMember(_principal: Principal, _projectId: string): Promise<ProjectMember> {
+      return Promise.resolve(STUB_MEMBER);
+    },
   };
 
   const stubAuditLogger: AuditLogger = {
@@ -390,6 +404,9 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     ): Promise<void> {
       return Promise.resolve();
     },
+    recordJob(_p: JobAuditInput): Promise<void> {
+      return Promise.resolve();
+    },
   };
 
   // Default: empty in-memory fake (no seed data).  Tests that need specific
@@ -429,7 +446,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     applyAccepted: (_item: PromotionItemRow, _ctx: ApplyContext, _embedding: number[] | null): Promise<ApplyResult> =>
       Promise.resolve({ status: 'applied' as const, memoryId: '', deduped: false }),
     quarantineItem: (_item: PromotionItemRow, _ctx: ApplyContext, _q: QuarantineInput) =>
-      Promise.resolve(),
+      Promise.resolve(null),
     finalizeSession: (_sessionId: string, _status: 'promoted' | 'rejected' | 'partially_promoted') =>
       Promise.resolve(),
     approveReviewItem: (_i: ReviewApproveInput) => Promise.resolve({ status: 'not_found' as const }),
@@ -502,6 +519,13 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     reject: () => Promise.resolve({ kind: 'not_found' as const }),
   };
 
+  // Stub quarantine service: empty list; every lookup/restore is not_found.
+  const stubQuarantineService: QuarantineServiceLike = {
+    list: () => Promise.resolve({ items: [], truncated: false }),
+    get: () => Promise.resolve(null),
+    restore: () => Promise.resolve({ kind: 'not_found' as const }),
+  };
+
   return {
     authenticator: stubAuthenticator,
     tenantResolver: stubTenantResolver,
@@ -519,6 +543,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     semanticFallbackK: 8,
     notifier: stubNotifier,
     reviewService: stubReviewService,
+    quarantineService: stubQuarantineService,
     ...overrides,
   };
 }

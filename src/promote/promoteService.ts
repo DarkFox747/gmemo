@@ -29,6 +29,10 @@
  * a re-run never re-applies, re-quarantines, re-queues or re-notifies an item.
  * Notifications are sent after the state write, at most once (safeNotify).
  *
+ * Single item (C3 restore): promoteItem runs the SAME per-item pipeline (processItem)
+ * for one item of a session and finalizes that session; it does not audit — the
+ * caller audits as its own actor. The actor never enters the pipeline.
+ *
  * Logging: item ids and category names only — never content or judge text.
  */
 
@@ -49,6 +53,7 @@ import { sanitizeItem, mergeFlags } from './sanitize.js';
 import { routeDecision, STALE_TARGET_DECISION } from './routing.js';
 import type { RoutingConfig, RoutingDecision } from './routing.js';
 import { logger } from '../observability/logger.js';
+import { AppError, ErrorCode } from '../errors/appError.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -71,7 +76,30 @@ export interface PromoteOutcome {
   uncertain: number;
 }
 
-type ItemOutcome = 'applied' | 'deduped' | 'quarantined' | 'queued' | 'skipped';
+/** Outcome of one item through the pipeline, with the ids the caller needs. */
+export type ItemResult =
+  | { outcome: 'applied'; memoryId: string | null; deduped: boolean } // null only on 'already'
+  | { outcome: 'queued'; itemId: string }
+  | { outcome: 'quarantined'; itemId: string; quarantineId: string | null }
+  | { outcome: 'skipped'; itemId: string };
+
+/** Origin metadata for a single-item run (restore): tenant + provenance. */
+export interface ItemOrigin {
+  tenant: TenantContext;
+  originBranch: string;
+  originPr: number | null;
+}
+
+/** Terminal session status from the counters (a failed item is handled by the caller). */
+export function terminalStatus(c: {
+  applied: number;
+  queued: number;
+  total: number;
+}): 'promoted' | 'rejected' | 'partially_promoted' {
+  if (c.applied === c.total) return 'promoted';
+  if (c.applied === 0 && c.queued === 0) return 'rejected';
+  return 'partially_promoted';
+}
 
 // ---------------------------------------------------------------------------
 // Service
@@ -83,6 +111,11 @@ type ItemOutcome = 'applied' | 'deduped' | 'quarantined' | 'queued' | 'skipped';
  */
 export interface PromoteServiceLike {
   promote(sessionId: string, meta: PromoteMeta): Promise<PromoteOutcome>;
+  /**
+   * Runs sanitize → judge → route → apply for ONE item and finalizes its session.
+   * No audit: the caller audits as its own actor.
+   */
+  promoteItem(sessionId: string, itemId: string, origin: ItemOrigin): Promise<ItemResult>;
 }
 
 export class PromoteService implements PromoteServiceLike {
@@ -125,7 +158,7 @@ export class PromoteService implements PromoteServiceLike {
 
     // Step 2: sequential, per-item transactions (one poisoned item cannot roll back others).
     for (const item of items) {
-      let r: ItemOutcome;
+      let r: ItemResult;
       try {
         r = await this.processItem(item, ctx);
       } catch (err) {
@@ -138,25 +171,21 @@ export class PromoteService implements PromoteServiceLike {
         });
         continue;
       }
-      if (r === 'applied' || r === 'deduped') applied++;
-      if (r === 'deduped') deduped++;
-      if (r === 'quarantined') quarantined++;
-      if (r === 'queued') uncertain++;
+      if (r.outcome === 'applied') {
+        applied++;
+        if (r.deduped) deduped++;
+      }
+      if (r.outcome === 'quarantined') quarantined++;
+      if (r.outcome === 'queued') uncertain++;
     }
 
     // Step 3: terminal status. A failed item means the session is never fully
     // promoted nor fully rejected.
-    let terminalStatus: 'promoted' | 'rejected' | 'partially_promoted';
-    if (errored > 0) {
-      terminalStatus = 'partially_promoted';
-    } else if (applied === items.length) {
-      terminalStatus = 'promoted';
-    } else if (applied === 0 && uncertain === 0) {
-      terminalStatus = 'rejected';
-    } else {
-      terminalStatus = 'partially_promoted';
-    }
-    await promotionRepository.finalizeSession(sessionId, terminalStatus);
+    const status =
+      errored > 0
+        ? 'partially_promoted'
+        : terminalStatus({ applied, queued: uncertain, total: items.length });
+    await promotionRepository.finalizeSession(sessionId, status);
 
     // Step 4: audit (actorKind 'ci', action 'promote').
     const reqCtx: RequestContext = { tenant: meta.tenant, actor: meta.actor };
@@ -169,14 +198,44 @@ export class PromoteService implements PromoteServiceLike {
       mergeSha: meta.mergeSha,
     });
 
-    return { status: terminalStatus, applied, deduped, quarantined, uncertain };
+    return { status, applied, deduped, quarantined, uncertain };
   }
 
-  private async processItem(fetched: PromotionItemRow, ctx: ApplyContext): Promise<ItemOutcome> {
+  async promoteItem(sessionId: string, itemId: string, origin: ItemOrigin): Promise<ItemResult> {
+    const { promotionRepository } = this.deps;
+    // projectId re-asserts tenant ownership in the fetch JOIN.
+    const items = await promotionRepository.fetchPromotableItems(sessionId, origin.tenant.projectId);
+    const item = items.find((i) => i.id === itemId);
+    if (!item) {
+      // Only reachable through a concurrent abandon/resolution of the session.
+      logger.error('[promote] single-item run: item not promotable', { sessionId, itemId });
+      throw new AppError(ErrorCode.INTERNAL);
+    }
+
+    const ctx: ApplyContext = {
+      projectId: origin.tenant.projectId,
+      repoId: origin.tenant.repoId,
+      originBranch: origin.originBranch,
+      originPr: origin.originPr,
+      sessionId,
+    };
+    const r = await this.processItem(item, ctx);
+    await promotionRepository.finalizeSession(
+      sessionId,
+      terminalStatus({
+        applied: r.outcome === 'applied' ? 1 : 0,
+        queued: r.outcome === 'queued' ? 1 : 0,
+        total: 1,
+      }),
+    );
+    return r;
+  }
+
+  private async processItem(fetched: PromotionItemRow, ctx: ApplyContext): Promise<ItemResult> {
     const { promotionRepository: repo, notifier } = this.deps;
 
     // Already quarantined on a prior run — never quarantine twice.
-    if (fetched.judge_state === 'rejected') return 'skipped';
+    if (fetched.judge_state === 'rejected') return { outcome: 'skipped', itemId: fetched.id };
 
     // Already in the review queue: suppresses duplicate writes/notifications on re-runs.
     const wasQueued = fetched.judge_state === 'uncertain' || fetched.mandatory_review;
@@ -193,7 +252,7 @@ export class PromoteService implements PromoteServiceLike {
       }
       // S3 snapshot is PII-masked; S1/S2 are redacted by the repository.
       const snapshot = s.masked ? { ...fetched, ...s.masked } : fetched;
-      await repo.quarantineItem(snapshot, ctx, {
+      const quarantineId = await repo.quarantineItem(snapshot, ctx, {
         reason: s.block.reason,
         redact: s.block.redact,
         decision: null,
@@ -206,7 +265,7 @@ export class PromoteService implements PromoteServiceLike {
           categories: s.block.categories,
         });
       }
-      return 'quarantined';
+      return { outcome: 'quarantined', itemId: fetched.id, quarantineId };
     }
 
     let item: PromotionItemRow = fetched;
@@ -229,13 +288,13 @@ export class PromoteService implements PromoteServiceLike {
       };
       const res = await repo.persistMasked(fetched.id, s.masked, contentHash, flags);
       if (res === 'hash_conflict') {
-        await repo.quarantineItem(masked, ctx, {
+        const quarantineId = await repo.quarantineItem(masked, ctx, {
           reason: 'duplicate_content',
-          redact: false,
+          redact: 'none',
           decision: null,
           sanitizeFlags: flags,
         });
-        return 'quarantined';
+        return { outcome: 'quarantined', itemId: fetched.id, quarantineId };
       }
       item = masked;
     }
@@ -248,7 +307,7 @@ export class PromoteService implements PromoteServiceLike {
 
     switch (route.kind) {
       case 'quarantine': {
-        await repo.quarantineItem(item, ctx, {
+        const quarantineId = await repo.quarantineItem(item, ctx, {
           reason: route.reason,
           redact: route.redact,
           decision: route.persist,
@@ -261,7 +320,7 @@ export class PromoteService implements PromoteServiceLike {
             categories: ['security_second_layer'],
           });
         }
-        return 'quarantined';
+        return { outcome: 'quarantined', itemId: item.id, quarantineId };
       }
 
       case 'queue': {
@@ -274,7 +333,7 @@ export class PromoteService implements PromoteServiceLike {
             criterion: route.persist.criterion,
           });
         }
-        return 'queued';
+        return { outcome: 'queued', itemId: item.id };
       }
 
       case 'apply': {
@@ -290,9 +349,9 @@ export class PromoteService implements PromoteServiceLike {
         );
         switch (r.status) {
           case 'applied':
-            return r.deduped ? 'deduped' : 'applied';
+            return { outcome: 'applied', memoryId: r.memoryId, deduped: r.deduped };
           case 'already':
-            return 'applied';
+            return { outcome: 'applied', memoryId: null, deduped: false };
           case 'review_required':
             // SEC M-1: the target's type differs or is mandatory → human review.
             await repo.recordDecision(item.id, { ...route.persist, mandatoryReview: true }, flags);
@@ -302,7 +361,7 @@ export class PromoteService implements PromoteServiceLike {
               queue: 'mandatory',
               criterion: route.persist.criterion,
             });
-            return 'queued';
+            return { outcome: 'queued', itemId: item.id };
           case 'stale':
             // HU-11.3: stale target → human review queue, never quarantine.
             await repo.recordDecision(
@@ -316,15 +375,16 @@ export class PromoteService implements PromoteServiceLike {
               queue: 'uncertain',
               criterion: 'stale_target',
             });
-            return 'queued';
-          case 'duplicate':
-            await repo.quarantineItem(item, ctx, {
+            return { outcome: 'queued', itemId: item.id };
+          case 'duplicate': {
+            const quarantineId = await repo.quarantineItem(item, ctx, {
               reason: 'duplicate_content',
-              redact: false,
+              redact: 'none',
               decision: route.persist,
               sanitizeFlags: flags,
             });
-            return 'quarantined';
+            return { outcome: 'quarantined', itemId: item.id, quarantineId };
+          }
         }
       }
     }

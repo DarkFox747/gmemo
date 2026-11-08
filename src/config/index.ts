@@ -124,6 +124,14 @@ const envSchema = z
     // Dev-only: directory with the built web app served by Express. Forbidden in
     // production (superRefine below); production serves the web from S3 + CloudFront.
     WEB_STATIC_DIR: z.string().min(1).optional(),
+
+    // Quarantine retention (HU-10.3): every new quarantine row expires after this
+    // many days. An empty string coerces to 0 and fails min(1).
+    QUARANTINE_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(60),
+    // Bearer token for /internal/jobs/*. Optional: without it the jobs router is
+    // enabled only in development (production without a token = disabled, not an
+    // error). A short token fails at boot in every environment.
+    JOBS_TOKEN: z.string().trim().min(32).optional(),
   })
   .superRefine((cfg, ctx) => {
     // ── LOAD-BEARING PROD GUARD ───────────────────────────────────────────────

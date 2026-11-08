@@ -20,7 +20,8 @@
     "migrate": "tsx src/db/migrate.ts",
     "provision": "tsx src/db/provision.ts",
     "seed:dev": "tsx src/db/seed.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "job:quarantine-purge": "tsx scripts/jobs/quarantine-purge.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1100.0",

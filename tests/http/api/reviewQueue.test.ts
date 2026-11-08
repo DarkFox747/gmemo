@@ -279,6 +279,7 @@ describe('POST …/reject', () => {
         recordWrite: () => Promise.resolve(),
         recordPromote: () => Promise.resolve(),
         recordAbandon: () => Promise.resolve(),
+        recordJob: () => Promise.resolve(),
         recordApi: () => Promise.reject(new Error('db down')),
       },
     });
@@ -337,6 +338,8 @@ describe('audit failure after a committed decision is logged', () => {
           recordWrite: () => Promise.resolve(),
           recordPromote: () => Promise.resolve(),
           recordAbandon: () => Promise.resolve(),
+          recordJob: () => Promise.resolve(),
+        recordJob: () => Promise.resolve(),
           recordApi: () => Promise.reject(new Error('db down')),
         },
       });

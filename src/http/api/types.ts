@@ -12,10 +12,13 @@ import type {
   Authorizer,
   Principal,
   ProjectContext,
+  ProjectMember,
 } from '../../mcp/context.js';
 import type { AuthRepository } from '../../db/authRepository.js';
 import type { MemoryType } from '../../contracts/memory.js';
 import type { DecisionCriterion } from '../../judge/judge.js';
+import type { QuarantineCriterion, QuarantineReasonCode } from '../../quarantine/reason.js';
+import type { QuarantineServiceLike } from '../../quarantine/quarantineService.js';
 
 /**
  * Approve outcomes the caller can fix by reloading the item.
@@ -26,6 +29,8 @@ export type ConflictCode = 'target_changed' | 'target_inactive' | 'duplicate_con
 export interface ApiLocals {
   principal: Principal;
   actor?: AdminActor;
+  /** Set by makeProjectMember (quarantine routes, C3). */
+  member?: ProjectMember;
   project?: ProjectContext;
 }
 
@@ -69,6 +74,8 @@ export interface ApiRouterDeps {
   /** Only the /me project list is needed by the routes. */
   authRepository: Pick<AuthRepository, 'listProjectsForUser'>;
   reviewService: ReviewServiceLike;
+  /** Quarantine list/detail/restore (C3). */
+  quarantineService: QuarantineServiceLike;
 }
 
 export interface ApiRouterOptions {
@@ -151,3 +158,45 @@ export interface RejectResponseDto {
   itemId: string;
   decision: 'rejected';
 }
+
+// ---------------------------------------------------------------------------
+// Quarantine (C3, HU-10)
+// ---------------------------------------------------------------------------
+
+export interface QuarantineItemDto {
+  id: string;
+  /** null only on a legacy row the 0008 backfill could not reach (never in practice). */
+  reasonCode: QuarantineReasonCode | null;
+  criterion: QuarantineCriterion | null;
+  op: 'add' | 'amend' | 'supersede' | 'deprecate';
+  type: MemoryType;
+  title: string;
+  /** First 160 chars of the (already redacted) body. */
+  excerpt: string;
+  quarantinedAt: string;
+  daysUntilExpiry: number | null;
+}
+
+export interface QuarantineListDto {
+  items: QuarantineItemDto[];
+  truncated: boolean;
+}
+
+export interface QuarantineDetailDto extends QuarantineItemDto {
+  summary: string;
+  body: string;
+  fields: Record<string, unknown>;
+  /** Project admins only (SEC-L5); absent for authors. */
+  judgeReason?: string;
+  author: string;
+  expiresAt: string | null;
+  originBranch: string | null;
+  originPr: number | null;
+  related: MemoryRefDto | null;
+  canRestore: boolean;
+}
+
+export type RestoreResponseDto =
+  | { outcome: 'applied'; memoryId?: string }
+  | { outcome: 'queued'; itemId: string }
+  | { outcome: 'quarantined'; quarantineId?: string };

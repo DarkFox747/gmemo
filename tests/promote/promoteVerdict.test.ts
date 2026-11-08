@@ -97,7 +97,7 @@ describe('HU-06.2 duplicate of an active memory is rejected with reference', () 
     expect(repo.applyAcceptedCalls).toHaveLength(0);
     const q = repo.quarantineCalls[0]!.q;
     expect(q.reason).toBe('duplicate_content');
-    expect(q.redact).toBe(false);
+    expect(q.redact).toBe('none');
     expect(q.decision).toMatchObject({ criterion: 'duplication', relatedMemoryId: CTX_MEM.id });
     expect(repo.rows.get('d1')!.related_memory_id).toBe(CTX_MEM.id);
   });
@@ -216,7 +216,7 @@ describe('HU-06.5 second-layer security rejection blocks', () => {
     expect(outcome.quarantined).toBe(1);
     const q = repo.quarantineCalls[0]!.q;
     expect(q.reason).toBe('security_second_layer');
-    expect(q.redact).toBe(true);
+    expect(q.redact).toBe('whole');
     expect(q.sanitizeFlags.leak).toBe(true);
     expect(q.decision!.reason).toBe('security_second_layer');
     expect(JSON.stringify(repo.quarantineCalls)).not.toContain('hunter2');
@@ -294,7 +294,9 @@ describe('HU-05 credential → quarantine, leak flag and alert', () => {
 
     expect(judge.evaluateCalls).toHaveLength(0);
     const q = repo.quarantineCalls[0]!.q;
-    expect(q).toMatchObject({ reason: 'secret_detected', redact: true, decision: null });
+    expect(q).toMatchObject({ reason: 'secret_detected', redact: 'spans', decision: null });
+    // HU-05 / C3: the snapshot keeps the context with the key replaced.
+    expect(repo.quarantineCalls[0]!.item.body).toBe('Use key [REDACTADO] in src/x.ts');
     expect(q.sanitizeFlags).toEqual({ leak: true, secrets: ['aws_access_key_id'] });
     expect(notifier.ofType('leak_detected')).toEqual([
       { type: 'leak_detected', itemId: 'k1', categories: ['aws_access_key_id'] },
@@ -338,7 +340,7 @@ describe('HU-05 embedded instructions → quarantine', () => {
     expect(judge.evaluateCalls).toHaveLength(0);
     expect(repo.quarantineCalls[0]!.q).toMatchObject({
       reason: 'embedded_instructions',
-      redact: false,
+      redact: 'none',
       decision: null,
     });
     expect(repo.quarantineCalls[0]!.q.sanitizeFlags.injection!.length).toBeGreaterThan(0);
@@ -403,7 +405,7 @@ describe('HU-05 personal data is masked, not blocked', () => {
     expect(outcome.quarantined).toBe(1);
     expect(judge.evaluateCalls).toHaveLength(0);
     const call = repo.quarantineCalls[0]!;
-    expect(call.q).toMatchObject({ reason: 'duplicate_content', redact: false, decision: null });
+    expect(call.q).toMatchObject({ reason: 'duplicate_content', redact: 'none', decision: null });
     expect(call.item.body).toContain('[EMAIL]');
   });
 });

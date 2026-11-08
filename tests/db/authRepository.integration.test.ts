@@ -75,7 +75,8 @@ describeWithDb('PgAuthRepository integration (C2 reads + seed)', () => {
         DROP TYPE IF EXISTS staging_status CASCADE;
         DROP TYPE IF EXISTS judge_state CASCADE;
         DELETE FROM schema_migrations
-         WHERE version IN ('0003_staging', '0004_promotion_gaps', '0007_judge_structured_verdict');
+         WHERE version IN ('0003_staging', '0004_promotion_gaps', '0007_judge_structured_verdict',
+                           '0008_quarantine_management');
       `);
     }
 

@@ -286,6 +286,9 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
     ['review_queue.read', 'read'],
     ['review_queue.approve', 'update'],
     ['review_queue.reject', 'update'],
+    ['quarantine.list', 'read'],
+    ['quarantine.read', 'read'],
+    ['quarantine.restore', 'update'],
   ])('maps %s to access_log action "%s"', async (action, expected) => {
     await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, action);
 
@@ -339,6 +342,54 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
     expect(detail.api).toBe('review_queue.reject');
     expect(detail.userId).toBe('u-tl');
     expect(JSON.stringify(detail)).not.toMatch(/secret/);
+  });
+});
+
+describe('RdsAuditLogger — quarantine restore detail', () => {
+  it('keeps quarantineId/outcome/newQuarantineId in the allow-list', async () => {
+    const repo = new InMemoryAuthRepository();
+    const logger = new RdsAuditLogger(repo);
+    await logger.recordApi(
+      { actorId: 'tl-sub', userId: 'u-tl', roles: ['project_admin'] },
+      { projectId: PROJECT_ID },
+      'quarantine.restore',
+      { quarantineId: 'q-1', itemId: 'i-1', outcome: 'quarantined', newQuarantineId: 'q-2' },
+    );
+    expect(repo.accessLogEntries[0].action).toBe('update');
+    expect(repo.accessLogEntries[0].detail).toEqual({
+      api: 'quarantine.restore',
+      userId: 'u-tl',
+      itemId: 'i-1',
+      quarantineId: 'q-1',
+      outcome: 'quarantined',
+      newQuarantineId: 'q-2',
+    });
+  });
+});
+
+describe('RdsAuditLogger — recordJob', () => {
+  it('writes one system/admin row with a null project and counts only', async () => {
+    const repo = new InMemoryAuthRepository();
+    const logger = new RdsAuditLogger(repo);
+    await logger.recordJob({ job: 'quarantine-purge', count: 3, detail: { p1: 2, p2: 1 }, trigger: 'http' });
+    expect(repo.accessLogEntries).toEqual([
+      {
+        actorIdentity: 'jobs:http',
+        actorKind: 'system',
+        action: 'admin',
+        projectId: null,
+        detail: { job: 'quarantine-purge', count: 3, detail: { p1: 2, p2: 1 }, trigger: 'http' },
+      },
+    ]);
+  });
+
+  it('omits detail when absent (script trigger)', async () => {
+    const repo = new InMemoryAuthRepository();
+    await new RdsAuditLogger(repo).recordJob({ job: 'quarantine-purge', count: 0, trigger: 'script' });
+    expect(repo.accessLogEntries[0]).toMatchObject({
+      actorIdentity: 'jobs:script',
+      detail: { job: 'quarantine-purge', count: 0, trigger: 'script' },
+    });
   });
 });
 

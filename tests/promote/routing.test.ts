@@ -42,7 +42,7 @@ describe('routeDecision', () => {
     expect(STALE_TARGET_DECISION.criterion).toBe('stale_target');
   });
 
-  it('R2 rejected/security_second_layer → quarantine redact + leak; model reason not persisted', () => {
+  it('R2 rejected/security_second_layer → quarantine redact whole + leak; model reason not persisted', () => {
     const r = routeDecision(
       d({ verdict: 'rejected', criterion: 'security_second_layer', confidence: 0.95 }),
       ITEM,
@@ -51,7 +51,7 @@ describe('routeDecision', () => {
     expect(r).toEqual({
       kind: 'quarantine',
       reason: 'security_second_layer',
-      redact: true,
+      redact: 'whole',
       leak: true,
       persist: {
         verdict: 'rejected',
@@ -73,7 +73,7 @@ describe('routeDecision', () => {
     expect(r.kind).toBe('quarantine');
     if (r.kind !== 'quarantine') return;
     expect(r.reason).toBe('duplicate_content');
-    expect(r.redact).toBe(false);
+    expect(r.redact).toBe('none');
     expect(r.leak).toBe(false);
     expect(r.persist.relatedMemoryId).toBe('mem-1');
     expect(r.persist.criterion).toBe('duplication');
@@ -84,7 +84,7 @@ describe('routeDecision', () => {
     expect(r.kind).toBe('quarantine');
     if (r.kind !== 'quarantine') return;
     expect(r.reason).toBe('specificity');
-    expect(r.redact).toBe(false);
+    expect(r.redact).toBe('none');
     expect(r.persist.relatedMemoryId).toBeNull();
   });
 

@@ -17,6 +17,7 @@ import type {
   ApiAction,
   ApiAuditDetail,
   AuditLogger,
+  JobAuditInput,
   ProjectContext,
   RequestContext,
   ToolName,
@@ -26,6 +27,7 @@ import type {
 const API_UPDATE_ACTIONS: ReadonlySet<ApiAction> = new Set([
   'review_queue.approve',
   'review_queue.reject',
+  'quarantine.restore',
 ]);
 
 /**
@@ -44,6 +46,9 @@ const API_DETAIL_KEYS: ReadonlyArray<keyof ApiAuditDetail> = [
   'rebasedFromRevision',
   'rebasedToRevision',
   'relatedSuperseded',
+  'quarantineId',
+  'outcome',
+  'newQuarantineId',
 ];
 
 export class RdsAuditLogger implements AuditLogger {
@@ -158,7 +163,7 @@ export class RdsAuditLogger implements AuditLogger {
    * Inserts one access_log row for a successful REST read or write.
    * Called only after the action succeeded; denials and 404s are never audited.
    *
-   * action: 'update' for approve/reject, 'read' otherwise. project_id is null
+   * action: 'update' for approve/reject/restore, 'read' otherwise. project_id is null
    * for project-less routes (me.read). detail carries the ApiAction, the
    * app_user.id and allow-listed ids/counters only — never content.
    */
@@ -207,6 +212,23 @@ export class RdsAuditLogger implements AuditLogger {
         repoId: ctx.tenant.repoId,
         branch: ctx.tenant.branch,
       },
+    });
+  }
+
+  /**
+   * Inserts one access_log row for a completed platform job (C3). actor_kind
+   * 'system', action 'admin', project_id null; detail carries the job name,
+   * total count, per-project counts and trigger — never content.
+   */
+  async recordJob(p: JobAuditInput): Promise<void> {
+    const detail: Record<string, unknown> = { job: p.job, count: p.count, trigger: p.trigger };
+    if (p.detail !== undefined) detail.detail = p.detail;
+    await this.repo.insertAccessLog({
+      actorIdentity: `jobs:${p.trigger}`,
+      actorKind: 'system',
+      action: 'admin',
+      projectId: null,
+      detail,
     });
   }
 }

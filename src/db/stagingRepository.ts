@@ -19,6 +19,17 @@ import type { TenantContext } from '../mcp/context.js';
 import { AppError, ErrorCode } from '../errors/appError.js';
 import { ulid } from './ulid.js';
 
+/**
+ * Branch prefixes owned by the server (SEC-L2): `restore/<id>` sessions are opened
+ * only by a quarantine restore and `web/` is reserved for web-originated sessions.
+ * An agent's X-Git-Branch can never open a session there.
+ */
+const RESERVED_BRANCH_PREFIXES = ['restore/', 'web/'] as const;
+
+export function isReservedBranch(branch: string): boolean {
+  return RESERVED_BRANCH_PREFIXES.some((p) => branch.startsWith(p));
+}
+
 // ---------------------------------------------------------------------------
 // Supporting types (exported for use by handlers and fakes)
 // ---------------------------------------------------------------------------
@@ -218,9 +229,12 @@ export class PgStagingRepository implements StagingRepository {
    * Lazy upsert of the open session for the tenant key (Decision 3).
    * Uses INSERT … ON CONFLICT DO NOTHING + re-SELECT to avoid advisory locks.
    * TTL bumped on both paths (new and existing session).
+   * Reserved branches (restore/, web/) → INVALID_REFERENCE.
    */
   async findOrCreateOpenSession(tenant: TenantContext, openedBy: string): Promise<string> {
     const { projectId, repoId, branch } = tenant;
+    // SEC-L2 defence in depth (remember checks first): same opaque error.
+    if (isReservedBranch(branch)) throw new AppError(ErrorCode.INVALID_REFERENCE);
     const newId = ulid();
 
     // 1) Attempt create

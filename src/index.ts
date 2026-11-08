@@ -28,6 +28,7 @@ import { PgMemoryRepository } from './db/memoryRepository.js';
 import { PgStagingRepository } from './db/stagingRepository.js';
 import { PgPromotionRepository } from './db/promotionRepository.js';
 import { PgReviewQueueRepository } from './db/reviewQueueRepository.js';
+import { PgQuarantineRepository } from './db/quarantineRepository.js';
 import { CognitoAuthenticator } from './auth/authenticator.js';
 import { DevAuthenticator } from './auth/devAuthenticator.js';
 import { DevOidcAuthenticator } from './auth/devOidcAuthenticator.js';
@@ -46,6 +47,10 @@ import { BedrockEmbedder } from './embedder/bedrockEmbedder.js';
 import { logNotifier } from './notify/notifier.js';
 import { PromoteService } from './promote/promoteService.js';
 import { ReviewService } from './review/reviewService.js';
+import { QuarantineService } from './quarantine/quarantineService.js';
+import { purgeExpiredQuarantine, QUARANTINE_PURGE_JOB } from './quarantine/purge.js';
+import type { JobsRouterDeps } from './jobs/jobsRouter.js';
+import { isJobsEnabled } from './jobs/jobsRouter.js';
 import type { AppServices, Authenticator } from './mcp/context.js';
 import type { Judge } from './judge/judge.js';
 import type { OidcVerifier } from './auth/oidcAuthenticator.js';
@@ -119,7 +124,9 @@ const memoryRepository = new PgMemoryRepository(pool);
 const stagingRepository = new PgStagingRepository(pool);
 
 // --- 5d. Promotion repository (promotion-pipeline) ---
-const promotionRepository = new PgPromotionRepository(pool);
+const promotionRepository = new PgPromotionRepository(pool, {
+  quarantineRetentionDays: config.QUARANTINE_RETENTION_DAYS,
+});
 
 // --- 5e. Judge: dev stub vs Bedrock skeleton (composition root) ---
 let judge: Judge;
@@ -223,6 +230,10 @@ const reviewService = new ReviewService({
   confidenceThreshold: config.JUDGE_CONFIDENCE_THRESHOLD,
 });
 
+// --- 5l. Quarantine (C3, HU-10): list/detail/restore through the same pipeline ---
+const quarantineRepository = new PgQuarantineRepository(pool);
+const quarantineService = new QuarantineService({ quarantineRepository, promoteService });
+
 const services: AppServices = {
   authenticator, // ← selected above: DevAuthenticator or CognitoAuthenticator
   tenantResolver: new RdsTenantResolver(authRepository),
@@ -240,9 +251,25 @@ const services: AppServices = {
   semanticFallbackK: config.SEMANTIC_FALLBACK_K,
   notifier: logNotifier,
   reviewService,
+  quarantineService,
 };
 
-// --- 5l. DEV ONLY static web: loadConfig() already rejects WEB_STATIC_DIR in
+// --- 5m. Internal jobs (/internal/jobs): enabled anywhere a JOBS_TOKEN is
+// configured, or without one only under an EXPLICIT NODE_ENV=development (the raw
+// env, not config's 'development' default: unset NODE_ENV never opens it). The
+// router re-checks open mode itself (third layer). C4 adds its job here. ---
+const jobsEnabled = isJobsEnabled(process.env.NODE_ENV, config.JOBS_TOKEN);
+const jobs: JobsRouterDeps = {
+  jobs: { [QUARANTINE_PURGE_JOB]: () => purgeExpiredQuarantine(quarantineRepository) },
+  token: config.JOBS_TOKEN,
+  enabled: jobsEnabled,
+  audit: auditLogger,
+};
+if (jobsEnabled && config.JOBS_TOKEN === undefined) {
+  logger.warn('[boot] /internal/jobs enabled WITHOUT a token (development only).');
+}
+
+// --- 5n. DEV ONLY static web: loadConfig() already rejects WEB_STATIC_DIR in
 // production; this second check keeps it structurally unreachable there. ---
 const webStaticDir =
   config.WEB_STATIC_DIR && config.NODE_ENV !== 'production' ? config.WEB_STATIC_DIR : undefined;
@@ -265,6 +292,7 @@ const app = createApp(services, {
   },
   devUserHeader,
   webStaticDir,
+  jobs,
 });
 
 const server = app.listen(config.PORT, config.HOST, () => {

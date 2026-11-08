@@ -35,7 +35,7 @@ describe('sanitizeItem — S1 bounds / detector errors (fail closed)', () => {
     const r = sanitizeItem(content(over));
     expect(r.block).toEqual({
       reason: 'sanitize_failed',
-      redact: true,
+      redact: 'whole',
       leak: false,
       categories: [],
     });
@@ -44,7 +44,7 @@ describe('sanitizeItem — S1 bounds / detector errors (fail closed)', () => {
   it('fields nested deeper than the masker allows (detector throws) → sanitize_failed', () => {
     const r = sanitizeItem(content({ fields: { a: { b: { c: { d: { e: 'x' } } } } } }));
     expect(r.block?.reason).toBe('sanitize_failed');
-    expect(r.block?.redact).toBe(true);
+    expect(r.block?.redact).toBe('whole');
   });
 
   it('text is never truncated before scanning: exactly at budget still scanned', () => {
@@ -55,21 +55,90 @@ describe('sanitizeItem — S1 bounds / detector errors (fail closed)', () => {
 });
 
 describe('sanitizeItem — S2 secrets', () => {
-  it('AWS key in body → secret_detected, redact, leak, categories only', () => {
+  it('AWS key in body → secret_detected, spans, leak, categories only; context kept', () => {
     const r = sanitizeItem(content({ body: 'Key: AKIAIOSFODNN7EXAMPLE in src/x.ts' }));
     expect(r.block).toEqual({
       reason: 'secret_detected',
-      redact: true,
+      redact: 'spans',
       leak: true,
       categories: ['aws_access_key_id'],
     });
     expect(r.flags).toEqual({ leak: true, secrets: ['aws_access_key_id'] });
+    expect(r.masked).toEqual({
+      title: 'Pool size gotcha',
+      summary: 'pg pool exhausts under load.',
+      body: 'Key: [REDACTADO] in src/x.ts',
+      fields: {},
+    });
     expect(JSON.stringify(r)).not.toContain('AKIAIOSFODNN7EXAMPLE');
   });
 
-  it('secret only in fields is detected', () => {
+  it('S2 masks PII after the spans and flags pii', () => {
+    const r = sanitizeItem(content({ body: 'Key AKIAIOSFODNN7EXAMPLE, ask jane.doe@example.com' }));
+    expect(r.block?.redact).toBe('spans');
+    expect(r.masked!.body).toBe('Key [REDACTADO], ask [EMAIL]');
+    expect(r.flags).toEqual({ leak: true, secrets: ['aws_access_key_id'], pii: ['email'] });
+  });
+
+  it('a phone-like digit run inside a key never leaves a fragment', () => {
+    const secret = 'password=+54-11-5555-5555xq';
+    const r = sanitizeItem(content({ body: `Note: ${secret} end` }));
+    expect(r.block?.reason).toBe('secret_detected');
+    const body = r.masked!.body;
+    expect(body).not.toContain('5555xq');
+    expect(body).toBe('Note: password=[REDACTADO] end');
+  });
+
+  it('an undetectable span (assignment across a newline) → whole redaction', () => {
+    const r = sanitizeItem(content({ body: 'password:\n abcdefghijklmnop' }));
+    expect(r.block?.redact).toBe('spans');
+    expect(r.masked).toEqual({
+      title: '[REDACTADO]',
+      summary: '[REDACTADO]',
+      body: '[REDACTADO]',
+      fields: {},
+    });
+  });
+
+  it('secret only in fields is detected and redacted per leaf', () => {
     const r = sanitizeItem(content({ fields: { apiKey: 'AKIAIOSFODNN7EXAMPLE' } }));
     expect(r.block?.reason).toBe('secret_detected');
+    expect(r.masked!.fields).toEqual({ apiKey: '[REDACTADO]' });
+    expect(r.masked!.body).toBe(content().body);
+  });
+
+  // SEC-M1: a PEM key body carries no detectable pattern of its own, so a header
+  // in one field and the body in another would leave the body stored → whole item.
+  it.each([
+    [
+      'header in title, body in body',
+      {
+        title: '-----BEGIN RSA PRIVATE KEY----- rotation',
+        body: 'MIIEpCrossFieldPemBodyQ7\n-----END RSA PRIVATE KEY-----',
+      },
+    ],
+    [
+      'full block in summary',
+      { summary: '-----BEGIN PRIVATE KEY-----\nMIIEpInSummaryQ7\n-----END PRIVATE KEY-----' },
+    ],
+    ['header in a fields leaf', { fields: { note: '-----BEGIN EC PRIVATE KEY-----' } }],
+    ['header as a fields key', { fields: { '-----BEGIN PRIVATE KEY-----': 'MIIEpKeyQ7' } }],
+  ])('pem_private_key (%s) → whole-item redaction', (_l, over) => {
+    const r = sanitizeItem(content({ ...over, body: over.body ?? 'Ask jane.doe@example.com.' }));
+    expect(r.block).toEqual({
+      reason: 'secret_detected',
+      redact: 'whole',
+      leak: true,
+      categories: expect.arrayContaining(['pem_private_key']),
+    });
+    expect(r.masked).toEqual({
+      title: '[REDACTADO]',
+      summary: '[REDACTADO]',
+      body: '[REDACTADO]',
+      fields: {},
+    });
+    expect(r.flags.leak).toBe(true);
+    expect(JSON.stringify(r)).not.toContain('MIIEp');
   });
 
   it('secret + injection → secret wins (decision order)', () => {
@@ -88,7 +157,7 @@ describe('sanitizeItem — S3 embedded instructions', () => {
   ])('"%s" → embedded_instructions, no redact, no leak', (body) => {
     const r = sanitizeItem(content({ body }));
     expect(r.block?.reason).toBe('embedded_instructions');
-    expect(r.block?.redact).toBe(false);
+    expect(r.block?.redact).toBe('none');
     expect(r.block?.leak).toBe(false);
     expect(r.flags.injection?.length).toBeGreaterThan(0);
   });
@@ -185,7 +254,7 @@ describe('sanitizeItem — masked fields over budget fail closed (SEC L-2)', () 
     const r = sanitizeItem(content({ fields: { k: value } }));
     expect(r.block).toEqual({
       reason: 'sanitize_failed',
-      redact: true,
+      redact: 'whole',
       leak: false,
       categories: [],
     });

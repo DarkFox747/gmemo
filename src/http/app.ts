@@ -7,13 +7,14 @@
  *  - GET  /mcp     → 405 (no server-initiated SSE in stateless mode)
  *  - DELETE /mcp   → 405
  *  - POST /promote → promotion endpoint (OIDC-gated; machine_credential path)
+ *  - /internal/jobs → platform jobs (C3; only when options.jobs is passed; opaque 404s)
  *  - /api          → REST router (own rate limiter → Gate 1 → routes) + the
  *                    /api error mapper (JSON 401/404/400/500)
  *  - static web    → DEV ONLY, when options.webStaticDir is set (SPA fallback
  *                    never matches /api, /mcp, /promote, /health)
  *  - 4-arg error handler (registered last) → opaque 500 with server-side logging
  *
- * Registration order: helmet → json → /health → /mcp → /promote → /api router
+ * Registration order: helmet → json → /health → /mcp → /promote → /internal/jobs → /api router
  * → /api error mapper → static web → terminal handler.
  *
  * Security middleware applied globally (early):
@@ -44,6 +45,8 @@ import { makeRateLimiter } from './rateLimit.js';
 import { makeApiRouter, noStore } from './api/router.js';
 import { apiErrorHandler } from './api/errorHandler.js';
 import { mountWebStatic } from './static.js';
+import { makeJobsRouter } from '../jobs/jobsRouter.js';
+import type { JobsRouterDeps } from '../jobs/jobsRouter.js';
 
 export interface RateLimitOptions {
   enabled: boolean;
@@ -61,6 +64,8 @@ export interface CreateAppOptions {
   devUserHeader?: boolean;
   /** DEV ONLY: serve the web build from this directory (index.ts never passes it in production). */
   webStaticDir?: string;
+  /** Internal jobs router (/internal/jobs). Absent → the path is not mounted. */
+  jobs?: JobsRouterDeps;
 }
 
 const RATE_LIMIT_DEFAULTS: RateLimitOptions = {
@@ -111,6 +116,11 @@ export function createApp(services: AppServices, options?: CreateAppOptions): ex
     app.post('/promote', promoteLimiter, makePromoteHandler(services));
   } else {
     app.post('/promote', makePromoteHandler(services));
+  }
+
+  // --- Internal jobs: own catch-all, so nothing under it reaches static/SPA handling ---
+  if (options?.jobs) {
+    app.use('/internal/jobs', makeJobsRouter(options.jobs));
   }
 
   // --- REST API (/api): limiter first so unauthenticated floods are limited too ---
