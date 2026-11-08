@@ -208,7 +208,7 @@ describeWithDb('PgPromotionRepository integration', () => {
 
     // Instantiate repository under test.
     const { PgPromotionRepository } = await import('../../src/db/promotionRepository.js');
-    repo = new PgPromotionRepository(pool, { quarantineRetentionDays: 60 });
+    repo = new PgPromotionRepository(pool, { quarantineRetentionDays: 60, revalidationDays: 60 });
 
     // -- Seed: project --
     await pool.query(
@@ -1602,5 +1602,126 @@ describeWithDb('PgPromotionRepository integration', () => {
     // Repeat: no-op.
     expect(await repo!.abandonOpenSession(SESS_AB, projectId)).toEqual({ abandoned: false, discarded: 0 });
     await pool!.query(`DELETE FROM project WHERE slug = 'promo-integ-abandon-other'`);
+  });
+
+  // -------------------------------------------------------------------------
+  // C4: apply sets revalidate_at (HU-12.1, HU-12.4)
+  // -------------------------------------------------------------------------
+
+  async function revalidateAt(memoryId: string): Promise<Date | null> {
+    const { rows } = await pool!.query(`SELECT revalidate_at FROM memory WHERE id = $1`, [memoryId]);
+    return rows[0].revalidate_at as Date | null;
+  }
+
+  /** Days from now to d (fractional). */
+  const daysFromNow = (d: Date): number => (d.getTime() - Date.now()) / 86_400_000;
+
+  async function insertTypedAdd(type: string, contentHash: string): Promise<string> {
+    const { rows } = await pool!.query(
+      `INSERT INTO staging_item
+         (session_id, op, type, title, summary, body, content_hash, author_identity)
+       VALUES ($1, 'add', $2, 'Typed add title', 'Typed add summary.', 'Typed add body.', $3,
+               'integ-test-user')
+       RETURNING id`,
+      [SESS_MAIN, type, contentHash],
+    );
+    return rows[0].id as string;
+  }
+
+  async function applyItem(sessionId: string, itemId: string, r = repo) {
+    return r!.applyAccepted(await fetchItem(sessionId, itemId), { ...mainCtx(), sessionId }, null, new Set());
+  }
+
+  it('C4: add sets revalidate_at to now + REVALIDATION_DAYS', async () => {
+    const r = await applyItem(SESS_MAIN, await insertTypedAdd('gotcha', 'promo-integ-c4-add'));
+    if (r.status !== 'applied') throw new Error(r.status);
+    const d = await revalidateAt(r.memoryId);
+    expect(d).not.toBeNull();
+    expect(daysFromNow(d!)).toBeGreaterThan(59.9);
+    expect(daysFromNow(d!)).toBeLessThan(60.1);
+  });
+
+  it('C4: an outcome add has no deadline (NULL)', async () => {
+    const r = await applyItem(SESS_MAIN, await insertTypedAdd('outcome', 'promo-integ-c4-add-outcome'));
+    if (r.status !== 'applied') throw new Error(r.status);
+    expect(await revalidateAt(r.memoryId)).toBeNull();
+  });
+
+  it('C4: the deadline follows the configured REVALIDATION_DAYS', async () => {
+    const { PgPromotionRepository } = await import('../../src/db/promotionRepository.js');
+    const repo7 = new PgPromotionRepository(pool!, { quarantineRetentionDays: 60, revalidationDays: 7 });
+    const r = await applyItem(SESS_MAIN, await insertTypedAdd('pattern', 'promo-integ-c4-add-7d'), repo7);
+    if (r.status !== 'applied') throw new Error(r.status);
+    const d = await revalidateAt(r.memoryId);
+    expect(daysFromNow(d!)).toBeGreaterThan(6.9);
+    expect(daysFromNow(d!)).toBeLessThan(7.1);
+  });
+
+  it('C4: amend resets a deadline that was 10 days away to now + 60 days', async () => {
+    const targetId = await insertTypedMemory('pattern', 'promo-integ-c4-amend-target');
+    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '10 days' WHERE id = $1`, [targetId]);
+    const r = await applyItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c4-amend-item', targetId));
+    expect(r.status).toBe('applied');
+    expect(daysFromNow((await revalidateAt(targetId))!)).toBeGreaterThan(59.9);
+  });
+
+  it('C4: amend of an outcome clears the deadline (NULL)', async () => {
+    const targetId = await insertTypedMemory('outcome', 'promo-integ-c4-amend-outcome-target');
+    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '10 days' WHERE id = $1`, [targetId]);
+    const r = await applyItem(
+      SESS_MAIN, await insertTypedAmend('outcome', 'promo-integ-c4-amend-outcome-item', targetId),
+    );
+    expect(r.status).toBe('applied');
+    expect(await revalidateAt(targetId)).toBeNull();
+  });
+
+  it('C4: supersede sets the deadline on the new row', async () => {
+    const targetId = await insertMemory({ contentHash: 'promo-integ-c4-sup-target' });
+    const itemId = await insertTargetItem({
+      sessionId: SESS_MAIN, op: 'supersede', contentHash: 'promo-integ-c4-sup-item',
+      targetMemoryId: targetId, targetRevision: 1, title: 'C4 superseding title',
+    });
+    const r = await applyItem(SESS_MAIN, itemId);
+    expect(r.status).toBe('applied');
+    if (r.status !== 'applied') return;
+    expect(r.memoryId).not.toBe(targetId);
+    expect(daysFromNow((await revalidateAt(r.memoryId))!)).toBeGreaterThan(59.9);
+  });
+
+  it('C4: a dedup add leaves the existing row deadline unchanged', async () => {
+    const SESS_C4 = 'promo-integ-c4-dedup-sess';
+    await pool!.query(
+      `INSERT INTO staging_session (id, project_id, repo_id, branch, opened_by)
+       VALUES ($1, $2, $3, 'c4-dedup-branch', 'integ-test-user') ON CONFLICT DO NOTHING`,
+      [SESS_C4, projectId, repoId],
+    );
+    const r1 = await applyItem(SESS_MAIN, await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c4-dedup' }));
+    expect(r1.status).toBe('applied');
+    if (r1.status !== 'applied') return;
+    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '3 days' WHERE id = $1`, [r1.memoryId]);
+    const before = await revalidateAt(r1.memoryId);
+
+    const r2 = await applyItem(SESS_C4, await insertAddItem({ sessionId: SESS_C4, contentHash: 'promo-integ-c4-dedup' }));
+    expect(r2).toMatchObject({ status: 'applied', memoryId: r1.memoryId, deduped: true });
+    expect(await revalidateAt(r1.memoryId)).toEqual(before);
+  });
+
+  it('C4: deprecate leaves the deadline untouched', async () => {
+    const targetId = await insertMemory({ contentHash: 'promo-integ-c4-dep-target' });
+    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '5 days' WHERE id = $1`, [targetId]);
+    const before = await revalidateAt(targetId);
+    const itemId = await insertTargetItem({
+      sessionId: SESS_MAIN, op: 'deprecate', contentHash: 'promo-integ-c4-dep-item',
+      targetMemoryId: targetId, targetRevision: 1,
+    });
+    expect((await applyItem(SESS_MAIN, itemId)).status).toBe('applied');
+    expect(await revalidateAt(targetId)).toEqual(before);
+  });
+
+  it('C4: a pending_revalidation target makes an amend stale', async () => {
+    const targetId = await insertTypedMemory('pattern', 'promo-integ-c4-pending-target');
+    await pool!.query(`UPDATE memory SET status = 'pending_revalidation' WHERE id = $1`, [targetId]);
+    const r = await applyItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c4-pending-item', targetId));
+    expect(r).toEqual({ status: 'stale' });
   });
 });

@@ -111,3 +111,69 @@ describe('review-queue opacity matrix (HU-07.5)', () => {
     expect(res.status).toBe(200);
   });
 });
+
+// ---------------------------------------------------------------------------
+// C4 memory lifecycle routes: same opacity matrix, plus a malformed memory id.
+// ---------------------------------------------------------------------------
+
+const MEMORY_ID = '22222222-3333-4444-8555-666666666666';
+
+const MEMORY_ROUTES: Route[] = [
+  { name: 'memories list', call: (app, p) => request(app).get(`/api/v1/projects/${p}/memories`) },
+  {
+    name: 'memory confirm',
+    call: (app, p) => request(app).post(`/api/v1/projects/${p}/memories/${MEMORY_ID}/confirm`).send({}),
+  },
+  {
+    name: 'memory retire',
+    call: (app, p) =>
+      request(app)
+        .post(`/api/v1/projects/${p}/memories/${MEMORY_ID}/retire`)
+        .send({ reason: 'obsolete now' }),
+  },
+  {
+    name: 'retire-by-pr',
+    call: (app, p) =>
+      request(app)
+        .post(`/api/v1/projects/${p}/memories/retire-by-pr`)
+        .send({ originPr: 42, reason: 'reverted PR' }),
+  },
+];
+
+describe('memory lifecycle opacity matrix (C4)', () => {
+  for (const route of MEMORY_ROUTES) {
+    for (const d of DENIED) {
+      it(`${route.name}: ${d.who} → identical 404, no audit, no service call`, async () => {
+        const kit = makeApiTestApp();
+        const res = await route.call(kit.app, d.project).set('Authorization', bearer(d.user));
+        expect(res.status).toBe(404);
+        expect(res.text).toBe(NOT_FOUND_BODY);
+        expect(kit.authRepo.accessLogEntries).toHaveLength(0);
+        expect(kit.lifecycleRepo.calls).toHaveLength(0);
+      });
+    }
+  }
+
+  for (const action of ['confirm', 'retire']) {
+    it(`${action}: a malformed memory id → identical 404 for the admin, no service call`, async () => {
+      const kit = makeApiTestApp();
+      const res = await request(kit.app)
+        .post(`/api/v1/projects/${PROJECT_A}/memories/not-a-uuid/${action}`)
+        .set('Authorization', bearer(USERS.adminA))
+        .send({ reason: 'obsolete now' });
+      expect(res.status).toBe(404);
+      expect(res.text).toBe(NOT_FOUND_BODY);
+      expect(kit.lifecycleRepo.calls).toHaveLength(0);
+    });
+  }
+
+  it('non-admin with an invalid retire body gets 404, not 400', async () => {
+    const kit = makeApiTestApp();
+    const res = await request(kit.app)
+      .post(`/api/v1/projects/${PROJECT_A}/memories/${MEMORY_ID}/retire`)
+      .set('Authorization', bearer(USERS.viewerA))
+      .send({ reason: 'x' });
+    expect(res.status).toBe(404);
+    expect(res.text).toBe(NOT_FOUND_BODY);
+  });
+});

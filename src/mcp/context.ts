@@ -27,6 +27,7 @@ import type { Notifier } from '../notify/notifier.js';
 import type { ReviewServiceLike } from '../http/api/types.js';
 import type { QuarantineReasonCode } from '../quarantine/reason.js';
 import type { QuarantineServiceLike } from '../quarantine/quarantineService.js';
+import type { LifecycleServiceLike } from '../lifecycle/types.js';
 
 // ---------------------------------------------------------------------------
 // Core identity / context types
@@ -108,7 +109,8 @@ export type ApiAction =
   | 'me.read'
   | 'review_queue.list' | 'review_queue.read'
   | 'review_queue.approve' | 'review_queue.reject'
-  | 'quarantine.list' | 'quarantine.read' | 'quarantine.restore';
+  | 'quarantine.list' | 'quarantine.read' | 'quarantine.restore'
+  | 'memories.list' | 'memory.confirm' | 'memory.retire' | 'memory.retire_by_pr';
 
 /** Audit detail for REST actions - ids and counters only, never titles, bodies or reasons. */
 export interface ApiAuditDetail {
@@ -126,6 +128,10 @@ export interface ApiAuditDetail {
   quarantineId?: string;
   outcome?: 'applied' | 'queued' | 'quarantined';
   newQuarantineId?: string;
+  /** Memory list status filter (C4). */
+  status?: string;
+  /** Retire-by-PR target PR number (C4). */
+  originPr?: number;
 }
 
 /** A completed platform job run (C3 jobs router / scripts). Counts only. */
@@ -329,6 +335,8 @@ export interface AppServices extends AuthServices {
   reviewService: ReviewServiceLike;
   /** Quarantine list/detail/restore (C3, HU-10) — consumed by the /api quarantine routes. */
   quarantineService: QuarantineServiceLike;
+  /** Memory lifecycle: list/confirm/retire/retire-by-pr + revalidation sweep (C4). */
+  lifecycleService: LifecycleServiceLike;
 }
 
 /**

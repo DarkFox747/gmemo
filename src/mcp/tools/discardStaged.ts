@@ -13,12 +13,17 @@
 import type { DiscardStagedRequest, DiscardStagedResponse } from '../../contracts/tools.js';
 import type { RequestContext, HandlerDeps } from '../context.js';
 import { AppError, ErrorCode } from '../../errors/appError.js';
+import { isReservedBranch } from '../../db/stagingRepository.js';
 
 export async function discardStagedHandler(
   input: DiscardStagedRequest,
   ctx: RequestContext,
   deps: HandlerDeps,
 ): Promise<DiscardStagedResponse> {
+  // R2-SEC1: an agent can never delete from a server-owned (restore/, web/) session.
+  if (isReservedBranch(ctx.tenant.branch)) {
+    throw new AppError(ErrorCode.INVALID_REFERENCE);
+  }
   const ok = await deps.stagingRepository.discardStagingItem(ctx.tenant, input.item_id);
   if (!ok) {
     throw new AppError(ErrorCode.INVALID_REFERENCE);

@@ -68,6 +68,7 @@ import type {
 } from '../../src/db/promotionRepository.js';
 import type { ReviewServiceLike } from '../../src/http/api/types.js';
 import type { QuarantineServiceLike } from '../../src/quarantine/quarantineService.js';
+import type { LifecycleServiceLike } from '../../src/lifecycle/types.js';
 import type { Judge, JudgeItem } from '../../src/judge/judge.js';
 import type { OidcVerifier, PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
 import { PromoteService } from '../../src/promote/promoteService.js';
@@ -526,6 +527,15 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     restore: () => Promise.resolve({ kind: 'not_found' as const }),
   };
 
+  // Stub lifecycle service: empty list; every memory lookup is not_found; sweep is a no-op.
+  const stubLifecycleService: LifecycleServiceLike = {
+    list: () => Promise.resolve({ items: [], truncated: false }),
+    confirm: () => Promise.resolve({ kind: 'not_found' as const }),
+    retire: () => Promise.resolve({ kind: 'not_found' as const }),
+    retireByPr: () => Promise.resolve({ kind: 'retired' as const, dto: { retired: 0 } }),
+    sweep: () => Promise.resolve({ job: 'revalidation-sweep', count: 0, detail: {} }),
+  };
+
   return {
     authenticator: stubAuthenticator,
     tenantResolver: stubTenantResolver,
@@ -544,6 +554,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     notifier: stubNotifier,
     reviewService: stubReviewService,
     quarantineService: stubQuarantineService,
+    lifecycleService: stubLifecycleService,
     ...overrides,
   };
 }

@@ -155,7 +155,7 @@ for release signing in scripts/release.ts.`,
     const { logNotifier } = await import('../../src/notify/notifier.js');
     const { StubEmbedder } = await import('../../src/embedder/stubEmbedder.js');
 
-    const promotionRepository = new PgPromotionRepository(pool, { quarantineRetentionDays: 60 });
+    const promotionRepository = new PgPromotionRepository(pool, { quarantineRetentionDays: 60, revalidationDays: 60 });
     const promoteService = new PromoteService({
       promotionRepository,
       judge: new DeterministicJudge({ acceptedConfidence: 0.9 }),

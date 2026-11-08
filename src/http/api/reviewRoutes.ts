@@ -45,7 +45,7 @@ const ItemId = z.string().uuid();
 const JSON_CONTENT_TYPE = /^application\/json\s*(?:;|$)/i;
 
 /** State-changing POSTs must be JSON (blocks form-encoded cross-site posts). Runs after authz. */
-function requireJsonContentType(req: Request, _res: ApiResponse, next: express.NextFunction): void {
+export function requireJsonContentType(req: Request, _res: ApiResponse, next: express.NextFunction): void {
   if (req.method === 'POST' && !JSON_CONTENT_TYPE.test(req.get('content-type') ?? '')) {
     throw new AppError(ErrorCode.INVALID_REQUEST);
   }
@@ -55,7 +55,7 @@ function requireJsonContentType(req: Request, _res: ApiResponse, next: express.N
 type ItemParams = { projectId: string; itemId: string };
 
 /** projectAdmin always sets these; their absence is a wiring bug, not a client error. */
-function adminContext(res: ApiResponse): { actor: AdminActor; project: ProjectContext } {
+export function adminContext(res: ApiResponse): { actor: AdminActor; project: ProjectContext } {
   const { actor, project } = res.locals;
   if (!actor || !project) throw new AppError(ErrorCode.INTERNAL);
   return { actor, project };
@@ -68,7 +68,7 @@ function parseItemId(raw: string): string {
   return parsed.data;
 }
 
-function parseOrInvalid<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input: unknown): T {
+export function parseOrInvalid<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input: unknown): T {
   const parsed = schema.safeParse(input);
   if (!parsed.success) throw new AppError(ErrorCode.INVALID_REQUEST);
   return parsed.data;

@@ -148,7 +148,7 @@ describeWithDb('PgPromotionRepository human review integration', () => {
     const { runMigrations } = await import('../../src/db/migrate.js');
     await runMigrations(DATABASE_URL!);
     const { PgPromotionRepository: Repo } = await import('../../src/db/promotionRepository.js');
-    repo = new Repo(pool, { quarantineRetentionDays: 60 });
+    repo = new Repo(pool, { quarantineRetentionDays: 60, revalidationDays: 60 });
 
     const proj = async (slug: string) => {
       const { rows } = await pool.query(
@@ -223,6 +223,12 @@ describeWithDb('PgPromotionRepository human review integration', () => {
       [r.memoryId],
     );
     expect(rev).toEqual([{ revision_no: 1, op: 'add', promoted_from_item: itemId }]);
+    // C4: approve goes through the shared apply core, so it sets the deadline too.
+    const { rows: due } = await pool.query(
+      `SELECT revalidate_at > now() + interval '59 days' AS ok FROM memory WHERE id = $1`,
+      [r.memoryId],
+    );
+    expect(due[0].ok).toBe(true);
 
     const st = await itemRow(itemId);
     expect(st.promoted_at).not.toBeNull();

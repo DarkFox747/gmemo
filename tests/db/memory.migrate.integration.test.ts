@@ -57,6 +57,13 @@ describeWithDb('migration integration — 0002_memory.sql', () => {
 
     // Remove the ledger entry so a second run can re-apply the migration.
     await pool.query(`DELETE FROM schema_migrations WHERE version = '0002_memory'`);
+    // Later migrations that add columns/enum values to the objects just dropped
+    // (0005 embedding, 0009 enum values, 0010 lifecycle columns); clear them too
+    // so later suites re-apply them on top of a fresh 0002. All are idempotent.
+    await pool.query(
+      `DELETE FROM schema_migrations
+        WHERE version IN ('0005_embeddings', '0009_memory_enum_values', '0010_memory_lifecycle')`,
+    );
 
     // Tear down the test project row inserted for the FTS smoke check.
     await pool.query(

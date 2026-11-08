@@ -143,7 +143,7 @@ describeWithDb('restore end to end (HU-10.2)', () => {
 
     const authRepo = new PgAuthRepository(pool);
     const auditLogger = new RdsAuditLogger(authRepo);
-    const promotionRepository = new PgPromotionRepository(pool, { quarantineRetentionDays: 60 });
+    const promotionRepository = new PgPromotionRepository(pool, { quarantineRetentionDays: 60, revalidationDays: 60 });
     const real = new DeterministicJudge({ acceptedConfidence: 0.9 });
     const judge = {
       evaluate: (item: JudgeItem, ctx: readonly JudgeContextItem[]) => {

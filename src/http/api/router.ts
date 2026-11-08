@@ -5,6 +5,7 @@
  *                                    → /v1/projects/:projectId/quarantine → projectMember (Gate 2, any role)
  *                                                                         → quarantine routes (C3)
  *                                    → /v1/projects/:projectId → projectAdmin (Gate 2) → review routes
+ *                                                                                      → memory lifecycle routes (C4)
  *                                    → catch-all JSON 404
  *
  * The catch-all means an unknown /api/* path is a JSON 404 (401 when
@@ -21,6 +22,7 @@ import { makeMeRouter } from './meRoutes.js';
 import { makeReviewRouter } from './reviewRoutes.js';
 import { makeProjectMember } from './projectMember.js';
 import { makeQuarantineRouter } from './quarantineRoutes.js';
+import { makeMemoryRoutes } from './memoryRoutes.js';
 import type { ApiRouterDeps, ApiRouterOptions } from './types.js';
 
 export function noStore(_req: Request, res: Response, next: NextFunction): void {
@@ -40,7 +42,12 @@ export function makeApiRouter(deps: ApiRouterDeps, o: ApiRouterOptions): express
     makeProjectMember(deps.authorizer),
     makeQuarantineRouter(deps),
   );
-  router.use('/v1/projects/:projectId', makeProjectAdmin(deps.authorizer), makeReviewRouter(deps));
+  router.use(
+    '/v1/projects/:projectId',
+    makeProjectAdmin(deps.authorizer),
+    makeReviewRouter(deps),
+    makeMemoryRoutes(deps),
+  );
   router.use(() => {
     throw new AppError(ErrorCode.NOT_FOUND);
   });

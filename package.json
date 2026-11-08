@@ -21,7 +21,8 @@
     "provision": "tsx src/db/provision.ts",
     "seed:dev": "tsx src/db/seed.ts",
     "smoke": "tsx scripts/smoke.ts",
-    "job:quarantine-purge": "tsx scripts/jobs/quarantine-purge.ts"
+    "job:quarantine-purge": "tsx scripts/jobs/quarantine-purge.ts",
+    "job:revalidation": "tsx scripts/jobs/revalidation.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1100.0",

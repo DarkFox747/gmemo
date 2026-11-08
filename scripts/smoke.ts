@@ -250,6 +250,27 @@ async function main(): Promise<void> {
     if (body.job !== 'quarantine-purge') fail(`job is ${String(body.job)}, expected quarantine-purge`);
     if (typeof body.count !== 'number') fail('purge response has no numeric count');
   });
+
+  await step('api memories pending_revalidation as tech lead', async () => {
+    const res = await request(
+      `/api/v1/projects/${DEMO_PROJECT_ID}/memories?status=pending_revalidation`,
+      { method: 'GET', headers: { 'X-Dev-User': DEMO_TL } },
+    );
+    if (res.status !== 200) fail(`HTTP ${res.status} from memories`);
+    const body = (await res.json()) as { items?: unknown; truncated?: unknown };
+    if (!Array.isArray(body.items)) fail('memories response has no items array');
+    if (typeof body.truncated !== 'boolean') fail('memories response has no truncated flag');
+  });
+
+  await step('job revalidation-sweep (dev open mode)', async () => {
+    const res = await request('/internal/jobs/revalidation-sweep', { method: 'POST' });
+    if (res.status !== 200) fail(`HTTP ${res.status} from /internal/jobs/revalidation-sweep`);
+    const body = (await res.json()) as { job?: unknown; count?: unknown };
+    if (body.job !== 'revalidation-sweep') {
+      fail(`job is ${String(body.job)}, expected revalidation-sweep`);
+    }
+    if (typeof body.count !== 'number') fail('sweep response has no numeric count');
+  });
 }
 
 main().catch((err: unknown) => {

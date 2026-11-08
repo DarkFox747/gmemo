@@ -13,6 +13,13 @@ const unitInterval = (def: string) =>
     .default(def)
     .transform(Number);
 
+/**
+ * REVALIDATION_DAYS (C4, HU-12.1): every applied non-outcome memory gets
+ * revalidate_at = now() + this many days. An empty string coerces to 0 and fails
+ * min(1). Exported so the job script can validate it without the full config.
+ */
+export const revalidationDaysSchema = z.coerce.number().int().min(1).max(3650).default(60);
+
 const envSchema = z
   .object({
     // Server
@@ -132,6 +139,9 @@ const envSchema = z
     // enabled only in development (production without a token = disabled, not an
     // error). A short token fails at boot in every environment.
     JOBS_TOKEN: z.string().trim().min(32).optional(),
+
+    // Memory lifecycle (C4): days until an applied memory needs revalidation.
+    REVALIDATION_DAYS: revalidationDaysSchema,
   })
   .superRefine((cfg, ctx) => {
     // ── LOAD-BEARING PROD GUARD ───────────────────────────────────────────────

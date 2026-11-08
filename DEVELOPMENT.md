@@ -118,6 +118,7 @@ Las variables de la app dentro de compose están definidas en `docker-compose.ym
 | `pnpm seed:dev` | carga el seed de desarrollo (solo dev) |
 | `pnpm smoke` | prueba de humo contra un stack corriendo |
 | `pnpm job:quarantine-purge` | borra las entradas de cuarentena vencidas (`expires_at < now()`) e imprime el conteo; lee solo `DATABASE_URL` |
+| `pnpm job:revalidation` | pasa a `pending_revalidation` las memorias activas no-`outcome` con `revalidate_at < now()` e imprime el conteo; lee `DATABASE_URL` y `REVALIDATION_DAYS` |
 
 ## Tests
 
@@ -247,10 +248,45 @@ La etiqueta vive lo que vive la fila (la retención es la ventana de medición).
 `expires_at = quarantined_at + 60 días`; las que ya tenían más de 60 días quedan purgables en la primera
 corrida del job.
 
+### Ciclo de vida de memorias (HU-12, HU-11.4)
+
+Cada memoria aplicada (promoción, aprobación de la cola o restauración de cuarentena) recibe
+`revalidate_at = now() + REVALIDATION_DAYS` (60 por defecto); las de tipo `outcome` nunca vencen
+(`revalidate_at` NULL). Un amend vuelve a abrir la ventana. El job `revalidation-sweep` pasa las memorias
+activas vencidas a `pending_revalidation`; desde ese momento recall, get_memory y get_context ya no las
+devuelven. El tech lead las confirma (vuelven a `active` con un nuevo plazo, sin nueva revisión: los handles
+siguen valiendo) o las retira con un motivo (pasan a `deprecated`, se guarda `retired_reason` y se escribe
+una revisión `deprecate`). Después de un PR revertido se retiran en bloque todas las memorias activas o
+pendientes del proyecto con ese `origin_pr`, en una sola transacción. Solo `project_admin`; cualquier otro
+recibe el mismo 404. Confirmar algo que no está pendiente, o retirar algo ya retirado o reemplazado, también
+es 404. Un motivo con un secreto es 400 (no se guarda ni se repite); los emails/teléfonos se enmascaran.
+
+```bash
+P=00000000-0000-0000-0000-000000000010
+# vencer una memoria a mano (dev)
+docker compose exec db psql -U gmemo -d gmemo -c   "UPDATE memory SET revalidate_at = now() - interval '1 day' WHERE id = '<memoryId>'"
+# barrido: HTTP (dev, modo abierto) o script
+curl -sS -X POST http://localhost:3000/internal/jobs/revalidation-sweep
+DATABASE_URL=postgres://gmemo:gmemo@localhost:5433/gmemo pnpm job:revalidation
+# → {"job":"revalidation-sweep","count":N,"detail":{"<projectId>":n}}
+# listar las pendientes
+curl -sS "http://localhost:3000/api/v1/projects/$P/memories?status=pending_revalidation" -H 'X-Dev-User: tl@demo.local'
+# confirmar (→ {"memoryId":...,"status":"active","revalidateAt":...})
+curl -sS -X POST http://localhost:3000/api/v1/projects/$P/memories/<memoryId>/confirm   -H 'X-Dev-User: tl@demo.local' -H 'Content-Type: application/json' -d '{}'
+# retirar con motivo 3-500 chars (→ {"memoryId":...,"status":"deprecated","version":n})
+curl -sS -X POST http://localhost:3000/api/v1/projects/$P/memories/<memoryId>/retire   -H 'X-Dev-User: tl@demo.local' -H 'Content-Type: application/json' -d '{"reason":"obsolete after migration"}'
+# retirar todo lo de un PR revertido (→ {"retired":n}; repetido → {"retired":0})
+curl -sS -X POST http://localhost:3000/api/v1/projects/$P/memories/retire-by-pr   -H 'X-Dev-User: tl@demo.local' -H 'Content-Type: application/json' -d '{"originPr":42,"reason":"PR 42 reverted"}'
+```
+
+La migración 0010 pone `revalidate_at = now() + 60 días` a las memorias activas no-`outcome` existentes. Un
+`add` cuyo contenido ya existe (dedup) no toca el plazo de la fila existente.
+
 ### Jobs internos (`/internal/jobs`)
 
 `POST /internal/jobs/quarantine-purge` borra las entradas con `expires_at < now()` y responde
-`{"job":"quarantine-purge","count":N,"detail":{"<projectId>":n}}` (queda auditado en `access_log` como
+`{"job":"quarantine-purge","count":N,"detail":{"<projectId>":n}}`; `POST /internal/jobs/revalidation-sweep`
+pasa a `pending_revalidation` las memorias vencidas con la misma forma de respuesta (ambos quedan auditados en `access_log` como
 `system`/`admin`, solo conteos). Con `JOBS_TOKEN` (≥32 caracteres, comparado en tiempo constante) el router
 está habilitado en cualquier entorno y el token se exige siempre. Sin token (modo abierto) solo se habilita
 con `NODE_ENV=development` explícito: `production`, `test` o `NODE_ENV` sin definir lo dejan deshabilitado
@@ -267,8 +303,9 @@ curl -sS -X POST http://localhost:3000/internal/jobs/quarantine-purge -H "Author
 DATABASE_URL=postgres://gmemo:gmemo@localhost:5433/gmemo pnpm job:quarantine-purge
 ```
 
-**Producción (documentado, no implementado): EventBridge Scheduler.** Un schedule diario con target
-*API destination* `POST https://<host>/internal/jobs/quarantine-purge`, cuya *connection* guarda el bearer
+**Producción (documentado, no implementado): EventBridge Scheduler.** Un schedule diario por job con target
+*API destination* `POST https://<host>/internal/jobs/quarantine-purge` (y otro a
+`/internal/jobs/revalidation-sweep`), cuya *connection* guarda el bearer
 `JOBS_TOKEN` en Secrets Manager (auth tipo API key, header `Authorization: Bearer <token>`). La imagen de
 Fargate no incluye tsx, por eso el camino de producción es el HTTP y no el script.
 

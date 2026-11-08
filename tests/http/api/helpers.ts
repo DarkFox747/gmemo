@@ -23,6 +23,8 @@ import { InMemoryAuthRepository } from '../../auth/fakes.js';
 import { FakeEmbedder, FakePromotionRepo, FakeQueueRepo } from '../../review/fakes.js';
 import { QuarantineService } from '../../../src/quarantine/quarantineService.js';
 import { FakeQuarantineRepository, ScriptedPromoteService } from '../../quarantine/fakes.js';
+import { LifecycleService } from '../../../src/lifecycle/lifecycleService.js';
+import { FakeLifecycleRepository } from '../../lifecycle/fakes.js';
 
 // ---------------------------------------------------------------------------
 // Seed: two projects, one admin each, plus every non-admin shape.
@@ -138,6 +140,8 @@ export interface ApiTestKit {
   /** Backing fakes of the default (real) QuarantineService. */
   quarantineRepo: FakeQuarantineRepository;
   quarantinePromote: ScriptedPromoteService;
+  /** Backing fake of the default (real) LifecycleService (C4). */
+  lifecycleRepo: FakeLifecycleRepository;
 }
 
 export function makeApiTestApp(
@@ -151,6 +155,7 @@ export function makeApiTestApp(
   const embedder = new FakeEmbedder();
   const quarantineRepo = new FakeQuarantineRepository();
   const quarantinePromote = new ScriptedPromoteService();
+  const lifecycleRepo = new FakeLifecycleRepository();
 
   const deps: ApiRouterDeps = {
     authenticator,
@@ -167,6 +172,7 @@ export function makeApiTestApp(
       quarantineRepository: quarantineRepo,
       promoteService: quarantinePromote,
     }),
+    lifecycleService: new LifecycleService({ lifecycleRepository: lifecycleRepo }),
     ...overrides,
   };
 
@@ -176,5 +182,6 @@ export function makeApiTestApp(
   app.use('/api', apiErrorHandler);
   return {
     app, authRepo, authenticator, queueRepo, promotionRepo, embedder, quarantineRepo, quarantinePromote,
+    lifecycleRepo,
   };
 }

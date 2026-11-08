@@ -371,6 +371,17 @@ Source: judge-structured-verdict (supersedes promotion-pipeline `JUDGE_STUB_VERD
 - WHEN configuration loads
 - THEN startup fails with an explicit error
 
+### Requirement: Revalidation deadline on apply
+
+Source: memory-lifecycle
+
+Every apply path (promotion, review approval, quarantine restore) SHALL set `revalidate_at = now() + REVALIDATION_DAYS` for non-`outcome` memories and NULL for `outcome`, including amends.
+
+#### Scenario: Amend resets the deadline
+- GIVEN an active memory with a deadline 10 days away
+- WHEN an amend is applied
+- THEN its deadline becomes now + 60 days
+
 ## History
 
 | Requirement | Source | Superseded by |

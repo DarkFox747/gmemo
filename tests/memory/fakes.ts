@@ -57,7 +57,7 @@ export interface FakeMemory {
   /** null means no TTL. */
   ttlDays?: number | null;
   /** Defaults to 'active'. */
-  status?: 'active' | 'superseded' | 'deprecated';
+  status?: 'active' | 'superseded' | 'deprecated' | 'pending_revalidation';
   originBranch?: string | null;
   originPr?: number | null;
   /**

@@ -121,3 +121,23 @@ describe('discardStagedHandler', () => {
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_REFERENCE });
   });
 });
+
+// ---------------------------------------------------------------------------
+// R2-SEC1: reserved branch prefixes (restore/, web/) are server-owned
+// ---------------------------------------------------------------------------
+
+describe('discardStagedHandler — reserved branches (R2-SEC1)', () => {
+  it.each(['restore/11111111-1111-4111-8111-111111111111', 'web/anything'])(
+    'branch %s → opaque INVALID_REFERENCE and the item is not deleted',
+    async (branch) => {
+      const session: FakeStagingSession = { ...CALLER_SESSION, branch };
+      const stagingRepo = new InMemoryStagingRepository([session], [CALLER_ITEM]);
+      const ctx: RequestContext = { ...CTX, tenant: { ...CTX.tenant, branch } };
+      await expect(
+        discardStagedHandler({ item_id: ITEM_ID }, ctx, makeDeps(stagingRepo)),
+      ).rejects.toMatchObject({ code: ErrorCode.INVALID_REFERENCE });
+      // The reserved session keeps its item.
+      expect(await stagingRepo.listStagingItems(ctx.tenant)).toHaveLength(1);
+    },
+  );
+});

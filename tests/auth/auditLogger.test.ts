@@ -289,6 +289,10 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
     ['quarantine.list', 'read'],
     ['quarantine.read', 'read'],
     ['quarantine.restore', 'update'],
+    ['memories.list', 'read'],
+    ['memory.confirm', 'update'],
+    ['memory.retire', 'update'],
+    ['memory.retire_by_pr', 'update'],
   ])('maps %s to access_log action "%s"', async (action, expected) => {
     await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, action);
 
@@ -363,6 +367,35 @@ describe('RdsAuditLogger — quarantine restore detail', () => {
       quarantineId: 'q-1',
       outcome: 'quarantined',
       newQuarantineId: 'q-2',
+    });
+  });
+});
+
+describe('RdsAuditLogger — memory lifecycle detail (C4)', () => {
+  it('keeps status/originPr/resultCount; never the reason', async () => {
+    const repo = new InMemoryAuthRepository();
+    const logger = new RdsAuditLogger(repo);
+    const actor = { actorId: 'tl-sub', userId: 'u-tl', roles: ['project_admin'] };
+    await logger.recordApi(actor, { projectId: PROJECT_ID }, 'memories.list', {
+      status: 'pending_revalidation',
+      resultCount: 2,
+    });
+    await logger.recordApi(actor, { projectId: PROJECT_ID }, 'memory.retire_by_pr', {
+      originPr: 42,
+      resultCount: 3,
+      reason: 'secret reason',
+    } as unknown as Parameters<RdsAuditLogger['recordApi']>[3]);
+    expect(repo.accessLogEntries[0].detail).toEqual({
+      api: 'memories.list',
+      userId: 'u-tl',
+      status: 'pending_revalidation',
+      resultCount: 2,
+    });
+    expect(repo.accessLogEntries[1].detail).toEqual({
+      api: 'memory.retire_by_pr',
+      userId: 'u-tl',
+      originPr: 42,
+      resultCount: 3,
     });
   });
 });

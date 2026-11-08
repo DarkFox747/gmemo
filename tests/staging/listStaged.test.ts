@@ -157,3 +157,29 @@ describe('listStagedHandler — pending mandatory review is visible (SEC L-9)', 
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// R2-SEC1: reserved branch prefixes (restore/, web/) are server-owned
+// ---------------------------------------------------------------------------
+
+describe('listStagedHandler — reserved branches (R2-SEC1)', () => {
+  it.each(['restore/11111111-1111-4111-8111-111111111111', 'web/anything', 'web/'])(
+    'branch %s → opaque INVALID_REFERENCE, even when a session exists there',
+    async (branch) => {
+      const session: FakeStagingSession = { ...SEEDED_SESSION, branch };
+      const stagingRepo = new InMemoryStagingRepository([session], SEEDED_ITEMS);
+      const ctx: RequestContext = { ...CTX, tenant: { ...CTX.tenant, branch } };
+      await expect(listStagedHandler({}, ctx, makeDeps(stagingRepo))).rejects.toMatchObject({
+        code: 'INVALID_REFERENCE',
+      });
+    },
+  );
+
+  it('a non-reserved look-alike (restored/x) still lists normally', async () => {
+    const session: FakeStagingSession = { ...SEEDED_SESSION, branch: 'restored/x' };
+    const stagingRepo = new InMemoryStagingRepository([session], SEEDED_ITEMS);
+    const ctx: RequestContext = { ...CTX, tenant: { ...CTX.tenant, branch: 'restored/x' } };
+    const res = await listStagedHandler({}, ctx, makeDeps(stagingRepo));
+    expect(res.items.length).toBe(SEEDED_ITEMS.length);
+  });
+});

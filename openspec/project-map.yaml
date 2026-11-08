@@ -77,7 +77,8 @@ data_model:
   source: docs/artefactos/gmemo_schema_v2.sql
   tenancy: [app_user, project, repo (remote_url = natural key), project_membership, machine_credential]
   memory:
-    memory: authoritative record; tsvector GIN; fields jsonb; status enum; content_hash; ttl_days; origin_branch/pr
+    memory: authoritative record; tsvector GIN; fields jsonb; status enum (active|superseded|deprecated|pending_revalidation); content_hash; ttl_days; origin_branch/pr; revalidate_at (NULL for outcome); retired_reason (3..500 CHECK)
+    enums_added_c4: "0009: memory_status += pending_revalidation; provenance += web_ui (written by C5)"
     memory_revision: immutable audit trail; UNIQUE(memory_id, revision_no)
     memory_relation: typed edges (supersedes, conflicts_with, duplicate); source = judge|human
   staging:
@@ -169,6 +170,14 @@ key_files:
       - src/judge/bedrockJudge.ts (real ConverseCommand; renderItem XML-delimited untrusted fields + anti-injection system prompt; word-boundary parseVerdict; evaluate() fail-closed→uncertain w/ error logging)
       - config: AWS_REGION (+anyRealBedrock superRefine), BEDROCK_MAX_ATTEMPTS(3), BEDROCK_TIMEOUT_MS(15000); reuse BEDROCK_MODEL_ID/BEDROCK_EMBEDDING_MODEL_ID; JUDGE_STUB_VERDICT default→uncertain; dep @aws-sdk/client-bedrock-runtime; tests inject {send} fake (no live AWS). 442 tests
       - operator env: AWS_REGION + titan-embed-text-v2:0 + fully-qualified judge model id (e.g. us.anthropic.claude-3-5-haiku-...); task role bedrock:InvokeModel + model access
+    memory_lifecycle_implemented:   # change memory-lifecycle (C4, HU-12, HU-11.4)
+      - migrations/0009_memory_enum_values.sql (enum values only) + 0010_memory_lifecycle.sql (revalidate_at, retired_reason + CHECK, idempotent 60d backfill, ix_memory_proj_origin_pr WHERE origin_pr IS NOT NULL, ix_memory_revalidate_due WHERE status='active')
+      - apply (INSERT_MEMORY_SQL / UPDATE_MEMORY_AMEND_SQL, $13) sets revalidate_at = now() + REVALIDATION_DAYS (outcome → NULL) for promotion, review approve and restore via applyOpInTxn; config REVALIDATION_DAYS 1..3650 default 60 (revalidationDaysSchema)
+      - src/db/lifecycleRepository.ts (PgLifecycleRepository: list, guarded confirm, single-statement CTE retire / retire-by-pr with FOR UPDATE + per-row deprecate revision, project-agnostic sweep RETURNING project_id) + src/lifecycle/{types,lifecycleService}.ts (secret reason → 400, PII mask, sweep → JobResult)
+      - src/http/api/memoryRoutes.ts (projectAdmin: GET /memories, POST /memories/:memoryId/confirm|retire, POST /memories/retire-by-pr; uniform 404; ApiAction memories.list/memory.confirm/memory.retire/memory.retire_by_pr)
+      - job revalidation-sweep in the /internal/jobs map (src/index.ts) + scripts/jobs/revalidation.ts (pnpm job:revalidation)
+      - read path unchanged (status='active' predicates); per-status exclusion tests unit + DB-gated
+      - list_staged / discard_staged reject reserved branches (restore/, web/) with INVALID_REFERENCE
     workspace_and_demo_files:
       pnpm_workspace: pnpm-workspace.yaml (workspace root config; packages/*)
       web_package: packages/web (@gmemo/web — manifest-only, future React web UI; no code yet)

@@ -29,6 +29,7 @@ import { PgStagingRepository } from './db/stagingRepository.js';
 import { PgPromotionRepository } from './db/promotionRepository.js';
 import { PgReviewQueueRepository } from './db/reviewQueueRepository.js';
 import { PgQuarantineRepository } from './db/quarantineRepository.js';
+import { PgLifecycleRepository } from './db/lifecycleRepository.js';
 import { CognitoAuthenticator } from './auth/authenticator.js';
 import { DevAuthenticator } from './auth/devAuthenticator.js';
 import { DevOidcAuthenticator } from './auth/devOidcAuthenticator.js';
@@ -49,6 +50,8 @@ import { PromoteService } from './promote/promoteService.js';
 import { ReviewService } from './review/reviewService.js';
 import { QuarantineService } from './quarantine/quarantineService.js';
 import { purgeExpiredQuarantine, QUARANTINE_PURGE_JOB } from './quarantine/purge.js';
+import { LifecycleService } from './lifecycle/lifecycleService.js';
+import { REVALIDATION_SWEEP_JOB } from './lifecycle/types.js';
 import type { JobsRouterDeps } from './jobs/jobsRouter.js';
 import { isJobsEnabled } from './jobs/jobsRouter.js';
 import type { AppServices, Authenticator } from './mcp/context.js';
@@ -126,6 +129,7 @@ const stagingRepository = new PgStagingRepository(pool);
 // --- 5d. Promotion repository (promotion-pipeline) ---
 const promotionRepository = new PgPromotionRepository(pool, {
   quarantineRetentionDays: config.QUARANTINE_RETENTION_DAYS,
+  revalidationDays: config.REVALIDATION_DAYS,
 });
 
 // --- 5e. Judge: dev stub vs Bedrock skeleton (composition root) ---
@@ -234,6 +238,13 @@ const reviewService = new ReviewService({
 const quarantineRepository = new PgQuarantineRepository(pool);
 const quarantineService = new QuarantineService({ quarantineRepository, promoteService });
 
+// --- 5l'. Memory lifecycle (C4, HU-12, HU-11.4): list/confirm/retire + revalidation sweep ---
+const lifecycleService = new LifecycleService({
+  lifecycleRepository: new PgLifecycleRepository(pool, {
+    revalidationDays: config.REVALIDATION_DAYS,
+  }),
+});
+
 const services: AppServices = {
   authenticator, // ← selected above: DevAuthenticator or CognitoAuthenticator
   tenantResolver: new RdsTenantResolver(authRepository),
@@ -252,15 +263,19 @@ const services: AppServices = {
   notifier: logNotifier,
   reviewService,
   quarantineService,
+  lifecycleService,
 };
 
 // --- 5m. Internal jobs (/internal/jobs): enabled anywhere a JOBS_TOKEN is
 // configured, or without one only under an EXPLICIT NODE_ENV=development (the raw
 // env, not config's 'development' default: unset NODE_ENV never opens it). The
-// router re-checks open mode itself (third layer). C4 adds its job here. ---
+// router re-checks open mode itself (third layer). ---
 const jobsEnabled = isJobsEnabled(process.env.NODE_ENV, config.JOBS_TOKEN);
 const jobs: JobsRouterDeps = {
-  jobs: { [QUARANTINE_PURGE_JOB]: () => purgeExpiredQuarantine(quarantineRepository) },
+  jobs: {
+    [QUARANTINE_PURGE_JOB]: () => purgeExpiredQuarantine(quarantineRepository),
+    [REVALIDATION_SWEEP_JOB]: () => lifecycleService.sweep(),
+  },
   token: config.JOBS_TOKEN,
   enabled: jobsEnabled,
   audit: auditLogger,

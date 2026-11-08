@@ -304,13 +304,16 @@ SELECT promoted_at, reviewed_at FROM staging_item WHERE id = $1 FOR UPDATE
 // content_tsv OMITTED — GENERATED ALWAYS.
 // $1=project_id $2=repo_id $3=type $4=title $5=summary $6=body $7=fields(jsonb)
 // $8=author_identity $9=content_hash $10=origin_branch $11=origin_pr $12=embedding(vector|null)
+// $13=revalidation_days (C4): revalidate_at = now() + N days, NULL for outcome (never expires).
 const INSERT_MEMORY_SQL = `
 INSERT INTO memory
   (project_id, repo_id, type, title, summary, body, fields,
    status, provenance, author_identity, content_hash, current_revision,
-   origin_branch, origin_pr, embedding)
+   origin_branch, origin_pr, embedding, revalidate_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb,
-        'active', 'pr_reviewed', $8, $9, 1, $10, $11, $12::vector)
+        'active', 'pr_reviewed', $8, $9, 1, $10, $11, $12::vector,
+        CASE WHEN $3::memory_type = 'outcome' THEN NULL
+             ELSE now() + make_interval(days => $13::int) END)
 ON CONFLICT (project_id, content_hash) DO NOTHING
 RETURNING id
 `.trim();
@@ -345,13 +348,16 @@ SELECT id, current_revision, status, type FROM memory WHERE id = $1 AND project_
 // May throw 23505 if content_hash already exists on a different row.
 // $1=title $2=summary $3=body $4=fields(jsonb) $5=type $6=content_hash
 // $7=author_identity $8=origin_branch $9=origin_pr $10=memory_id $11=project_id
-// $12=embedding(vector|null)
+// $12=embedding(vector|null) $13=revalidation_days (C4)
 // L3: AND project_id = $11 ensures cross-project targets are treated as stale.
+// Amend may change the type ($5), so the deadline CASE uses the NEW type.
 const UPDATE_MEMORY_AMEND_SQL = `
 UPDATE memory
 SET title = $1, summary = $2, body = $3, fields = $4::jsonb, type = $5,
     content_hash = $6, author_identity = $7, provenance = 'pr_reviewed',
     origin_branch = $8, origin_pr = $9, embedding = $12::vector,
+    revalidate_at = CASE WHEN $5::memory_type = 'outcome' THEN NULL
+                         ELSE now() + make_interval(days => $13::int) END,
     current_revision = current_revision + 1, updated_at = now()
 WHERE id = $10 AND project_id = $11
 `.trim();
@@ -671,6 +677,8 @@ export function toOrQuery(title: string, summary: string): string[] {
 export interface PromotionRepositoryOptions {
   /** QUARANTINE_RETENTION_DAYS: expires_at = now() + this many days on every insert. */
   quarantineRetentionDays: number;
+  /** REVALIDATION_DAYS (C4): revalidate_at = now() + this many days on every apply (outcome → NULL). */
+  revalidationDays: number;
 }
 
 export class PgPromotionRepository implements PromotionRepository {
@@ -678,7 +686,12 @@ export class PgPromotionRepository implements PromotionRepository {
   constructor(
     private readonly pool: pg.Pool,
     private readonly opts: PromotionRepositoryOptions,
-  ) {}
+  ) {
+    // Defence in depth for tests and scripts that bypass loadConfig.
+    if (!Number.isInteger(opts.revalidationDays) || opts.revalidationDays < 1) {
+      throw new Error('PgPromotionRepository: revalidationDays must be an integer >= 1');
+    }
+  }
 
   /**
    * Issues a ROLLBACK and swallows any error (e.g. already-aborted connection).
@@ -830,6 +843,7 @@ export class PgPromotionRepository implements PromotionRepository {
         item.author_identity, item.content_hash,
         ctx.originBranch, ctx.originPr,
         toVectorParam(embedding),   // $12
+        this.opts.revalidationDays, // $13
       ]);
 
       if (memRes.rows.length === 0) {
@@ -881,6 +895,7 @@ export class PgPromotionRepository implements PromotionRepository {
           item.target_memory_id,
           ctx.projectId,          // $11 — L3 tenant guard
           toVectorParam(embedding), // $12
+          this.opts.revalidationDays, // $13
         ]);
       } catch (err) {
         if ((err as { code?: string }).code === '23505') return { status: 'duplicate' };
@@ -924,6 +939,7 @@ export class PgPromotionRepository implements PromotionRepository {
         item.author_identity, item.content_hash,
         ctx.originBranch, ctx.originPr,
         toVectorParam(embedding),   // $12
+        this.opts.revalidationDays, // $13
       ]);
 
       let newMemoryId: string;

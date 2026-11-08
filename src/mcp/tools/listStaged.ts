@@ -12,6 +12,8 @@
 import type { ListStagedResponse, StagedItemView } from '../../contracts/tools.js';
 import type { RequestContext, HandlerDeps } from '../context.js';
 import type { StagingItemRow } from '../../db/stagingRepository.js';
+import { isReservedBranch } from '../../db/stagingRepository.js';
+import { AppError, ErrorCode } from '../../errors/appError.js';
 
 /**
  * Agent-facing state. An accepted item held for mandatory review (not applied)
@@ -42,6 +44,11 @@ export async function listStagedHandler(
   ctx: RequestContext,
   deps: HandlerDeps,
 ): Promise<ListStagedResponse> {
+  // R2-SEC1: server-owned branch prefixes (restore/, web/) are never readable by
+  // an agent's X-Git-Branch — same opaque error as remember.
+  if (isReservedBranch(ctx.tenant.branch)) {
+    throw new AppError(ErrorCode.INVALID_REFERENCE);
+  }
   const rows = await deps.stagingRepository.listStagingItems(ctx.tenant);
   return { items: rows.map(toStagedItemView) };
 }

@@ -28,6 +28,9 @@ const API_UPDATE_ACTIONS: ReadonlySet<ApiAction> = new Set([
   'review_queue.approve',
   'review_queue.reject',
   'quarantine.restore',
+  'memory.confirm',
+  'memory.retire',
+  'memory.retire_by_pr',
 ]);
 
 /**
@@ -49,6 +52,8 @@ const API_DETAIL_KEYS: ReadonlyArray<keyof ApiAuditDetail> = [
   'quarantineId',
   'outcome',
   'newQuarantineId',
+  'status',
+  'originPr',
 ];
 
 export class RdsAuditLogger implements AuditLogger {

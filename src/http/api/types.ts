@@ -19,6 +19,8 @@ import type { MemoryType } from '../../contracts/memory.js';
 import type { DecisionCriterion } from '../../judge/judge.js';
 import type { QuarantineCriterion, QuarantineReasonCode } from '../../quarantine/reason.js';
 import type { QuarantineServiceLike } from '../../quarantine/quarantineService.js';
+import type { LifecycleServiceLike } from '../../lifecycle/types.js';
+import type { MemoryStatus } from '../../db/lifecycleRepository.js';
 
 /**
  * Approve outcomes the caller can fix by reloading the item.
@@ -76,6 +78,8 @@ export interface ApiRouterDeps {
   reviewService: ReviewServiceLike;
   /** Quarantine list/detail/restore (C3). */
   quarantineService: QuarantineServiceLike;
+  /** Memory lifecycle routes (C4). */
+  lifecycleService: LifecycleServiceLike;
 }
 
 export interface ApiRouterOptions {
@@ -125,7 +129,7 @@ export interface MemoryRefDto {
   type: MemoryType;
   title: string;
   summary: string;
-  status: 'active' | 'superseded' | 'deprecated';
+  status: MemoryStatus;
   version: number;
   originBranch: string | null;
   originPr: number | null;
@@ -200,3 +204,47 @@ export type RestoreResponseDto =
   | { outcome: 'applied'; memoryId?: string }
   | { outcome: 'queued'; itemId: string }
   | { outcome: 'quarantined'; quarantineId?: string };
+
+// ---------------------------------------------------------------------------
+// Memory lifecycle (C4, HU-12, HU-11.4)
+// ---------------------------------------------------------------------------
+
+export interface MemoryListItemDto {
+  id: string;
+  type: MemoryType;
+  title: string;
+  summary: string;
+  status: MemoryStatus;
+  version: number;
+  originBranch: string | null;
+  originPr: number | null;
+  revalidateAt: string | null;
+  updatedAt: string;
+}
+
+export interface MemoryListDto {
+  items: MemoryListItemDto[];
+  truncated: boolean;
+}
+
+/** C5 widens status and adds filters/search/cursor. */
+export interface MemoryListQueryInput {
+  status: 'pending_revalidation';
+  limit: number;
+}
+
+export interface ConfirmResponseDto {
+  memoryId: string;
+  status: 'active';
+  revalidateAt: string | null;
+}
+
+export interface RetireResponseDto {
+  memoryId: string;
+  status: 'deprecated';
+  version: number;
+}
+
+export interface RetireByPrResponseDto {
+  retired: number;
+}
