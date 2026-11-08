@@ -9,6 +9,7 @@ import { useToast } from '../components/Toast';
 import { formatExpiry, formatRelativeDays } from '../lib/format';
 import { buildHash } from '../lib/hashRoute';
 import { MESSAGES, quarantineCriterionLabel } from '../lib/labels';
+import { REFRESH_MS } from '../lib/polling';
 import { useAsync } from '../lib/useAsync';
 import type { ScreenProps } from './types';
 
@@ -54,6 +55,7 @@ export function QuarantineScreen({ api, projectId, role, refreshBadges }: Screen
   const state = useAsync(
     () => api.listQuarantine(projectId, { reason: filter === 'all' ? undefined : filter }),
     [api, projectId, filter],
+    REFRESH_MS,
   );
   const [target, setTarget] = useState<QuarantineItemDto | null>(null);
   const [busy, setBusy] = useState(false);

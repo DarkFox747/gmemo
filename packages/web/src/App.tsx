@@ -12,6 +12,7 @@ import { TopBar } from './components/TopBar';
 import { Empty, ErrorMessage, Loading } from './components/StateViews';
 import { navigate, useHashRoute } from './lib/hashRoute';
 import type { Route } from './lib/hashRoute';
+import { REFRESH_MS, startPolling } from './lib/polling';
 import type { AppStorage } from './lib/storage';
 import { useAsync } from './lib/useAsync';
 import { AdminScreen } from './screens/AdminScreen';
@@ -73,32 +74,28 @@ export function App({ api, storage }: { api: ApiClient; storage: AppStorage }) {
       return;
     }
     let cancelled = false;
-    // A badge failure hides that badge and never blocks the shell.
-    api.listReviewQueue(projectId, { filter: 'all', limit: 1 }).then(
-      (q) => {
-        if (!cancelled) setBadges((b) => ({ ...b, review: q.counters.pending }));
-      },
-      (err: unknown) => {
-        console.error('[badges] review queue failed', err);
-        if (!cancelled) setBadges((b) => ({ ...b, review: null }));
-      },
-    );
-    api.listQuarantine(projectId, { limit: BADGE_LIMIT }).then(
-      (q) => {
-        if (!cancelled) {
-          setBadges((b) => ({
-            ...b,
-            quarantine: q.truncated ? `${BADGE_LIMIT}+` : String(q.items.length),
-          }));
-        }
-      },
-      (err: unknown) => {
-        console.error('[badges] quarantine failed', err);
-        if (!cancelled) setBadges((b) => ({ ...b, quarantine: null }));
-      },
-    );
+    // A background failure keeps the previous badge value and never blocks the shell.
+    const load = (): Promise<unknown> =>
+      Promise.all([
+        api.listReviewQueue(projectId, { filter: 'all', limit: 1 }).then((q) => {
+          if (!cancelled) setBadges((b) => ({ ...b, review: q.counters.pending }));
+        }),
+        api.listQuarantine(projectId, { limit: BADGE_LIMIT }).then((q) => {
+          if (!cancelled) {
+            setBadges((b) => ({
+              ...b,
+              quarantine: q.truncated ? `${BADGE_LIMIT}+` : String(q.items.length),
+            }));
+          }
+        }),
+      ]);
+    load().catch((err: unknown) => console.error('[badges] load failed', err));
+    const stop = startPolling(load, REFRESH_MS, document, (err, first) => {
+      if (first) console.error('[badges] refresh failed', err);
+    });
     return () => {
       cancelled = true;
+      stop();
     };
   }, [api, projectId, role, badgeTick]);
 

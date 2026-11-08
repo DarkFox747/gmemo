@@ -1,14 +1,16 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ApiError, errorMessage } from '../api/client';
 import type { MemoryRefDto, ReviewItemDetailDto } from '../api/types';
 import { Chip, StatusChip, TypeChip } from '../components/Chip';
+import { ProposalComparison } from '../components/ProposalComparison';
 import { ConfidenceBar } from '../components/ConfidenceBar';
 import { FieldsView } from '../components/FieldsView';
 import { ErrorMessage, Loading, NoAccess } from '../components/StateViews';
 import { useToast } from '../components/Toast';
 import { formatDateTime } from '../lib/format';
 import { buildHash } from '../lib/hashRoute';
-import { criterionLong } from '../lib/labels';
+import { criterionExplanation, criterionLong } from '../lib/labels';
+import { ARM_MS, isEditableTarget, shortcutAction } from '../lib/shortcuts';
 import { useAsync } from '../lib/useAsync';
 import type { ScreenProps } from './types';
 
@@ -115,6 +117,7 @@ function ReviewForm({
   // Unchecked by default: superseding is an explicit reviewer choice (the server default is false too).
   const [markSuperseded, setMarkSuperseded] = useState(false);
   const [busy, setBusy] = useState(false);
+  const reasonRef = useRef<HTMLTextAreaElement>(null);
   const [actionError, setActionError] = useState<{ text: string; conflict: boolean } | null>(null);
 
   const relatedCard: MemoryRefDto | null = item.related ?? item.target;
@@ -172,6 +175,43 @@ function ReviewForm({
     window.location.hash = buildHash({ name: 'review' });
   }
 
+  // A arms the approval, A again or Enter confirms within ARM_MS; R only focuses the reason.
+  // Ref keeps the listener on the handlers of the latest render without re-subscribing.
+  const [armed, setArmed] = useState(false);
+  const armTimer = useRef<number | undefined>(undefined);
+  function disarm(): void {
+    window.clearTimeout(armTimer.current);
+    setArmed(false);
+  }
+  useEffect(() => () => window.clearTimeout(armTimer.current), []);
+
+  const shortcutRef = useRef<(e: KeyboardEvent) => void>(() => undefined);
+  shortcutRef.current = (e) => {
+    if (busy) return;
+    const action = shortcutAction(e, armed);
+    if (action === 'ignore') return;
+    e.preventDefault();
+    if (action === 'focus-reason') {
+      disarm();
+      reasonRef.current?.focus();
+    } else if (action === 'arm') {
+      setArmed(true);
+      window.clearTimeout(armTimer.current);
+      armTimer.current = window.setTimeout(() => setArmed(false), ARM_MS);
+    } else {
+      disarm();
+      void approve();
+    }
+  };
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if (isEditableTarget(e.target)) return;
+      shortcutRef.current(e);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   return (
     <>
       <Breadcrumb />
@@ -193,6 +233,15 @@ function ReviewForm({
         </p>
       )}
 
+      {relatedCard && (
+        <section className="card" aria-labelledby={`${id}-compare`}>
+          <h2 id={`${id}-compare`} className="card__title">
+            Propuesta frente a la unidad relacionada
+          </h2>
+          <ProposalComparison proposal={item} related={relatedCard} />
+        </section>
+      )}
+
       <div className="detail-grid">
         <div className="card">
           <div className="section">
@@ -211,6 +260,7 @@ function ReviewForm({
             </label>
             <textarea
               id={`${id}-reason`}
+              ref={reasonRef}
               className="textarea"
               rows={3}
               maxLength={500}
@@ -251,6 +301,13 @@ function ReviewForm({
               Posponer
             </button>
           </div>
+          <p className="kbd-hint">
+            Atajos: <kbd className="kbd">A</kbd> aprobar (pide confirmación) ·{' '}
+            <kbd className="kbd">R</kbd> ir al motivo de rechazo
+          </p>
+          <div role="status">
+            {armed && <p className="shortcut-prompt">Pulsá A otra vez o Enter para confirmar</p>}
+          </div>
         </div>
 
         <div className="stack">
@@ -264,13 +321,14 @@ function ReviewForm({
             <div className="section">
               <h3 className="section__label">Criterio determinante</h3>
               <p>{item.criterion ? criterionLong(item.criterion) : '—'}</p>
+              {item.criterion && <p className="muted">{criterionExplanation(item.criterion)}</p>}
             </div>
             <div className="section">
               <h3 className="section__label">Confianza</h3>
-              <ConfidenceBar value={item.confidence} threshold={item.threshold} />
+              <ConfidenceBar value={item.confidence} threshold={item.threshold} wide />
             </div>
             <div className="section">
-              <h3 className="section__label">Justificación</h3>
+              <h3 className="section__label">Texto original del Juez</h3>
               <p className="section__box">{item.reason ?? 'Sin justificación registrada.'}</p>
             </div>
             <div className="section">

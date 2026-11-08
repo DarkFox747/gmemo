@@ -7,6 +7,7 @@ import { Empty, ErrorMessage, Loading, NoAccess } from '../components/StateViews
 import { formatDateTime, formatOrigin } from '../lib/format';
 import { buildHash } from '../lib/hashRoute';
 import { criterionShort } from '../lib/labels';
+import { REFRESH_MS } from '../lib/polling';
 import { useAsync } from '../lib/useAsync';
 import type { ScreenProps } from './types';
 
@@ -68,6 +69,7 @@ function ReviewQueue({ api, projectId }: ScreenProps) {
   const state = useAsync(
     () => api.listReviewQueue(projectId, QUERY[filter]),
     [api, projectId, filter],
+    REFRESH_MS,
   );
   const counters = state.data?.counters;
 
@@ -105,32 +107,37 @@ function ReviewQueue({ api, projectId }: ScreenProps) {
               </tr>
             </thead>
             <tbody>
-              {state.data.items.map((it) => (
-                <tr key={it.id}>
-                  <td>
-                    <TypeChip type={it.type} />
-                  </td>
-                  <td className="cell--title">{it.title}</td>
-                  <td>
-                    <Motivo item={it} />
-                  </td>
-                  <td>
-                    <ConfidenceBar value={it.confidence} />
-                  </td>
-                  <td className="mono">{formatOrigin(it.originBranch, it.originPr)}</td>
-                  <td>{it.author}</td>
-                  <td className="muted">{formatDateTime(it.createdAt)}</td>
-                  <td>
-                    <a
-                      className="btn btn--secondary"
-                      href={buildHash({ name: 'reviewDetail', itemId: it.id })}
-                      aria-label={`Revisar: ${it.title}`}
-                    >
-                      Revisar
-                    </a>
-                  </td>
-                </tr>
-              ))}
+              {state.data.items.map((it) => {
+                const origin = formatOrigin(it.originBranch, it.originPr);
+                return (
+                  <tr key={it.id}>
+                    <td>
+                      <TypeChip type={it.type} />
+                    </td>
+                    <td className="cell--title">{it.title}</td>
+                    <td>
+                      <Motivo item={it} />
+                    </td>
+                    <td>
+                      <ConfidenceBar value={it.confidence} />
+                    </td>
+                    <td className="cell--origin mono" title={origin}>
+                      {origin}
+                    </td>
+                    <td>{it.author}</td>
+                    <td className="muted">{formatDateTime(it.createdAt)}</td>
+                    <td>
+                      <a
+                        className="btn btn--secondary"
+                        href={buildHash({ name: 'reviewDetail', itemId: it.id })}
+                        aria-label={`Revisar: ${it.title}`}
+                      >
+                        Revisar
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

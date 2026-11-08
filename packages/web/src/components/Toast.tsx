@@ -14,7 +14,7 @@ const ToastContext = createContext<(text: string, kind?: ToastKind) => void>(() 
 
 const TOAST_MS = 6000;
 
-/** One polite live region; toasts auto-dismiss after 6 s. */
+/** Success/info toasts use a polite status region, errors an alert region; all auto-dismiss after 6 s. */
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const nextId = useRef(1);
@@ -36,12 +36,25 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={show}>
       {children}
-      <div className="toasts" role="status" aria-live="polite">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast toast--${t.kind}`}>
-            {t.text}
-          </div>
-        ))}
+      <div className="toasts">
+        <div className="toasts__group" role="status" aria-live="polite">
+          {toasts
+            .filter((t) => t.kind !== 'error')
+            .map((t) => (
+              <div key={t.id} className={`toast toast--${t.kind}`}>
+                {t.text}
+              </div>
+            ))}
+        </div>
+        <div className="toasts__group" role="alert">
+          {toasts
+            .filter((t) => t.kind === 'error')
+            .map((t) => (
+              <div key={t.id} className="toast toast--error">
+                {t.text}
+              </div>
+            ))}
+        </div>
       </div>
     </ToastContext.Provider>
   );

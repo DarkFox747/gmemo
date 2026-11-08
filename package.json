@@ -25,6 +25,8 @@
     "seed:dev": "tsx src/db/seed.ts",
     "smoke": "tsx scripts/smoke.ts",
     "demo": "tsx scripts/demo-e2e.ts",
+    "demo:promote": "tsx scripts/demo-promote.ts",
+    "demo:reset": "docker compose down -v && docker compose up --build -d --wait",
     "eval": "tsx scripts/eval.ts",
     "screenshots": "tsx scripts/screenshots.ts",
     "package:demo": "sh scripts/package-demo.sh",

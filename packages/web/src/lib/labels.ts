@@ -59,6 +59,27 @@ const CRITERION_LONG: Record<DecisionCriterion, string> = {
   stale_target: 'La unidad destino cambió',
 };
 
+/** Plain-language explanation of what the criterion means; the Juez's own text is shown separately. */
+const CRITERION_EXPLANATION: Record<DecisionCriterion | QuarantineCriterion, string> = {
+  specificity:
+    'El Juez considera que la unidad es demasiado genérica: no indica un valor, una regla o un caso concreto que otro desarrollador pueda aplicar.',
+  duplication:
+    'El Juez detectó que la propuesta repite el contenido de una unidad que ya existe en la memoria.',
+  contradiction:
+    'El Juez detectó que la propuesta contradice una unidad activa de la memoria. Compara ambas y decide cuál debe prevalecer.',
+  grounding:
+    'El Juez no encontró sustento suficiente: la unidad no explica el motivo ni la evidencia que la respalda.',
+  confidence:
+    'El Juez no alcanzó la confianza mínima (umbral) para decidir por su cuenta; necesita la decisión de una persona.',
+  security_second_layer:
+    'La segunda capa de seguridad del Juez marcó contenido que podría ser sensible o contener instrucciones; revísalo con cuidado.',
+  stale_target:
+    'La unidad que esta propuesta modifica cambió después de ser propuesta; al aprobar se aplicará sobre la versión actual.',
+  pipeline: 'La sanitización detectó contenido que no puede incorporarse tal cual a la memoria.',
+  judge: 'El Juez rechazó la propuesta al evaluarla.',
+  human_review: 'Un líder técnico rechazó la propuesta durante la revisión.',
+};
+
 const REASON_CODE_LABELS: Record<QuarantineReasonCode, string> = {
   secret_detected: 'Datos sensibles',
   embedded_instructions: 'Instrucciones embebidas',
@@ -97,6 +118,8 @@ export const typeLabel = (t: MemoryType): string => TYPE_LABELS[t];
 export const statusLabel = (s: MemoryStatus): string => STATUS_LABELS[s];
 export const criterionShort = (c: DecisionCriterion): string => CRITERION_SHORT[c];
 export const criterionLong = (c: DecisionCriterion): string => CRITERION_LONG[c];
+export const criterionExplanation = (c: DecisionCriterion | QuarantineCriterion): string =>
+  CRITERION_EXPLANATION[c];
 export const reasonCodeLabel = (r: QuarantineReasonCode): string => REASON_CODE_LABELS[r];
 export const quarantineCriterionLabel = (c: QuarantineCriterion): string =>
   QUARANTINE_CRITERION_LABELS[c];

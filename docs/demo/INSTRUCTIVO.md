@@ -20,7 +20,20 @@ pnpm install --frozen-lockfile
 docker compose up --build -d --wait
 ```
 
-Compose aplica las migraciones y el seed de desarrollo (servicio `migrate`) y arranca el servidor cuando la base está lista. Para volver a empezar desde cero: `docker compose down -v` y de nuevo `docker compose up --build -d --wait`.
+Compose aplica las migraciones y el seed de desarrollo (servicio `migrate`) y arranca el servidor cuando la base está lista. Para volver a empezar desde cero: `pnpm demo:reset` (equivale a `docker compose down -v && docker compose up --build -d --wait`).
+
+### 3.1 Ayudantes de demo
+
+| Comando | Qué hace |
+|---|---|
+| `pnpm demo:reset` | Recrea el stack desde cero (borra el volumen) y espera a que esté sano |
+| `pnpm demo:promote -- --branch <rama> [--pr <n>]` | Llama a `POST /promote` con el *bypass* OIDC de desarrollo e imprime el resultado; una rama feature exige `--pr` (`BASE_URL` cambia el servidor, por defecto `http://localhost:3000`) |
+
+### 3.2 Web: actualización en vivo y atajos
+
+- La cola de revisión, la cuarentena y los contadores del menú se refrescan solos cada 5 segundos mientras la pestaña está visible (se pausan si está oculta); los filtros y el scroll se mantienen. Tras `pnpm demo:promote` las unidades dudosas aparecen sin recargar.
+- En el detalle de revisión: `A` arma la aprobación y aparece "Pulsá A otra vez o Enter para confirmar" (3 s para confirmar, si no se desarma); `R` solo lleva al motivo de rechazo (rechazar es siempre con el botón). No actúan mientras se escribe en un campo ni con Shift/Ctrl/Alt/Meta.
+- El detalle muestra la explicación del criterio en español, el "Texto original del Juez" y, si hay unidad relacionada, la comparación lado a lado con las palabras cambiadas resaltadas.
 
 ## 4. URLs
 
@@ -150,7 +163,7 @@ Las capturas de `docs/demo/capturas/` se regeneran con `pnpm screenshots` sobre 
 
 > Usá gmemo. Primero buscá con `recall` qué decisiones hay sobre el envío de notificaciones a clientes. Después proponé con `remember` un gotcha, en inglés, sobre que el worker del outbox debe confirmar (ack) el trabajo solo cuando el proveedor de email responde 2xx, citando `src/notifications/outboxWorker.ts`. Al final mostrame `list_staged`.
 
-El borrador queda en la sesión de `feature/notif-async`. Esa sesión se promueve directamente al mergear su PR: en local, con `POST /promote` y `{"repo": "crombie-llc/gmemo-demo", "source_branch": "feature/notif-async", "pr_number": <n>}` (ver 6.2).
+El borrador queda en la sesión de `feature/notif-async`. Esa sesión se promueve directamente al mergear su PR: en local, con `pnpm demo:promote -- --branch feature/notif-async --pr <n>` (ver 6.2); después, la cola de la web muestra las unidades dudosas en pocos segundos.
 
 ## 8. Tests y métricas
 

@@ -20,9 +20,13 @@ describe('labels', () => {
     for (const c of DECISION_CRITERIA) {
       expect(labels.criterionShort(c)).not.toBe('');
       expect(labels.criterionLong(c)).not.toBe('');
+      expect(labels.criterionExplanation(c)).not.toBe('');
     }
     for (const r of QUARANTINE_REASON_CODES) expect(labels.reasonCodeLabel(r)).not.toBe('');
-    for (const c of QUARANTINE_CRITERIA) expect(labels.quarantineCriterionLabel(c)).not.toBe('');
+    for (const c of QUARANTINE_CRITERIA) {
+      expect(labels.quarantineCriterionLabel(c)).not.toBe('');
+      expect(labels.criterionExplanation(c)).not.toBe('');
+    }
     for (const o of OPS) expect(labels.opLabel(o)).not.toBe('');
     for (const v of VERDICTS) expect(labels.verdictLabel(v)).not.toBe('');
     for (const c of CONFLICT_CODES) expect(labels.MESSAGES.conflict[c]).not.toBe('');
