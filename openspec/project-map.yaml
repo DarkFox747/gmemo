@@ -137,7 +137,12 @@ modules:
     language: TypeScript (React)
     entry_points: [packages/web/src/main.tsx, packages/web/src/App.tsx, packages/web/src/api/client.ts, packages/web/src/lib/labels.ts]
     test_paths: [packages/web/src/]
-    area_context: null   # packages/web/CLAUDE.md exists locally (gitignored); no area skill installed
+    area_context:
+      name: web
+      type: frontend
+      shape: dir
+      always_on: packages/web/CLAUDE.md
+      skill: packages/web/.claude/skills/web-area/SKILL.md   # + packages/web/CLAUDE.md (both local, gitignored)
   - name: migrations
     path: migrations/
     description: Ordered idempotent SQL 0001–0010 (+ seed.dev.sql, dev only) applied by src/db/migrate.ts.
@@ -212,7 +217,7 @@ testing:
   counts_at_generated_commit: {total: 1973, unit: 1684, db: 289}
   coverage: {tool: null, threshold: null}
   ci: none (no workflow runs tests)
-  area_context: null   # .claude/rules/tests.md + tests-area skill exist locally but describe node:test/npm — WRONG for this repo, ignore
+  area_context: null   # wrong node:test/npm tests area removed 2026-11-08; conventions above are authoritative
 
 # --- Conventions ---
 conventions:
