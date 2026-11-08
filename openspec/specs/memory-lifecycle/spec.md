@@ -76,6 +76,18 @@ Only the project's `project_admin` SHALL use the lifecycle endpoints. Others rec
 - WHEN they call retire-by-pr
 - THEN they receive 404 and nothing changes
 
+### Requirement: Memory list
+
+Source: memory-lifecycle, direct-memory-management
+
+The project memory list SHALL default to status `active`, page size 20, newest-updated first, with an opaque `nextCursor`, and accept `type`, `status` and `q` filters.
+(Previously: pending-revalidation list only, ordered by revalidate_at.)
+
+#### Scenario: Pending tab
+- GIVEN two pending memories
+- WHEN listing with `status=pending_revalidation`
+- THEN both are returned
+
 ## History
 
 None.

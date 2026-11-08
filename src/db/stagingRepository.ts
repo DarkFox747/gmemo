@@ -18,6 +18,7 @@ import type { MemoryType } from '../contracts/memory.js';
 import type { TenantContext } from '../mcp/context.js';
 import { AppError, ErrorCode } from '../errors/appError.js';
 import { ulid } from './ulid.js';
+import type { WebSessionReaperRepository } from '../memory/webSessionReaper.js';
 
 /**
  * Branch prefixes owned by the server (SEC-L2): `restore/<id>` sessions are opened
@@ -75,6 +76,22 @@ export interface InsertStagingItemParams {
   judgeReason: string | null;
 }
 
+/**
+ * One-item session for a direct web write (C5). The caller builds the branch
+ * (`web/<userId>/<sessionId>`) and the item; author and opener come from the
+ * server-side actor, never from a request body.
+ */
+export interface SingleItemSessionInput {
+  /** ulid() from the caller (embedded in the branch). */
+  sessionId: string;
+  projectId: string;
+  repoId: string;
+  branch: string;
+  /** actor.actorId (idp_subject) — same meaning as remember / C3 restore. */
+  openedBy: string;
+  item: InsertStagingItemParams;
+}
+
 // ---------------------------------------------------------------------------
 // Interface
 // ---------------------------------------------------------------------------
@@ -108,6 +125,15 @@ export interface StagingRepository {
    * whether the item exists in another session).
    */
   discardStagingItem(tenant: TenantContext, itemId: string): Promise<boolean>;
+
+  /**
+   * Inserts a session and its single item in one transaction (C5 direct write).
+   * The repo is re-asserted against the project: a foreign/unknown repo →
+   * AppError(NOT_FOUND) and nothing is written.
+   */
+  createSingleItemSession(
+    i: SingleItemSessionInput,
+  ): Promise<{ sessionId: string; itemId: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -218,12 +244,75 @@ WHERE i.id = $1 AND i.session_id = s.id
   AND s.project_id = $2 AND s.repo_id = $3 AND s.branch = $4 AND s.status = 'open'
 `.trim();
 
+// C5 one-item session. Plain insert (no ON CONFLICT): the branch embeds the fresh
+// ULID, so ux_session_open cannot collide — a 23505 would be a bug and propagates.
+// The SELECT re-asserts repo ∈ project (defence in depth).
+// $1=id $2=project_id $3=repo_id $4=branch $5=opened_by
+const INSERT_SINGLE_ITEM_SESSION_SQL = `
+INSERT INTO staging_session
+  (id, project_id, repo_id, branch, status, opened_by, last_activity_at, expires_at)
+SELECT $1, $2, r.id, $4, 'open', $5, now(), now() + interval '7 days'
+FROM repo r WHERE r.id = $3 AND r.project_id = $2
+`.trim();
+
+// C5 SEC-M1 web-session-reaper: one guarded statement. Only `web/%` sessions
+// still 'open' past the cutoff are abandoned; only their non-promoted items are
+// deleted (promoted rows are referenced by memory_revision.promoted_from_item).
+// A data-modifying CTE always runs, even unreferenced. Project-agnostic (a job).
+// $1=max_age_minutes
+const REAP_STALE_WEB_SESSIONS_SQL = `
+WITH stale AS (
+  UPDATE staging_session
+  SET status = 'abandoned', last_activity_at = now()
+  WHERE status = 'open' AND branch LIKE 'web/%'
+    AND created_at < now() - make_interval(mins => $1::int)
+  RETURNING id, project_id
+), purged AS (
+  DELETE FROM staging_item si USING stale
+  WHERE si.session_id = stale.id AND si.promoted_at IS NULL
+  RETURNING si.id
+)
+SELECT project_id::text AS project_id, count(*)::int AS count FROM stale GROUP BY project_id
+`.trim();
+
+/** Positional parameters of INSERT_STAGING_ITEM_SQL ($1..$15). */
+function itemParams(sessionId: string, p: InsertStagingItemParams): unknown[] {
+  return [
+    sessionId, // $1
+    p.op, // $2
+    p.type, // $3
+    p.title, // $4
+    p.summary, // $5
+    p.body, // $6
+    JSON.stringify(p.fields), // $7 — explicit serialization before ::jsonb cast
+    p.contentHash, // $8
+    p.targetMemoryId, // $9
+    p.targetRevision, // $10
+    p.judgeState, // $11
+    p.authorIdentity, // $12
+    p.judgeCriterion, // $13
+    p.mandatoryReview, // $14
+    p.judgeReason, // $15
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // pg-backed implementation
 // ---------------------------------------------------------------------------
 
-export class PgStagingRepository implements StagingRepository {
+export class PgStagingRepository implements StagingRepository, WebSessionReaperRepository {
   constructor(private readonly pool: pg.Pool) {}
+
+  /** C5 SEC-M1: see REAP_STALE_WEB_SESSIONS_SQL. Sessions reaped per project. */
+  async reapStaleWebSessions(
+    maxAgeMinutes: number,
+  ): Promise<Array<{ projectId: string; count: number }>> {
+    const { rows } = await this.pool.query<{ project_id: string; count: number }>(
+      REAP_STALE_WEB_SESSIONS_SQL,
+      [maxAgeMinutes],
+    );
+    return rows.map((r) => ({ projectId: r.project_id, count: r.count }));
+  }
 
   /**
    * Lazy upsert of the open session for the tenant key (Decision 3).
@@ -238,10 +327,13 @@ export class PgStagingRepository implements StagingRepository {
     const newId = ulid();
 
     // 1) Attempt create
-    const insertResult = await this.pool.query<RawSessionIdRow>(
-      FIND_OR_CREATE_SESSION_SQL,
-      [newId, projectId, repoId, branch, openedBy],
-    );
+    const insertResult = await this.pool.query<RawSessionIdRow>(FIND_OR_CREATE_SESSION_SQL, [
+      newId,
+      projectId,
+      repoId,
+      branch,
+      openedBy,
+    ]);
 
     let sessionId: string;
     if (insertResult.rows.length > 0) {
@@ -249,10 +341,11 @@ export class PgStagingRepository implements StagingRepository {
       sessionId = (insertResult.rows[0] as RawSessionIdRow).id;
     } else {
       // 2) Conflict: re-select the existing open session
-      const selectResult = await this.pool.query<RawSessionIdRow>(
-        SELECT_OPEN_SESSION_SQL,
-        [projectId, repoId, branch],
-      );
+      const selectResult = await this.pool.query<RawSessionIdRow>(SELECT_OPEN_SESSION_SQL, [
+        projectId,
+        repoId,
+        branch,
+      ]);
       // L3: guard against a race where the conflicted session was promoted/abandoned
       // between the INSERT and this SELECT, leaving rows[0] undefined.
       if (selectResult.rows[0] === undefined) {
@@ -276,23 +369,10 @@ export class PgStagingRepository implements StagingRepository {
     sessionId: string,
     p: InsertStagingItemParams,
   ): Promise<{ id: string; judgeState: StagingItemRow['judge_state']; deduped: boolean }> {
-    const insertResult = await this.pool.query<RawItemInsertRow>(INSERT_STAGING_ITEM_SQL, [
-      sessionId,           // $1
-      p.op,                // $2
-      p.type,              // $3
-      p.title,             // $4
-      p.summary,           // $5
-      p.body,              // $6
-      JSON.stringify(p.fields), // $7 — explicit serialization before ::jsonb cast
-      p.contentHash,       // $8
-      p.targetMemoryId,    // $9
-      p.targetRevision,    // $10
-      p.judgeState,        // $11
-      p.authorIdentity,    // $12
-      p.judgeCriterion,    // $13
-      p.mandatoryReview,   // $14
-      p.judgeReason,       // $15
-    ]);
+    const insertResult = await this.pool.query<RawItemInsertRow>(
+      INSERT_STAGING_ITEM_SQL,
+      itemParams(sessionId, p),
+    );
 
     if (insertResult.rows.length > 0) {
       const row = insertResult.rows[0] as RawItemInsertRow;
@@ -304,10 +384,10 @@ export class PgStagingRepository implements StagingRepository {
     }
 
     // Dedup: re-select the pre-existing item
-    const selectResult = await this.pool.query<RawItemInsertRow>(
-      SELECT_STAGING_ITEM_BY_HASH_SQL,
-      [sessionId, p.contentHash],
-    );
+    const selectResult = await this.pool.query<RawItemInsertRow>(SELECT_STAGING_ITEM_BY_HASH_SQL, [
+      sessionId,
+      p.contentHash,
+    ]);
     const row = selectResult.rows[0] as RawItemInsertRow;
     return {
       id: row.id,
@@ -361,5 +441,50 @@ export class PgStagingRepository implements StagingRepository {
       branch,
     ]);
     return (result.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * C5: session + item in one transaction, so a session never exists without
+   * its item. A repo outside the project → ROLLBACK + NOT_FOUND.
+   */
+  async createSingleItemSession(
+    i: SingleItemSessionInput,
+  ): Promise<{ sessionId: string; itemId: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const session = await client.query(INSERT_SINGLE_ITEM_SESSION_SQL, [
+        i.sessionId,
+        i.projectId,
+        i.repoId,
+        i.branch,
+        i.openedBy,
+      ]);
+      if ((session.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        throw new AppError(ErrorCode.NOT_FOUND);
+      }
+      const item = await client.query<RawItemInsertRow>(
+        INSERT_STAGING_ITEM_SQL,
+        itemParams(i.sessionId, i.item),
+      );
+      const row = item.rows[0];
+      if (!row) {
+        // A fresh session cannot dedup: defensive.
+        await client.query('ROLLBACK');
+        throw new AppError(ErrorCode.INTERNAL);
+      }
+      await client.query('COMMIT');
+      return { sessionId: i.sessionId, itemId: row.id };
+    } catch (err) {
+      if (!(err instanceof AppError)) {
+        // Same as PgPromotionRepository.safeRollback: the connection may already be
+        // aborted; the original error is rethrown below.
+        await client.query('ROLLBACK').catch(() => undefined);
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 }

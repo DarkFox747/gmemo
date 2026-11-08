@@ -33,6 +33,19 @@
  * for one item of a session and finalizes that session; it does not audit — the
  * caller audits as its own actor. The actor never enters the pipeline.
  *
+ * Human-approved mode (C5, project_admin direct writes ONLY): promoteItem with
+ * opts.humanApproved replaces review queueing (R5–R7) with apply — provenance
+ * 'web_ui', approved_by = the approver, no mandatory-type block (the type-change
+ * guard stays) — and turns a stale apply into { outcome: 'conflict' } (session
+ * left open for the caller to abandon). A judge or context that failed closed is
+ * never approved: { outcome: 'unavailable' }, nothing written, session left open
+ * (SEC-M2). Sanitize quarantine (S1–S3), PII mask,
+ * judge rejections (R2–R4) and apply-time duplicates (A3) are unchanged.
+ * promote() never enables it.
+ *
+ * Evaluation (sanitize → judge → route) is the shared, write-free
+ * evaluateCandidate; masked content is persisted after it, before any state write.
+ *
  * Logging: item ids and category names only — never content or judge text.
  */
 
@@ -42,16 +55,18 @@ import type {
   PromotionItemRow,
   ApplyContext,
 } from '../db/promotionRepository.js';
-import type { Judge, JudgeContextItem, JudgeResult } from '../judge/judge.js';
-import { failClosed, normalizeJudgeResult } from '../judge/judge.js';
+import { NO_MANDATORY_TYPES } from '../db/promotionRepository.js';
+import type { Judge } from '../judge/judge.js';
+import { isEvaluationUnavailable } from '../judge/judge.js';
 import type { Embedder } from '../embedder/embedder.js';
 import { embedItemFailSoft } from '../embedder/embedder.js';
 import type { Notifier } from '../notify/notifier.js';
 import { safeNotify } from '../notify/notifier.js';
 import { computeContentHash } from '../security/hash.js';
-import { sanitizeItem, mergeFlags } from './sanitize.js';
-import { routeDecision, STALE_TARGET_DECISION } from './routing.js';
+import { mergeFlags } from './sanitize.js';
+import { STALE_TARGET_DECISION } from './routing.js';
 import type { RoutingConfig, RoutingDecision } from './routing.js';
+import { evaluateCandidate } from './evaluate.js';
 import { logger } from '../observability/logger.js';
 import { AppError, ErrorCode } from '../errors/appError.js';
 
@@ -81,7 +96,28 @@ export type ItemResult =
   | { outcome: 'applied'; memoryId: string | null; deduped: boolean } // null only on 'already'
   | { outcome: 'queued'; itemId: string }
   | { outcome: 'quarantined'; itemId: string; quarantineId: string | null }
-  | { outcome: 'skipped'; itemId: string };
+  | { outcome: 'skipped'; itemId: string }
+  /**
+   * humanApproved ONLY: the target moved between the caller's check and apply.
+   * Nothing written; the session is left open for the caller to abandon.
+   */
+  | { outcome: 'conflict'; itemId: string; code: 'target_changed' }
+  /**
+   * humanApproved ONLY (SEC-M2): the judge or its context failed closed, so
+   * there is no evaluation to approve. Nothing written; the session is left
+   * open for the caller to abandon.
+   */
+  | { outcome: 'unavailable'; itemId: string };
+
+/** The project_admin who confirmed a direct web write: app_user.id (AdminActor.userId). */
+export interface HumanApproval {
+  approverUserId: string;
+}
+
+export interface PromoteItemOptions {
+  /** C5 direct management only (never MCP, /promote or restore). */
+  humanApproved?: HumanApproval;
+}
 
 /** Origin metadata for a single-item run (restore): tenant + provenance. */
 export interface ItemOrigin {
@@ -112,10 +148,15 @@ export function terminalStatus(c: {
 export interface PromoteServiceLike {
   promote(sessionId: string, meta: PromoteMeta): Promise<PromoteOutcome>;
   /**
-   * Runs sanitize → judge → route → apply for ONE item and finalizes its session.
-   * No audit: the caller audits as its own actor.
+   * Runs sanitize → judge → route → apply for ONE item and finalizes its session
+   * (except on 'conflict', humanApproved only). No audit: the caller audits as its own actor.
    */
-  promoteItem(sessionId: string, itemId: string, origin: ItemOrigin): Promise<ItemResult>;
+  promoteItem(
+    sessionId: string,
+    itemId: string,
+    origin: ItemOrigin,
+    opts?: PromoteItemOptions,
+  ): Promise<ItemResult>;
 }
 
 export class PromoteService implements PromoteServiceLike {
@@ -148,6 +189,8 @@ export class PromoteService implements PromoteServiceLike {
       originBranch: meta.originBranch,
       originPr: meta.originPr,
       sessionId,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     let applied = 0;
@@ -160,7 +203,7 @@ export class PromoteService implements PromoteServiceLike {
     for (const item of items) {
       let r: ItemResult;
       try {
-        r = await this.processItem(item, ctx);
+        r = await this.processItem(item, ctx, false);
       } catch (err) {
         // The item stays promotable for a re-run; it is not counted. Id + error
         // name only — an error message may echo content.
@@ -201,10 +244,18 @@ export class PromoteService implements PromoteServiceLike {
     return { status, applied, deduped, quarantined, uncertain };
   }
 
-  async promoteItem(sessionId: string, itemId: string, origin: ItemOrigin): Promise<ItemResult> {
+  async promoteItem(
+    sessionId: string,
+    itemId: string,
+    origin: ItemOrigin,
+    opts: PromoteItemOptions = {},
+  ): Promise<ItemResult> {
     const { promotionRepository } = this.deps;
     // projectId re-asserts tenant ownership in the fetch JOIN.
-    const items = await promotionRepository.fetchPromotableItems(sessionId, origin.tenant.projectId);
+    const items = await promotionRepository.fetchPromotableItems(
+      sessionId,
+      origin.tenant.projectId,
+    );
     const item = items.find((i) => i.id === itemId);
     if (!item) {
       // Only reachable through a concurrent abandon/resolution of the session.
@@ -218,8 +269,12 @@ export class PromoteService implements PromoteServiceLike {
       originBranch: origin.originBranch,
       originPr: origin.originPr,
       sessionId,
+      provenance: opts.humanApproved ? 'web_ui' : 'pr_reviewed',
+      approvedBy: opts.humanApproved?.approverUserId ?? null,
     };
-    const r = await this.processItem(item, ctx);
+    const r = await this.processItem(item, ctx, opts.humanApproved !== undefined);
+    // A conflict or an unavailable evaluation leaves the session open: the (only) caller abandons it.
+    if (r.outcome === 'conflict' || r.outcome === 'unavailable') return r;
     await promotionRepository.finalizeSession(
       sessionId,
       terminalStatus({
@@ -231,7 +286,11 @@ export class PromoteService implements PromoteServiceLike {
     return r;
   }
 
-  private async processItem(fetched: PromotionItemRow, ctx: ApplyContext): Promise<ItemResult> {
+  private async processItem(
+    fetched: PromotionItemRow,
+    ctx: ApplyContext,
+    humanApproved: boolean,
+  ): Promise<ItemResult> {
     const { promotionRepository: repo, notifier } = this.deps;
 
     // Already quarantined on a prior run — never quarantine twice.
@@ -240,55 +299,76 @@ export class PromoteService implements PromoteServiceLike {
     // Already in the review queue: suppresses duplicate writes/notifications on re-runs.
     const wasQueued = fetched.judge_state === 'uncertain' || fetched.mandatory_review;
 
-    // --- Sanitize stage (S1–S4) ---
-    const s = sanitizeItem(fetched);
-    const flags = mergeFlags(fetched.sanitize_flags, s.flags);
+    // --- Evaluation: sanitize (S1–S4) → judge → route (no writes) ---
+    const ev = await evaluateCandidate(
+      fetched,
+      { contextSource: repo, judge: this.deps.judge, routing: this.deps.routing },
+      {
+        projectId: ctx.projectId,
+        persisted: fetched.judge_state === 'pending' ? null : fromPersisted(fetched),
+        logId: fetched.id,
+      },
+    );
+    const flags = mergeFlags(fetched.sanitize_flags, ev.sanitize.flags);
 
-    if (s.block) {
-      if (s.block.reason === 'sanitize_failed') {
+    if (ev.kind === 'blocked') {
+      const { block, masked } = ev.sanitize;
+      if (block.reason === 'sanitize_failed') {
         logger.warn('[promote] sanitize failed — quarantining (fail-closed)', {
           itemId: fetched.id,
         });
       }
       // S3 snapshot is PII-masked; S1/S2 are redacted by the repository.
-      const snapshot = s.masked ? { ...fetched, ...s.masked } : fetched;
+      const snapshot = masked ? { ...fetched, ...masked } : fetched;
       const quarantineId = await repo.quarantineItem(snapshot, ctx, {
-        reason: s.block.reason,
-        redact: s.block.redact,
+        reason: block.reason,
+        redact: block.redact,
         decision: null,
         sanitizeFlags: flags,
       });
-      if (s.block.leak) {
+      if (block.leak) {
         await safeNotify(notifier, ctx.projectId, {
           type: 'leak_detected',
           itemId: fetched.id,
-          categories: s.block.categories,
+          categories: block.categories,
         });
       }
       return { outcome: 'quarantined', itemId: fetched.id, quarantineId };
     }
 
+    // SEC-M2: a human approves an evaluation, never its absence. When the judge
+    // or its context failed closed, nothing is written (not even the masked
+    // content) and the caller refuses the confirm.
+    if (humanApproved && isEvaluationUnavailable(ev.decision)) {
+      logger.warn('[promote] human-approved item not applied: evaluation unavailable', {
+        itemId: fetched.id,
+        reason: ev.decision.reason,
+      });
+      return { outcome: 'unavailable', itemId: fetched.id };
+    }
+
     let item: PromotionItemRow = fetched;
-    if (s.masked) {
-      // S4: persist masked content + recomputed hash before the judge sees it.
+    const masked = ev.sanitize.masked;
+    if (masked) {
+      // S4: persist masked content + recomputed hash before any state write.
       const contentHash = computeContentHash({
         op: fetched.op,
         type: fetched.type,
-        title: s.masked.title,
-        summary: s.masked.summary,
-        body: s.masked.body,
-        fields: s.masked.fields,
+        title: masked.title,
+        summary: masked.summary,
+        body: masked.body,
+        fields: masked.fields,
         target: fetched.target_memory_id,
       });
-      const masked: PromotionItemRow = {
+      const maskedItem: PromotionItemRow = {
         ...fetched,
-        ...s.masked,
+        ...masked,
         content_hash: contentHash,
         sanitize_flags: flags,
       };
-      const res = await repo.persistMasked(fetched.id, s.masked, contentHash, flags);
+      const res = await repo.persistMasked(fetched.id, masked, contentHash, flags);
       if (res === 'hash_conflict') {
-        const quarantineId = await repo.quarantineItem(masked, ctx, {
+        const quarantineId = await repo.quarantineItem(maskedItem, ctx, {
           reason: 'duplicate_content',
           redact: 'none',
           decision: null,
@@ -296,14 +376,23 @@ export class PromoteService implements PromoteServiceLike {
         });
         return { outcome: 'quarantined', itemId: fetched.id, quarantineId };
       }
-      item = masked;
+      item = maskedItem;
     }
 
-    // --- Decision stage ---
-    const decision: RoutingDecision =
-      item.judge_state === 'pending' ? await this.judgeItem(item, ctx) : fromPersisted(item);
-
-    const route = routeDecision(decision, item, this.deps.routing);
+    let route = ev.route;
+    // Human approval (C5): the project_admin's confirm IS the review, so R5–R7
+    // apply. Nothing is recorded first: a 'pending' item is never in the review
+    // queue predicate, so a crash can never surface a direct write there.
+    // R1 (stale_target) and a rejected verdict outside the table (both impossible
+    // for a freshly judged item) are never overridden: they stay queued.
+    const humanApply =
+      humanApproved &&
+      route.kind === 'queue' &&
+      route.persist.criterion !== 'stale_target' &&
+      ev.decision.verdict !== 'rejected';
+    if (humanApply) {
+      route = { kind: 'apply', persist: { ...route.persist, mandatoryReview: false } };
+    }
 
     switch (route.kind) {
       case 'quarantine': {
@@ -338,14 +427,15 @@ export class PromoteService implements PromoteServiceLike {
 
       case 'apply': {
         // Persist a fresh decision before apply, so a crash re-uses it on re-run.
-        if (item.judge_state === 'pending') {
+        if (item.judge_state === 'pending' && !humanApply) {
           await repo.recordDecision(item.id, route.persist, flags);
         }
         const r = await repo.applyAccepted(
           item,
           ctx,
           await embedItemFailSoft(this.deps.embedder, item),
-          this.deps.routing.mandatoryReviewTypes,
+          // A mandatory target type is exactly what the human approval covers.
+          humanApproved ? NO_MANDATORY_TYPES : this.deps.routing.mandatoryReviewTypes,
         );
         switch (r.status) {
           case 'applied':
@@ -353,6 +443,13 @@ export class PromoteService implements PromoteServiceLike {
           case 'already':
             return { outcome: 'applied', memoryId: null, deduped: false };
           case 'review_required':
+            if (humanApproved) {
+              // Only a type change can reach this (the caller refuses it first).
+              logger.warn('[promote] human-approved apply refused by the type guard', {
+                itemId: item.id,
+              });
+              return { outcome: 'conflict', itemId: item.id, code: 'target_changed' };
+            }
             // SEC M-1: the target's type differs or is mandatory → human review.
             await repo.recordDecision(item.id, { ...route.persist, mandatoryReview: true }, flags);
             await safeNotify(notifier, ctx.projectId, {
@@ -363,6 +460,10 @@ export class PromoteService implements PromoteServiceLike {
             });
             return { outcome: 'queued', itemId: item.id };
           case 'stale':
+            // Human approval: the target moved after the caller's check → 409, nothing written.
+            if (humanApproved) {
+              return { outcome: 'conflict', itemId: item.id, code: 'target_changed' };
+            }
             // HU-11.3: stale target → human review queue, never quarantine.
             await repo.recordDecision(
               item.id,
@@ -388,50 +489,6 @@ export class PromoteService implements PromoteServiceLike {
         }
       }
     }
-  }
-
-  /**
-   * Judges a pending item against its context. Never throws and never returns an
-   * unvalidated result: context failure / judge failure → failClosed (queued).
-   */
-  private async judgeItem(item: PromotionItemRow, ctx: ApplyContext): Promise<JudgeResult> {
-    let context: JudgeContextItem[];
-    try {
-      context = await this.deps.promotionRepository.findJudgeContext(
-        ctx.projectId,
-        { title: item.title, summary: item.summary },
-        item.target_memory_id,
-      );
-    } catch (err) {
-      logger.warn('[promote] judge context unavailable — failing closed to review', {
-        itemId: item.id,
-        errorName: errorName(err),
-      });
-      return failClosed('judge_context_unavailable');
-    }
-
-    let result: JudgeResult;
-    try {
-      result = await this.deps.judge.evaluate(
-        {
-          op: item.op,
-          type: item.type,
-          title: item.title,
-          summary: item.summary,
-          body: item.body,
-          fields: item.fields,
-        },
-        context,
-      );
-    } catch (err) {
-      logger.warn('[promote] judge failed — failing closed to review', {
-        itemId: item.id,
-        errorName: errorName(err),
-      });
-      return failClosed('judge_unavailable');
-    }
-
-    return normalizeJudgeResult(result, context, { itemId: item.id });
   }
 }
 

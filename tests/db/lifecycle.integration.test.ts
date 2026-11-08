@@ -1,9 +1,10 @@
 /**
  * PgLifecycleRepository integration tests (C4, HU-12.1–12.4, HU-11.4).
  *
- * SKIPPED when DATABASE_URL is unset. Covers list, confirm, retire, retire-by-PR
+ * SKIPPED when DATABASE_URL is unset. Covers confirm, retire, retire-by-PR
  * (project predicate) and the sweep against real PG row locks. The sweep is
  * project-agnostic, so assertions only look at this suite's own projects.
+ * The list moved to MemoryAdminRepository (C5, memoryAdmin.integration.test.ts).
  */
 
 import pg from 'pg';
@@ -134,36 +135,6 @@ describeWithDb('PgLifecycleRepository integration', () => {
 
     const second = await repo.sweepExpired();
     expect(second.find((r) => r.projectId === P || r.projectId === Q)).toBeUndefined();
-  });
-
-  // ---------------------------------------------------------------------------
-  // List
-  // ---------------------------------------------------------------------------
-
-  it('list returns only the project pending rows, ordered by deadline then id, with truncation', async () => {
-    await pool.query(`DELETE FROM memory WHERE project_id = $1`, [P]);
-    const late = await seed({ status: 'pending_revalidation', due: '-1 day' });
-    const early = await seed({ status: 'pending_revalidation', due: '-10 days' });
-    const none = await seed({ status: 'pending_revalidation', due: null });
-    await seed({ status: 'active' });
-    await seed({ project: Q, status: 'pending_revalidation' });
-
-    const all = await repo.listMemories(P, { status: 'pending_revalidation', limit: 10 });
-    expect(all.truncated).toBe(false);
-    expect(all.rows.map((r) => r.id)).toEqual([early, late, none]);
-    expect(all.rows[0]).toMatchObject({
-      status: 'pending_revalidation',
-      type: 'gotcha',
-      current_revision: 1,
-      origin_branch: null,
-      origin_pr: null,
-    });
-    expect(all.rows[0]!.revalidate_at).toBeInstanceOf(Date);
-    expect(all.rows[0]!.updated_at).toBeInstanceOf(Date);
-
-    const page = await repo.listMemories(P, { status: 'pending_revalidation', limit: 2 });
-    expect(page.truncated).toBe(true);
-    expect(page.rows.map((r) => r.id)).toEqual([early, late]);
   });
 
   // ---------------------------------------------------------------------------

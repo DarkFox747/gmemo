@@ -56,6 +56,15 @@ describe('PromoteService.promote — accepted verdict → apply', () => {
     expect(repo.decisionCalls).toHaveLength(1);
     expect(repo.decisionCalls[0]!.d.verdict).toBe('accepted');
     expect(judge.evaluateCalls).toHaveLength(1);
+    // C5: promotion is always automatic — pr_reviewed, no approver.
+    expect(repo.applyAcceptedCalls[0]!.ctx).toMatchObject({ provenance: 'pr_reviewed', approvedBy: null });
+  });
+
+  it('a mandatory accepted item is queued and applyAccepted is never reached (no human mode)', async () => {
+    const { service, repo } = makeService([makeItem('m1', { type: 'decision' })]);
+    const outcome = await service.promote(SESSION_ID, META);
+    expect(outcome.uncertain).toBe(1);
+    expect(repo.applyAcceptedCalls).toHaveLength(0);
   });
 
   it('increments deduped when applyAccepted returns deduped=true', async () => {

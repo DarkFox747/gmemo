@@ -31,6 +31,8 @@ describe('PromoteService.promoteItem', () => {
       originBranch: 'restore/q-1',
       originPr: 42,
       sessionId: SESSION_ID,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     });
   });
 

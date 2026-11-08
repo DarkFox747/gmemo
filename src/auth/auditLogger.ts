@@ -31,6 +31,8 @@ const API_UPDATE_ACTIONS: ReadonlySet<ApiAction> = new Set([
   'memory.confirm',
   'memory.retire',
   'memory.retire_by_pr',
+  'memory.create',
+  'memory.amend',
 ]);
 
 /**
@@ -54,6 +56,7 @@ const API_DETAIL_KEYS: ReadonlyArray<keyof ApiAuditDetail> = [
   'newQuarantineId',
   'status',
   'originPr',
+  'previewOutcome',
 ];
 
 export class RdsAuditLogger implements AuditLogger {
@@ -171,6 +174,7 @@ export class RdsAuditLogger implements AuditLogger {
    * action: 'update' for approve/reject/restore, 'read' otherwise. project_id is null
    * for project-less routes (me.read). detail carries the ApiAction, the
    * app_user.id and allow-listed ids/counters only — never content.
+   * detail.queryHash (already a hash) goes to the query_hash column, not to detail.
    */
   async recordApi(
     actor: ActorIdentity,
@@ -191,6 +195,7 @@ export class RdsAuditLogger implements AuditLogger {
       action: API_UPDATE_ACTIONS.has(action) ? 'update' : 'read',
       projectId: project?.projectId ?? null,
       memoryId: detail?.memoryId,
+      queryHash: detail?.queryHash,
       detail: { ...safeDetail, api: action, userId: actor.userId },
     });
   }

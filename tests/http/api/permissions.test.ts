@@ -177,3 +177,82 @@ describe('memory lifecycle opacity matrix (C4)', () => {
     expect(res.text).toBe(NOT_FOUND_BODY);
   });
 });
+
+// ---------------------------------------------------------------------------
+// C5 direct memory management (HU-13.5): the same matrix on all 5 routes.
+// ---------------------------------------------------------------------------
+
+const VALID_UNIT = {
+  type: 'gotcha',
+  title: 'Pool exhaustion',
+  summary: 'pg pool starves under burst.',
+  body: 'Raise PGPOOL_MAX in src/db/pool.ts.',
+  fields: {},
+};
+
+const DIRECT_ROUTES: Route[] = [
+  {
+    name: 'direct list',
+    call: (app, p) => request(app).get(`/api/v1/projects/${p}/memories?status=active`),
+  },
+  {
+    name: 'direct detail',
+    call: (app, p) => request(app).get(`/api/v1/projects/${p}/memories/${MEMORY_ID}`),
+  },
+  {
+    name: 'direct preview',
+    call: (app, p) =>
+      request(app).post(`/api/v1/projects/${p}/memories/preview`).send({ op: 'add', ...VALID_UNIT }),
+  },
+  {
+    name: 'direct create',
+    call: (app, p) =>
+      request(app).post(`/api/v1/projects/${p}/memories`).send({ ...VALID_UNIT, confirm: true }),
+  },
+  {
+    name: 'direct amend',
+    call: (app, p) =>
+      request(app)
+        .put(`/api/v1/projects/${p}/memories/${MEMORY_ID}`)
+        .send({ ...VALID_UNIT, expectedRevision: 1, confirm: true }),
+  },
+];
+
+describe('direct memory management opacity matrix (C5, HU-13.5)', () => {
+  for (const route of DIRECT_ROUTES) {
+    for (const d of DENIED) {
+      it(`${route.name}: ${d.who} → identical 404, no audit, no service call`, async () => {
+        const kit = makeApiTestApp();
+        const res = await route.call(kit.app, d.project).set('Authorization', bearer(d.user));
+        expect(res.status).toBe(404);
+        expect(res.text).toBe(NOT_FOUND_BODY);
+        expect(kit.authRepo.accessLogEntries).toHaveLength(0);
+        expect(kit.direct.adminRepo.calls).toHaveLength(0);
+        expect(kit.direct.staging.calls).toHaveLength(0);
+        expect(kit.direct.promote.calls).toHaveLength(0);
+        expect(kit.direct.judge.evaluateCalls).toHaveLength(0);
+      });
+    }
+  }
+
+  it('contributor with an invalid create body gets 404, not 400', async () => {
+    const kit = makeApiTestApp();
+    const res = await request(kit.app)
+      .post(`/api/v1/projects/${PROJECT_A}/memories`)
+      .set('Authorization', bearer(USERS.contributorA))
+      .send({ title: '', confirm: false, author_identity: 'x' });
+    expect(res.status).toBe(404);
+    expect(res.text).toBe(NOT_FOUND_BODY);
+  });
+
+  it('viewer with a form-encoded amend gets 404, not 400', async () => {
+    const kit = makeApiTestApp();
+    const res = await request(kit.app)
+      .put(`/api/v1/projects/${PROJECT_A}/memories/${MEMORY_ID}`)
+      .set('Authorization', bearer(USERS.viewerA))
+      .type('form')
+      .send('confirm=true');
+    expect(res.status).toBe(404);
+    expect(res.text).toBe(NOT_FOUND_BODY);
+  });
+});

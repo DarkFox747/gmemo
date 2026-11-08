@@ -179,6 +179,13 @@ export class QuarantineService implements QuarantineServiceLike {
           },
         };
       }
+      case 'conflict':
+        // Human-approved mode only (C5): restore never passes the option.
+        logger.error('[quarantine] restore produced a human-approval conflict', {
+          quarantineId: id,
+          itemId: claim.itemId,
+        });
+        throw new AppError(ErrorCode.INTERNAL);
       default:
         // 'skipped' is impossible for a freshly claimed pending item.
         logger.error('[quarantine] restore produced an unexpected outcome', {

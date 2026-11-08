@@ -262,6 +262,80 @@ async function main(): Promise<void> {
     if (typeof body.truncated !== 'boolean') fail('memories response has no truncated flag');
   });
 
+  // C5 (HU-13): direct memory management as the tech lead. The unit is unique per
+  // run (runId) so the smoke can run repeatedly against the same stack.
+  const directUnit = {
+    type: 'gotcha',
+    title: `Smoke direct gotcha ${runId}`,
+    summary: `Direct web write from the smoke test, run ${runId}.`,
+    body: `Set SMOKE_RETRY_MAX=3 in scripts/smoke.ts; marker direct${runId}.`,
+    fields: { symptom: 'flaky smoke' },
+  };
+  const memoriesPath = `/api/v1/projects/${DEMO_PROJECT_ID}/memories`;
+  const jsonAs = (user: string) => ({ 'Content-Type': 'application/json', 'X-Dev-User': user });
+  let directMemoryId = '';
+
+  await step('api memory preview as tech lead', async () => {
+    const res = await request(`${memoriesPath}/preview`, {
+      method: 'POST',
+      headers: jsonAs(DEMO_TL),
+      body: JSON.stringify({ op: 'add', ...directUnit }),
+    });
+    if (res.status !== 200) fail(`HTTP ${res.status} from memories/preview`);
+    const body = (await res.json()) as { outcome?: unknown; judge?: { verdict?: unknown } | null };
+    if (body.outcome !== 'apply') fail(`outcome is ${String(body.outcome)}, expected apply`);
+    if (typeof body.judge?.verdict !== 'string') fail('preview has no judge verdict');
+  });
+
+  await step('api memory create as tech lead (web_ui, version 1)', async () => {
+    const res = await request(memoriesPath, {
+      method: 'POST',
+      headers: jsonAs(DEMO_TL),
+      body: JSON.stringify({ ...directUnit, confirm: true }),
+    });
+    if (res.status !== 200) fail(`HTTP ${res.status} from POST memories`);
+    const body = (await res.json()) as {
+      outcome?: unknown;
+      memory?: { id?: string; provenance?: unknown; version?: unknown };
+    };
+    if (body.outcome !== 'applied') fail(`outcome is ${String(body.outcome)}, expected applied`);
+    if (body.memory?.provenance !== 'web_ui') fail(`provenance is ${String(body.memory?.provenance)}`);
+    if (body.memory?.version !== 1) fail(`version is ${String(body.memory?.version)}, expected 1`);
+    directMemoryId = body.memory.id ?? '';
+  });
+
+  await step('api memory detail shows one revision', async () => {
+    const res = await request(`${memoriesPath}/${directMemoryId}`, {
+      method: 'GET',
+      headers: { 'X-Dev-User': DEMO_TL },
+    });
+    if (res.status !== 200) fail(`HTTP ${res.status} from memory detail`);
+    const body = (await res.json()) as { revisions?: unknown[] };
+    if (body.revisions?.length !== 1) fail(`revisions: ${String(body.revisions?.length)}, expected 1`);
+  });
+
+  await step('api memories search finds the direct write', async () => {
+    const res = await request(`${memoriesPath}?q=${encodeURIComponent(`direct${runId}`)}`, {
+      method: 'GET',
+      headers: { 'X-Dev-User': DEMO_TL },
+    });
+    if (res.status !== 200) fail(`HTTP ${res.status} from memories search`);
+    const body = (await res.json()) as { items?: Array<{ id?: string }>; nextCursor?: unknown };
+    if (!body.items?.some((i) => i.id === directMemoryId)) fail('search does not return the memory');
+    if (body.nextCursor !== null) fail('nextCursor should be null for a single hit');
+  });
+
+  await step('api memory create as viewer is opaque 404', async () => {
+    const res = await request(memoriesPath, {
+      method: 'POST',
+      headers: jsonAs(DEMO_VIEWER),
+      body: JSON.stringify({ ...directUnit, title: `Viewer ${runId}`, confirm: true }),
+    });
+    if (res.status !== 404) fail(`HTTP ${res.status}, expected 404`);
+    const text = await res.text();
+    if (text !== '{"error":"Not found"}') fail(`body is ${text}, expected {"error":"Not found"}`);
+  });
+
   await step('job revalidation-sweep (dev open mode)', async () => {
     const res = await request('/internal/jobs/revalidation-sweep', { method: 'POST' });
     if (res.status !== 200) fail(`HTTP ${res.status} from /internal/jobs/revalidation-sweep`);

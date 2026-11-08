@@ -1,6 +1,8 @@
 /**
  * Memory lifecycle routes (C4, HU-12.2, HU-12.3, HU-11.4) over the real
  * LifecycleService + FakeLifecycleRepository, real RBAC and real audit logger.
+ * The list (C5 contract: default active, page 20, nextCursor, q) is served by
+ * the real DirectMemoryService over FakeMemoryAdminRepository.
  *
  *   GET  /api/v1/projects/:projectId/memories
  *   POST /api/v1/projects/:projectId/memories/:memoryId/confirm
@@ -12,6 +14,8 @@ import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { PROJECT_A, PROJECT_B, USERS, bearer, makeApiTestApp } from './helpers.js';
 import { makeMemory } from '../../lifecycle/fakes.js';
+import { makeAdminMemory } from '../../memory/directFakes.js';
+import { sha256Hex } from '../../../src/security/hash.js';
 import { logger } from '../../../src/observability/logger.js';
 
 const BASE = `/api/v1/projects/${PROJECT_A}/memories`;
@@ -21,18 +25,15 @@ const DAY_MS = 86_400_000;
 const admin = bearer(USERS.adminA);
 
 describe('GET /memories', () => {
-  it('lists pending memories of the project (default status) and audits memories.list', async () => {
+  it('defaults to active, newest-updated first, and audits memories.list', async () => {
     const kit = makeApiTestApp();
-    const due = new Date(Date.now() - DAY_MS);
-    const pending = makeMemory({
-      projectId: PROJECT_A,
-      status: 'pending_revalidation',
-      revalidateAt: due,
-    });
-    kit.lifecycleRepo.memories.push(
-      pending,
-      makeMemory({ projectId: PROJECT_A, status: 'active' }),
-      makeMemory({ projectId: PROJECT_B, status: 'pending_revalidation' }),
+    const older = makeAdminMemory({ projectId: PROJECT_A });
+    const newer = makeAdminMemory({ projectId: PROJECT_A, provenance: 'web_ui' });
+    kit.direct.adminRepo.memories.push(
+      older,
+      newer,
+      makeAdminMemory({ projectId: PROJECT_A, status: 'pending_revalidation' }),
+      makeAdminMemory({ projectId: PROJECT_B }),
     );
 
     const res = await request(kit.app).get(BASE).set('Authorization', admin);
@@ -41,45 +42,103 @@ describe('GET /memories', () => {
     expect(res.body).toEqual({
       items: [
         expect.objectContaining({
-          id: pending.id,
-          status: 'pending_revalidation',
+          id: newer.id,
+          status: 'active',
           version: 1,
-          revalidateAt: due.toISOString(),
+          provenance: 'web_ui',
         }),
+        expect.objectContaining({ id: older.id }),
       ],
+      nextCursor: null,
       truncated: false,
     });
     expect(kit.authRepo.accessLogEntries).toHaveLength(1);
     expect(kit.authRepo.accessLogEntries[0]).toMatchObject({
       action: 'read',
       projectId: PROJECT_A,
-      detail: { api: 'memories.list', status: 'pending_revalidation', resultCount: 1 },
+      detail: { api: 'memories.list', status: 'active', resultCount: 2 },
     });
+    expect(kit.authRepo.accessLogEntries[0]!.queryHash).toBeUndefined();
   });
 
-  it('honours limit and reports truncation', async () => {
+  it('status=pending_revalidation returns the pending tab', async () => {
     const kit = makeApiTestApp();
-    for (let i = 0; i < 3; i++) {
-      kit.lifecycleRepo.memories.push(
-        makeMemory({ projectId: PROJECT_A, status: 'pending_revalidation' }),
-      );
-    }
-    const res = await request(kit.app).get(`${BASE}?limit=2`).set('Authorization', admin);
+    const a = makeAdminMemory({ projectId: PROJECT_A, status: 'pending_revalidation' });
+    const b = makeAdminMemory({ projectId: PROJECT_A, status: 'pending_revalidation' });
+    kit.direct.adminRepo.memories.push(a, b, makeAdminMemory({ projectId: PROJECT_A }));
+    const res = await request(kit.app)
+      .get(`${BASE}?status=pending_revalidation`)
+      .set('Authorization', admin);
     expect(res.status).toBe(200);
-    expect(res.body.items).toHaveLength(2);
-    expect(res.body.truncated).toBe(true);
+    expect(res.body.items.map((i: { id: string }) => i.id).sort()).toEqual([a.id, b.id].sort());
   });
 
-  it.each(['status=active', 'status=bogus', 'limit=0', 'limit=201', 'unknown=1'])(
-    'rejects ?%s with 400 and no audit',
-    async (qs) => {
-      const kit = makeApiTestApp();
-      const res = await request(kit.app).get(`${BASE}?${qs}`).set('Authorization', admin);
-      expect(res.status).toBe(400);
-      expect(res.text).toBe(INVALID_BODY);
-      expect(kit.authRepo.accessLogEntries).toHaveLength(0);
-    },
-  );
+  it('default page size is 20; nextCursor pages without gaps; truncated mirrors it', async () => {
+    const kit = makeApiTestApp();
+    for (let i = 0; i < 25; i++)
+      kit.direct.adminRepo.memories.push(makeAdminMemory({ projectId: PROJECT_A }));
+    const first = await request(kit.app).get(BASE).set('Authorization', admin);
+    expect(first.body.items).toHaveLength(20);
+    expect(first.body.truncated).toBe(true);
+    const second = await request(kit.app)
+      .get(`${BASE}?cursor=${encodeURIComponent(first.body.nextCursor as string)}`)
+      .set('Authorization', admin);
+    expect(second.body.items).toHaveLength(5);
+    expect(second.body.nextCursor).toBeNull();
+    const ids = [...first.body.items, ...second.body.items].map((i: { id: string }) => i.id);
+    expect(new Set(ids).size).toBe(25);
+  });
+
+  it('honours limit, type and q; q is audited as its hash only', async () => {
+    const kit = makeApiTestApp();
+    const hit = makeAdminMemory({
+      projectId: PROJECT_A,
+      type: 'decision',
+      body: 'Pool size is 30',
+    });
+    kit.direct.adminRepo.memories.push(
+      hit,
+      makeAdminMemory({ projectId: PROJECT_A, type: 'decision' }),
+      makeAdminMemory({ projectId: PROJECT_A, type: 'gotcha', body: 'Pool size is 10' }),
+    );
+    const res = await request(kit.app)
+      .get(`${BASE}?type=decision&q=${encodeURIComponent('  Pool SIZE ')}&limit=5`)
+      .set('Authorization', admin);
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { id: string }) => i.id)).toEqual([hit.id]);
+    const entry = kit.authRepo.accessLogEntries[0]!;
+    expect(entry.queryHash).toBe(sha256Hex('pool size'));
+    expect(JSON.stringify(entry.detail)).not.toMatch(/pool/i);
+    expect(entry.detail).toMatchObject({ type: 'decision' });
+  });
+
+  it('an empty q is treated as absent', async () => {
+    const kit = makeApiTestApp();
+    kit.direct.adminRepo.memories.push(makeAdminMemory({ projectId: PROJECT_A }));
+    const res = await request(kit.app).get(`${BASE}?q=%20%20`).set('Authorization', admin);
+    expect(res.body.items).toHaveLength(1);
+    expect(kit.authRepo.accessLogEntries[0]!.queryHash).toBeUndefined();
+  });
+
+  it.each([
+    'status=bogus',
+    'limit=0',
+    'limit=201',
+    'unknown=1',
+    'status=active&status=deprecated',
+    'type=nope',
+    `q=${'x'.repeat(201)}`,
+    'cursor=bm90LWEtY3Vyc29y',
+    // SEC-L1: well-formed but impossible dates are rejected before SQL.
+    `cursor=${Buffer.from('2026-13-45T25:61:61.000000Z|3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e').toString('base64url')}`,
+    `cursor=${Buffer.from('2026-02-30T00:00:00.000000Z|3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e').toString('base64url')}`,
+  ])('rejects ?%s with 400 and no audit', async (qs) => {
+    const kit = makeApiTestApp();
+    const res = await request(kit.app).get(`${BASE}?${qs}`).set('Authorization', admin);
+    expect(res.status).toBe(400);
+    expect(res.text).toBe(INVALID_BODY);
+    expect(kit.authRepo.accessLogEntries).toHaveLength(0);
+  });
 });
 
 describe('POST /memories/:memoryId/confirm', () => {
@@ -253,6 +312,21 @@ describe('POST /memories/:memoryId/retire', () => {
     expect(m.status).toBe('active');
   });
 
+  it('CR-L4 form-encoded POST → 400, nothing stored, no audit', async () => {
+    const kit = makeApiTestApp();
+    const m = makeMemory({ projectId: PROJECT_A });
+    kit.lifecycleRepo.memories.push(m);
+    const res = await request(kit.app)
+      .post(`${BASE}/${m.id}/retire`)
+      .set('Authorization', admin)
+      .type('form')
+      .send('reason=obsolete%20now');
+    expect(res.status).toBe(400);
+    expect(res.text).toBe(INVALID_BODY);
+    expect(m.status).toBe('active');
+    expect(kit.authRepo.accessLogEntries).toHaveLength(0);
+  });
+
   it('a reason with an AWS key → 400; nothing stored or echoed', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
     const kit = makeApiTestApp();
@@ -339,6 +413,22 @@ describe('POST /memories/retire-by-pr', () => {
     expect(res.status).toBe(400);
     expect(kit.lifecycleRepo.calls).toHaveLength(0);
     vi.restoreAllMocks();
+  });
+
+  it('CR-L4 form-encoded POST → 400, nothing retired, no audit', async () => {
+    const kit = makeApiTestApp();
+    const m = makeMemory({ projectId: PROJECT_A, originPr: 42 });
+    kit.lifecycleRepo.memories.push(m);
+    const res = await request(kit.app)
+      .post(`${BASE}/retire-by-pr`)
+      .set('Authorization', admin)
+      .type('form')
+      .send('originPr=42&reason=PR%2042%20was%20reverted');
+    expect(res.status).toBe(400);
+    expect(res.text).toBe(INVALID_BODY);
+    expect(m.status).toBe('active');
+    expect(kit.lifecycleRepo.calls).toHaveLength(0);
+    expect(kit.authRepo.accessLogEntries).toHaveLength(0);
   });
 
   it('contributor → 404 and nothing changes', async () => {

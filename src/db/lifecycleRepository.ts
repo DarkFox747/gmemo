@@ -8,28 +8,9 @@
  */
 
 import type pg from 'pg';
-import type { MemoryType } from '../contracts/memory.js';
 
-export type MemoryStatus = 'active' | 'superseded' | 'deprecated' | 'pending_revalidation';
-
-export interface MemoryListRow {
-  id: string;
-  type: MemoryType;
-  title: string;
-  summary: string;
-  status: MemoryStatus;
-  current_revision: number;
-  origin_branch: string | null;
-  origin_pr: number | null;
-  revalidate_at: Date | null;
-  updated_at: Date;
-}
-
+/** Writes only: browsing (list, detail, revisions) lives in MemoryAdminRepository (C5). */
 export interface LifecycleRepository {
-  listMemories(
-    projectId: string,
-    q: { status: MemoryStatus; limit: number },
-  ): Promise<{ rows: MemoryListRow[]; truncated: boolean }>;
   /** pending_revalidation → active with a fresh deadline; null when no such row (404). */
   confirm(
     projectId: string,
@@ -56,16 +37,6 @@ export interface LifecycleRepository {
 // ---------------------------------------------------------------------------
 // SQL — every statement but the platform sweep carries project_id = $1.
 // ---------------------------------------------------------------------------
-
-// $1 project_id  $2 status  $3 limit+1 (uses ix_memory_proj_status)
-const LIST_SQL = `
-SELECT id, type, title, summary, status, current_revision, origin_branch, origin_pr,
-       revalidate_at, updated_at
-FROM memory
-WHERE project_id = $1 AND status = $2::memory_status
-ORDER BY revalidate_at ASC NULLS LAST, id ASC
-LIMIT $3
-`.trim();
 
 // $1 project_id  $2 memory_id  $3 revalidation_days
 // The WHERE clause is the guard: active, deprecated, superseded or foreign → 0 rows.
@@ -156,19 +127,6 @@ export class PgLifecycleRepository implements LifecycleRepository {
     if (!Number.isInteger(opts.revalidationDays) || opts.revalidationDays < 1) {
       throw new Error('PgLifecycleRepository: revalidationDays must be an integer >= 1');
     }
-  }
-
-  async listMemories(
-    projectId: string,
-    q: { status: MemoryStatus; limit: number },
-  ): Promise<{ rows: MemoryListRow[]; truncated: boolean }> {
-    const { rows } = await this.pool.query<MemoryListRow>(LIST_SQL, [
-      projectId,
-      q.status,
-      q.limit + 1,
-    ]);
-    const truncated = rows.length > q.limit;
-    return { rows: truncated ? rows.slice(0, q.limit) : rows, truncated };
   }
 
   async confirm(

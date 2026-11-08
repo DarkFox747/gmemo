@@ -1,17 +1,28 @@
 /**
- * Memory lifecycle routes (C4, HU-12.2, HU-12.3, HU-11.4), mounted on the nested
- * /v1/projects/:projectId router behind makeProjectAdmin — so a non-admin never
- * reaches validation and gets the same opaque 404.
+ * Project memory routes, mounted on the nested /v1/projects/:projectId router
+ * behind makeProjectAdmin — so a non-admin never reaches validation and gets the
+ * same opaque 404.
  *
- *   GET  /memories                      list (pending_revalidation)  → memories.list
+ * Direct management (C5, HU-13):
+ *   GET  /memories                      list (status/type/q/cursor)  → memories.list
+ *   POST /memories/preview              pipeline + judge, no write   → memory.preview
+ *   GET  /memories/:memoryId            detail + revision history    → memory.read
+ *   POST /memories                      confirmed add                → memory.create
+ *   PUT  /memories/:memoryId            confirmed amend              → memory.amend
+ * Lifecycle (C4, HU-12.2, HU-12.3, HU-11.4):
  *   POST /memories/retire-by-pr         bulk retire by origin PR     → memory.retire_by_pr
  *   POST /memories/:memoryId/confirm    pending → active             → memory.confirm
  *   POST /memories/:memoryId/retire     active|pending → deprecated  → memory.retire
  *
- * Order: projectAdmin → JSON content type on POSTs (same as the review routes)
- * → uuid :memoryId (else 404) → zod (else 400) → service. not_found (absent, foreign, wrong status, repeat) is
- * the uniform 404. Audit runs only after success and never carries the reason;
- * an audit failure after a committed write is logged (ids only) and is a 500.
+ * Order: projectAdmin → JSON content type on POST/PUT → uuid :memoryId (else 404)
+ * → zod (else 400) → service. not_found (absent, foreign, wrong status, repeat)
+ * is the uniform 404; a stale or inactive amend target is a 409 with its code;
+ * an add that dedups onto a non-active memory is 409 duplicate_inactive; a
+ * confirm whose judge or judge context failed closed is 503
+ * evaluation_unavailable (nothing applied, session abandoned).
+ * Audit runs only after success and never carries content (a list search is
+ * stored as its hash); an audit failure after a committed write is logged (ids
+ * only) and is a 500.
  */
 
 import express from 'express';
@@ -19,16 +30,81 @@ import type { Request } from 'express';
 import { z } from 'zod';
 import { AppError, ErrorCode } from '../../errors/appError.js';
 import { logger } from '../../observability/logger.js';
+import { MEMORY_TYPES } from '../../mcp/tools/schemas.js';
+import { assertValidFields } from '../../mcp/fieldsPolicy.js';
+import { sha256Hex } from '../../security/hash.js';
+import type { MemoryType } from '../../contracts/memory.js';
+import type { ApiAuditDetail } from '../../mcp/context.js';
+import type { PreviewInput, UnitInput } from '../../memory/types.js';
 import { adminContext, parseOrInvalid, requireJsonContentType } from './reviewRoutes.js';
-import type { ApiResponse, ApiRouterDeps } from './types.js';
+import type { ApiErrorBody, ApiResponse, ApiRouterDeps, ConflictCode } from './types.js';
 
-/** C5 widens the status enum and adds filters, search and a cursor. */
 export const MemoryListQuery = z
   .object({
-    status: z.enum(['pending_revalidation']).default('pending_revalidation'),
-    limit: z.coerce.number().int().min(1).max(200).default(100),
+    status: z
+      .enum(['active', 'pending_revalidation', 'superseded', 'deprecated'])
+      .default('active'),
+    type: z.enum(MEMORY_TYPES).optional(),
+    // '' after trim is treated as absent.
+    q: z.string().trim().max(200).optional(),
+    cursor: z.string().min(1).max(512).optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(20),
   })
   .strict();
+
+/** Fields budget (as remember / the DB CHECK) and the per-type key policy → 400. */
+function fieldsRefine(
+  u: { type: MemoryType; fields: Record<string, unknown> },
+  ctx: z.RefinementCtx,
+): void {
+  if (JSON.stringify(u.fields).length > 2000) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'invalid' });
+  }
+  try {
+    assertValidFields(u.type, u.fields);
+  } catch (err) {
+    // assertValidFields throws INVALID_REFERENCE (a REST 404); for the admin it is a 400.
+    if (!(err instanceof AppError)) throw err;
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'invalid' });
+  }
+}
+
+/** Budgets identical to rememberInputShape / the DB CHECK constraints. */
+const Unit = {
+  type: z.enum(MEMORY_TYPES),
+  title: z.string().min(1).max(120),
+  summary: z.string().min(1).max(200),
+  body: z.string().min(1).max(2000),
+  fields: z.record(z.unknown()).default({}),
+  repoId: z.string().uuid().optional(),
+};
+
+/** A JSON number: "3", 0, -1 and 1.5 are all 400. */
+const Revision = z.number().int().positive();
+
+export const CreateBody = z
+  .object({ ...Unit, confirm: z.literal(true) })
+  .strict()
+  .superRefine(fieldsRefine);
+
+export const AmendBody = z
+  .object({ ...Unit, expectedRevision: Revision, confirm: z.literal(true) })
+  .strict()
+  .superRefine(fieldsRefine);
+
+export const PreviewBody = z
+  .discriminatedUnion('op', [
+    z.object({ op: z.literal('add'), ...Unit }).strict(),
+    z
+      .object({
+        op: z.literal('amend'),
+        ...Unit,
+        targetMemoryId: z.string().uuid(),
+        expectedRevision: Revision,
+      })
+      .strict(),
+  ])
+  .superRefine(fieldsRefine);
 
 const ConfirmBody = z.object({}).strict();
 
@@ -54,6 +130,41 @@ function parseMemoryId(raw: string): string {
   return parsed.data;
 }
 
+function toUnit(b: Omit<UnitInput, 'repoId'> & { repoId?: string }): UnitInput {
+  return {
+    type: b.type,
+    title: b.title,
+    summary: b.summary,
+    body: b.body,
+    fields: b.fields,
+    repoId: b.repoId ?? null,
+  };
+}
+
+/**
+ * Non-success service outcomes: not_found → 404, invalid → 400, conflict → 409,
+ * unavailable → 503 evaluation_unavailable (SEC-M2: the judge or its context
+ * failed closed; nothing applied). The caller is already proven project_admin.
+ */
+function failOutcome(
+  o:
+    | { kind: 'not_found' }
+    | { kind: 'invalid' }
+    | { kind: 'conflict'; code: ConflictCode }
+    | { kind: 'unavailable' },
+  res: ApiResponse,
+): void {
+  if (o.kind === 'not_found') throw new AppError(ErrorCode.NOT_FOUND);
+  if (o.kind === 'invalid') throw new AppError(ErrorCode.INVALID_REQUEST);
+  if (o.kind === 'unavailable') {
+    const body: ApiErrorBody = { error: 'Service unavailable', code: 'evaluation_unavailable' };
+    res.status(503).json(body);
+    return;
+  }
+  const conflict: ApiErrorBody = { error: 'Conflict', code: o.code };
+  res.status(409).json(conflict);
+}
+
 /** The write is already committed: log the failure (ids only), then fail closed. */
 async function auditCommitted(
   ids: Record<string, unknown>,
@@ -62,7 +173,7 @@ async function auditCommitted(
   try {
     await audit();
   } catch (err) {
-    logger.error('[api] audit failed after committed lifecycle change', {
+    logger.error('[api] audit failed after committed memory change', {
       ...ids,
       errorName: err instanceof Error ? err.name : 'unknown',
     });
@@ -71,22 +182,60 @@ async function auditCommitted(
 }
 
 export function makeMemoryRoutes(
-  deps: Pick<ApiRouterDeps, 'lifecycleService' | 'auditLogger'>,
+  deps: Pick<ApiRouterDeps, 'lifecycleService' | 'directMemoryService' | 'auditLogger'>,
 ): express.Router {
-  const { lifecycleService, auditLogger } = deps;
+  const { lifecycleService, directMemoryService, auditLogger } = deps;
   const router = express.Router({ mergeParams: true });
 
   router.get('/memories', async (req: Request, res: ApiResponse): Promise<void> => {
     const { actor, project } = adminContext(res);
-    const q = parseOrInvalid(MemoryListQuery, req.query);
+    const parsed = parseOrInvalid(MemoryListQuery, req.query);
+    const q = parsed.q !== undefined && parsed.q.length > 0 ? parsed.q : null;
 
-    const dto = await lifecycleService.list(project.projectId, q);
-    await auditLogger.recordApi(actor, project, 'memories.list', {
-      status: q.status,
-      resultCount: dto.items.length,
+    const dto = await directMemoryService.list(project.projectId, {
+      status: parsed.status,
+      type: parsed.type ?? null,
+      q,
+      cursor: parsed.cursor ?? null,
+      limit: parsed.limit,
     });
+    const detail: ApiAuditDetail = {
+      status: parsed.status,
+      type: parsed.type,
+      resultCount: dto.items.length,
+    };
+    // Same normalisation as the MCP recall wrapper; the raw text is never audited.
+    if (q !== null) detail.queryHash = sha256Hex(q.toLowerCase());
+    await auditLogger.recordApi(actor, project, 'memories.list', detail);
     res.status(200).json(dto);
   });
+
+  router.post(
+    '/memories/preview',
+    requireJsonContentType,
+    async (req: Request, res: ApiResponse): Promise<void> => {
+      const { actor, project } = adminContext(res);
+      const body = parseOrInvalid(PreviewBody, req.body ?? {});
+      const unit = toUnit(body);
+      const input: PreviewInput =
+        body.op === 'amend'
+          ? {
+              ...unit,
+              op: 'amend',
+              targetMemoryId: body.targetMemoryId,
+              expectedRevision: body.expectedRevision,
+            }
+          : { ...unit, op: 'add' };
+
+      const outcome = await directMemoryService.preview(actor, project.projectId, input);
+      if (outcome.kind !== 'ok') {
+        failOutcome(outcome, res);
+        return;
+      }
+      await auditLogger.recordApi(actor, project, 'memory.preview', outcome.audit);
+      res.status(200).json(outcome.dto);
+    },
+  );
 
   router.post(
     '/memories/retire-by-pr',
@@ -108,6 +257,62 @@ export function makeMemoryRoutes(
           originPr: body.originPr,
           resultCount: outcome.dto.retired,
         }),
+      );
+      res.status(200).json(outcome.dto);
+    },
+  );
+
+  router.get(
+    '/memories/:memoryId',
+    async (req: Request<MemoryParams>, res: ApiResponse): Promise<void> => {
+      const { actor, project } = adminContext(res);
+      const memoryId = parseMemoryId(req.params.memoryId);
+
+      const dto = await directMemoryService.get(project.projectId, memoryId);
+      if (!dto) throw new AppError(ErrorCode.NOT_FOUND);
+
+      await auditLogger.recordApi(actor, project, 'memory.read', { memoryId });
+      res.status(200).json(dto);
+    },
+  );
+
+  router.post(
+    '/memories',
+    requireJsonContentType,
+    async (req: Request, res: ApiResponse): Promise<void> => {
+      const { actor, project } = adminContext(res);
+      const body = parseOrInvalid(CreateBody, req.body ?? {});
+
+      const outcome = await directMemoryService.create(actor, project.projectId, toUnit(body));
+      if (outcome.kind !== 'done') {
+        failOutcome(outcome, res);
+        return;
+      }
+      await auditCommitted({ itemId: outcome.audit.itemId }, () =>
+        auditLogger.recordApi(actor, project, 'memory.create', outcome.audit),
+      );
+      res.status(200).json(outcome.dto);
+    },
+  );
+
+  router.put(
+    '/memories/:memoryId',
+    requireJsonContentType,
+    async (req: Request<MemoryParams>, res: ApiResponse): Promise<void> => {
+      const { actor, project } = adminContext(res);
+      const memoryId = parseMemoryId(req.params.memoryId);
+      const body = parseOrInvalid(AmendBody, req.body ?? {});
+
+      const outcome = await directMemoryService.amend(actor, project.projectId, memoryId, {
+        ...toUnit(body),
+        expectedRevision: body.expectedRevision,
+      });
+      if (outcome.kind !== 'done') {
+        failOutcome(outcome, res);
+        return;
+      }
+      await auditCommitted({ memoryId, itemId: outcome.audit.itemId }, () =>
+        auditLogger.recordApi(actor, project, 'memory.amend', { ...outcome.audit, memoryId }),
       );
       res.status(200).json(outcome.dto);
     },

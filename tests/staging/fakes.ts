@@ -13,6 +13,8 @@
  *  - listStagingItems is tenant-scoped (project+repo+branch), newest first.
  *  - discardStagingItem is tenant-scoped; returns false when the item is absent
  *    or belongs to a different session (opaque — no enumeration).
+ *  - createSingleItemSession (C5) records its input and inserts the item into a
+ *    new session keyed by the given branch.
  *
  * Generated IDs are deterministic:
  *  - Sessions: 'test-session-0001', 'test-session-0002', …
@@ -26,6 +28,7 @@ import type {
   StagingRepository,
   StagingItemRow,
   InsertStagingItemParams,
+  SingleItemSessionInput,
 } from '../../src/db/stagingRepository.js';
 import type { TenantContext } from '../../src/mcp/context.js';
 import type { Notifier, NotifyEvent } from '../../src/notify/notifier.js';
@@ -219,6 +222,21 @@ export class InMemoryStagingRepository implements StagingRepository {
 
     this.storedItems.delete(itemId);
     return true;
+  }
+
+  /** Every createSingleItemSession input, in order (C5). */
+  public readonly singleItemSessions: SingleItemSessionInput[] = [];
+
+  async createSingleItemSession(
+    i: SingleItemSessionInput,
+  ): Promise<{ sessionId: string; itemId: string }> {
+    this.singleItemSessions.push(i);
+    this.sessionsByKey.set(
+      this.tenantKey({ projectId: i.projectId, repoId: i.repoId, branch: i.branch }),
+      i.sessionId,
+    );
+    const { id } = await this.insertStagingItem(i.sessionId, i.item);
+    return { sessionId: i.sessionId, itemId: id };
   }
 }
 

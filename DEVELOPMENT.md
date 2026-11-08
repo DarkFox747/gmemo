@@ -119,6 +119,7 @@ Las variables de la app dentro de compose están definidas en `docker-compose.ym
 | `pnpm smoke` | prueba de humo contra un stack corriendo |
 | `pnpm job:quarantine-purge` | borra las entradas de cuarentena vencidas (`expires_at < now()`) e imprime el conteo; lee solo `DATABASE_URL` |
 | `pnpm job:revalidation` | pasa a `pending_revalidation` las memorias activas no-`outcome` con `revalidate_at < now()` e imprime el conteo; lee `DATABASE_URL` y `REVALIDATION_DAYS` |
+| `pnpm job:web-session-reaper` | abandona las sesiones `web/%` que siguen `open` con más de 5 minutos y borra sus items no promovidos; imprime el conteo; lee solo `DATABASE_URL` |
 
 ## Tests
 
@@ -269,7 +270,7 @@ docker compose exec db psql -U gmemo -d gmemo -c   "UPDATE memory SET revalidate
 curl -sS -X POST http://localhost:3000/internal/jobs/revalidation-sweep
 DATABASE_URL=postgres://gmemo:gmemo@localhost:5433/gmemo pnpm job:revalidation
 # → {"job":"revalidation-sweep","count":N,"detail":{"<projectId>":n}}
-# listar las pendientes
+# listar las pendientes (la lista general está en "Gestión directa de memoria")
 curl -sS "http://localhost:3000/api/v1/projects/$P/memories?status=pending_revalidation" -H 'X-Dev-User: tl@demo.local'
 # confirmar (→ {"memoryId":...,"status":"active","revalidateAt":...})
 curl -sS -X POST http://localhost:3000/api/v1/projects/$P/memories/<memoryId>/confirm   -H 'X-Dev-User: tl@demo.local' -H 'Content-Type: application/json' -d '{}'
@@ -282,11 +283,68 @@ curl -sS -X POST http://localhost:3000/api/v1/projects/$P/memories/retire-by-pr 
 La migración 0010 pone `revalidate_at = now() + 60 días` a las memorias activas no-`outcome` existentes. Un
 `add` cuyo contenido ya existe (dedup) no toca el plazo de la fila existente.
 
+### Gestión directa de memoria (HU-13)
+
+El tech lead (`project_admin`; cualquier otro recibe el mismo 404) navega, previsualiza y escribe memoria
+desde la web. No hay un segundo camino de escritura: un alta o edición confirmada crea una sesión de staging
+de un solo item, `web/<userId>/<sessionId>` (ULID; autor y `opened_by` = el tech lead, nunca del body), y
+corre el MISMO pipeline de un item que la promoción (`promoteItem`) en modo **aprobado por humano**:
+
+- La confirmación sustituye a la cola de revisión: un veredicto `uncertain`, una confianza baja o un tipo de
+  revisión obligatoria se aplican igualmente, con `provenance = 'web_ui'` y `approved_by` = el tech lead.
+- Un humano aprueba una evaluación, nunca su ausencia: si el juez o su contexto fallan (fail-closed,
+  `judge_unavailable` / `judge_context_unavailable`) no se aplica nada, la sesión se abandona y la respuesta es
+  `503 {"error":"Service unavailable","code":"evaluation_unavailable"}`. El preview lo anticipa con
+  `"outcome":"unavailable"`.
+- Nunca sustituye a la cuarentena: secreto (redactado + `leak_detected`), instrucciones embebidas, rechazo
+  del juez (seguridad, duplicado, especificidad) y colisión de contenido al aplicar → `200 {"outcome":"quarantined"}`.
+- Un amend sobre una revisión vieja → `409 {"error":"Conflict","code":"target_changed"}`; sobre una memoria
+  no activa → `409 target_inactive`; cambiar el tipo → 400. La sesión siempre se cierra (finalizada o abandonada).
+- Un alta cuyo contenido es idéntico (mismo `content_hash`) al de una memoria **no activa** (deprecated,
+  superseded, pending_revalidation) no se informa como aplicada: `409 duplicate_inactive` (la fila existente no
+  cambia; el UNIQUE `(project_id, content_hash)` abarca todos los estados, así que filtrar el dedup a activas no
+  bastaría). Contra una memoria activa sigue siendo `200 {"outcome":"applied","deduped":true}`.
+- El detalle expone solo el `display_name` del autor y del aprobador (`author`, `approver: {name}`; `null` si
+  no tiene): nunca el email, el subject del IdP ni el id de `app_user`.
+- **Ventana de crash (residual):** si el proceso muere entre crear la sesión `web/…` y cerrarla, la sesión
+  queda `open` con su item pendiente (nunca aparece en la cola de revisión: un item `pending` no está en su
+  predicado). El job `web-session-reaper` (abajo) la abandona y borra el item a los 5 minutos.
+- **Escritura confirmada y luego 500:** una vez aplicado el item, la memoria y su revisión ya están
+  COMMITEADAS. Si después falla releer la memoria para la respuesta o falla la auditoría, el cliente recibe 500
+  aunque la escritura quedó hecha (se loguea con ids). Antes de reintentar hay que releer (lista o detalle): un
+  reintento del mismo alta da `deduped: true` y uno de edición da `409 target_changed`.
+- El preview corre validación, sanitize, contexto y juez **sin escribir nada** (solo la fila de auditoría de
+  lectura) y nunca notifica. Ni MCP ni `/promote` pueden activar el modo aprobado por humano.
+- `approved_by` es "quien aprobó la revisión actual": las aplicaciones automáticas (promoción) lo dejan en NULL;
+  la aprobación de la cola y la escritura directa lo fijan.
+
+```bash
+P=00000000-0000-0000-0000-000000000010
+H=(-H 'X-Dev-User: tl@demo.local' -H 'Content-Type: application/json')
+# listar (status=active por defecto | pending_revalidation | superseded | deprecated; type; q; página de 20)
+curl -sS "http://localhost:3000/api/v1/projects/$P/memories?type=gotcha&q=pool%20size" -H 'X-Dev-User: tl@demo.local'
+# → {"items":[...],"nextCursor":"<opaco>"|null,"truncated":bool}  ·  siguiente página: &cursor=<nextCursor>
+# detalle + historial de revisiones (más nueva primero, máx. 100)
+curl -sS http://localhost:3000/api/v1/projects/$P/memories/<memoryId> -H 'X-Dev-User: tl@demo.local'
+# preview (no persiste nada) → {"outcome":"apply"|"quarantine","withoutApproval":...,"judge":{...},"preview":{...}}
+curl -sS -X POST http://localhost:3000/api/v1/projects/$P/memories/preview "${H[@]}"   -d '{"op":"add","type":"gotcha","title":"Pool exhaustion","summary":"pg pool starves under burst.","body":"Raise PGPOOL_MAX in src/db/pool.ts.","fields":{"symptom":"timeouts"}}'
+# alta confirmada (repoId opcional: por defecto el primer repo del proyecto) → {"outcome":"applied","deduped":false,"memory":{...}}
+curl -sS -X POST http://localhost:3000/api/v1/projects/$P/memories "${H[@]}"   -d '{"type":"gotcha","title":"Pool exhaustion","summary":"pg pool starves under burst.","body":"Raise PGPOOL_MAX in src/db/pool.ts.","fields":{"symptom":"timeouts"},"confirm":true}'
+# edición con la revisión vista (expectedRevision entero > 0; la vieja → 409)
+curl -sS -X PUT http://localhost:3000/api/v1/projects/$P/memories/<memoryId> "${H[@]}"   -d '{"type":"gotcha","title":"Pool exhaustion","summary":"pg pool starves under burst.","body":"Raise PGPOOL_MAX to 30 in src/db/pool.ts.","fields":{},"expectedRevision":1,"confirm":true}'
+```
+
+`confirm` debe ser exactamente `true`; presupuestos y claves de `fields` por tipo igual que `remember` (400 si no).
+POST/PUT exigen `Content-Type: application/json`. La búsqueda `q` se audita solo como hash (`access_log.query_hash`).
+Retirar sigue siendo `POST /memories/<memoryId>/retire` (arriba).
+
 ### Jobs internos (`/internal/jobs`)
 
 `POST /internal/jobs/quarantine-purge` borra las entradas con `expires_at < now()` y responde
 `{"job":"quarantine-purge","count":N,"detail":{"<projectId>":n}}`; `POST /internal/jobs/revalidation-sweep`
-pasa a `pending_revalidation` las memorias vencidas con la misma forma de respuesta (ambos quedan auditados en `access_log` como
+pasa a `pending_revalidation` las memorias vencidas y `POST /internal/jobs/web-session-reaper` abandona las
+sesiones de escritura directa (`web/%`) que un crash dejó `open` más de 5 minutos (borra sus items no
+promovidos, en una sola sentencia), con la misma forma de respuesta (todos quedan auditados en `access_log` como
 `system`/`admin`, solo conteos). Con `JOBS_TOKEN` (≥32 caracteres, comparado en tiempo constante) el router
 está habilitado en cualquier entorno y el token se exige siempre. Sin token (modo abierto) solo se habilita
 con `NODE_ENV=development` explícito: `production`, `test` o `NODE_ENV` sin definir lo dejan deshabilitado
@@ -304,8 +362,8 @@ DATABASE_URL=postgres://gmemo:gmemo@localhost:5433/gmemo pnpm job:quarantine-pur
 ```
 
 **Producción (documentado, no implementado): EventBridge Scheduler.** Un schedule diario por job con target
-*API destination* `POST https://<host>/internal/jobs/quarantine-purge` (y otro a
-`/internal/jobs/revalidation-sweep`), cuya *connection* guarda el bearer
+*API destination* `POST https://<host>/internal/jobs/quarantine-purge` (y otros a
+`/internal/jobs/revalidation-sweep` y `/internal/jobs/web-session-reaper` — este último cada 15 minutos basta), cuya *connection* guarda el bearer
 `JOBS_TOKEN` en Secrets Manager (auth tipo API key, header `Authorization: Bearer <token>`). La imagen de
 Fargate no incluye tsx, por eso el camino de producción es el HTTP y no el script.
 

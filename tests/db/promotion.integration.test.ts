@@ -328,6 +328,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const result = await repo!.applyAccepted(item, ctx, null, new Set());
@@ -393,6 +395,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
     const firstResult = await repo!.applyAccepted(firstItem, ctx1, null, new Set());
     expect(firstResult.status).toBe('applied');
@@ -421,6 +425,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'dedup-branch',
       originPr: null,
       sessionId: SESS_DEDUP,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const secondResult = await repo!.applyAccepted(secondItem, ctx2, null, new Set());
@@ -460,6 +466,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const first = await repo!.applyAccepted(item, ctx, null, new Set());
@@ -510,6 +518,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const result = await repo!.applyAccepted(item, ctx, null, new Set());
@@ -562,6 +572,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const result = await repo!.applyAccepted(item, ctx, null, new Set());
@@ -612,6 +624,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const result = await repo!.applyAccepted(item, ctx, null, new Set());
@@ -679,6 +693,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'rerun-branch',
       originPr: null,
       sessionId: SESS_RERUN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const first = await repo!.applyAccepted(item, ctx, null, new Set());
@@ -731,6 +747,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const result = await repo!.applyAccepted(item, ctx, null, new Set());
@@ -784,6 +802,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     const quarantineId = await repo!.quarantineItem(item!, ctx, {
@@ -842,6 +862,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     await repo!.quarantineItem(item!, ctx, {
@@ -873,6 +895,8 @@ describeWithDb('PgPromotionRepository integration', () => {
     const item = await fetchItem(SESS_MAIN, itemId);
     const ctx: ApplyContext = {
       projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
 
     await repo!.quarantineItem(item, ctx, {
@@ -913,6 +937,8 @@ describeWithDb('PgPromotionRepository integration', () => {
     ];
     const ctx: ApplyContext = {
       projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
     for (const id of ids) {
       const qid = await repo!.quarantineItem(await fetchItem(SESS_MAIN, id), ctx, {
@@ -939,6 +965,8 @@ describeWithDb('PgPromotionRepository integration', () => {
     const item = await fetchItem(SESS_MAIN, itemId);
     const ctx: ApplyContext = {
       projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
     const relatedId = await insertMemory({ contentHash: 'promo-integ-quarantine-related-mem' });
 
@@ -1197,6 +1225,8 @@ describeWithDb('PgPromotionRepository integration', () => {
       originBranch: 'main',
       originPr: null,
       sessionId: SESS_MAIN,
+      provenance: 'pr_reviewed',
+      approvedBy: null,
     };
     await repo!.applyAccepted(item, ctx, null, new Set());
 
@@ -1210,6 +1240,7 @@ describeWithDb('PgPromotionRepository integration', () => {
 
   const mainCtx = (): ApplyContext => ({
     projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
+    provenance: 'pr_reviewed', approvedBy: null,
   });
 
   async function insertTypedMemory(type: string, contentHash: string): Promise<string> {
@@ -1723,5 +1754,109 @@ describeWithDb('PgPromotionRepository integration', () => {
     await pool!.query(`UPDATE memory SET status = 'pending_revalidation' WHERE id = $1`, [targetId]);
     const r = await applyItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c4-pending-item', targetId));
     expect(r).toEqual({ status: 'stale' });
+  });
+
+  // -------------------------------------------------------------------------
+  // C5: provenance ($14) and approved_by ($15) ride in ApplyContext
+  // -------------------------------------------------------------------------
+
+  async function approverId(): Promise<string> {
+    const { rows } = await pool!.query(
+      `INSERT INTO app_user (idp_subject, email, display_name)
+       VALUES ('promo-integ-c5-tl', 'promo-integ-c5-tl@test.local', 'TL')
+       ON CONFLICT (idp_subject) DO UPDATE SET display_name = EXCLUDED.display_name
+       RETURNING id`,
+    );
+    return rows[0].id as string;
+  }
+
+  async function provenanceOf(memoryId: string): Promise<{ provenance: string; approved_by: string | null }> {
+    const { rows } = await pool!.query(`SELECT provenance, approved_by FROM memory WHERE id = $1`, [memoryId]);
+    return rows[0];
+  }
+
+  const webCtx = (approvedBy: string): ApplyContext => ({ ...mainCtx(), provenance: 'web_ui', approvedBy });
+
+  it('C5: an automatic add stores pr_reviewed and approved_by NULL', async () => {
+    const r = await applyItem(SESS_MAIN, await insertTypedAdd('gotcha', 'promo-integ-c5-auto-add'));
+    if (r.status !== 'applied') throw new Error(r.status);
+    expect(await provenanceOf(r.memoryId)).toEqual({ provenance: 'pr_reviewed', approved_by: null });
+  });
+
+  it('C5: web_ui + approver are stored on add and on amend', async () => {
+    const tl = await approverId();
+    const add = await repo!.applyAccepted(
+      await fetchItem(SESS_MAIN, await insertTypedAdd('pattern', 'promo-integ-c5-web-add')),
+      webCtx(tl), null, new Set(),
+    );
+    if (add.status !== 'applied') throw new Error(add.status);
+    expect(await provenanceOf(add.memoryId)).toEqual({ provenance: 'web_ui', approved_by: tl });
+
+    const amend = await repo!.applyAccepted(
+      await fetchItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c5-web-amend', add.memoryId)),
+      webCtx(tl), null, new Set(),
+    );
+    expect(amend.status).toBe('applied');
+    expect(await provenanceOf(add.memoryId)).toEqual({ provenance: 'web_ui', approved_by: tl });
+  });
+
+  it('C5: an automatic amend over an approved memory clears approved_by', async () => {
+    const tl = await approverId();
+    const targetId = await insertTypedMemory('pattern', 'promo-integ-c5-approved-target');
+    await pool!.query(`UPDATE memory SET approved_by = $1, provenance = 'web_ui' WHERE id = $2`, [tl, targetId]);
+    const r = await applyItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c5-auto-amend', targetId));
+    expect(r.status).toBe('applied');
+    expect(await provenanceOf(targetId)).toEqual({ provenance: 'pr_reviewed', approved_by: null });
+  });
+
+  it('C5: a dedup leaves the existing provenance and approver untouched', async () => {
+    const tl = await approverId();
+    const SESS_C5 = 'promo-integ-c5-dedup-sess';
+    await pool!.query(
+      `INSERT INTO staging_session (id, project_id, repo_id, branch, opened_by)
+       VALUES ($1, $2, $3, 'c5-dedup-branch', 'integ-test-user') ON CONFLICT DO NOTHING`,
+      [SESS_C5, projectId, repoId],
+    );
+    const first = await applyItem(SESS_MAIN, await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c5-dedup' }));
+    if (first.status !== 'applied') throw new Error(first.status);
+    const second = await repo!.applyAccepted(
+      await fetchItem(SESS_C5, await insertAddItem({ sessionId: SESS_C5, contentHash: 'promo-integ-c5-dedup' })),
+      { ...webCtx(tl), sessionId: SESS_C5 }, null, new Set(),
+    );
+    expect(second).toMatchObject({ status: 'applied', memoryId: first.memoryId, deduped: true });
+    expect(await provenanceOf(first.memoryId)).toEqual({ provenance: 'pr_reviewed', approved_by: null });
+  });
+
+  it('CR-M3: an automatic dedup re-add leaves an existing (non-null) approver', async () => {
+    const tl = await approverId();
+    const SESS_M3 = 'promo-integ-c5-m3-dedup-sess';
+    await pool!.query(
+      `INSERT INTO staging_session (id, project_id, repo_id, branch, opened_by)
+       VALUES ($1, $2, $3, 'c5-m3-dedup-branch', 'integ-test-user') ON CONFLICT DO NOTHING`,
+      [SESS_M3, projectId, repoId],
+    );
+    const first = await repo!.applyAccepted(
+      await fetchItem(SESS_MAIN, await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c5-m3-dedup' })),
+      webCtx(tl), null, new Set(),
+    );
+    if (first.status !== 'applied') throw new Error(first.status);
+    const second = await applyItem(
+      SESS_M3, await insertAddItem({ sessionId: SESS_M3, contentHash: 'promo-integ-c5-m3-dedup' }),
+    );
+    expect(second).toMatchObject({ status: 'applied', memoryId: first.memoryId, deduped: true });
+    expect(await provenanceOf(first.memoryId)).toEqual({ provenance: 'web_ui', approved_by: tl });
+  });
+
+  it('C5: a supersede new row carries the ctx values', async () => {
+    const tl = await approverId();
+    const targetId = await insertMemory({ contentHash: 'promo-integ-c5-sup-target' });
+    const itemId = await insertTargetItem({
+      sessionId: SESS_MAIN, op: 'supersede', contentHash: 'promo-integ-c5-sup-item',
+      targetMemoryId: targetId, targetRevision: 1,
+    });
+    const r = await repo!.applyAccepted(await fetchItem(SESS_MAIN, itemId), webCtx(tl), null, new Set());
+    if (r.status !== 'applied') throw new Error(r.status);
+    expect(r.memoryId).not.toBe(targetId);
+    expect(await provenanceOf(r.memoryId)).toEqual({ provenance: 'web_ui', approved_by: tl });
   });
 });

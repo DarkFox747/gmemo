@@ -28,6 +28,7 @@ import type { ReviewServiceLike } from '../http/api/types.js';
 import type { QuarantineReasonCode } from '../quarantine/reason.js';
 import type { QuarantineServiceLike } from '../quarantine/quarantineService.js';
 import type { LifecycleServiceLike } from '../lifecycle/types.js';
+import type { DirectMemoryServiceLike } from '../memory/types.js';
 
 // ---------------------------------------------------------------------------
 // Core identity / context types
@@ -100,17 +101,32 @@ export interface TenantResolutionInput {
 // ---------------------------------------------------------------------------
 
 export type ToolName =
-  | 'recall' | 'get_memory' | 'get_context'
-  | 'remember' | 'list_staged' | 'discard_staged'
+  | 'recall'
+  | 'get_memory'
+  | 'get_context'
+  | 'remember'
+  | 'list_staged'
+  | 'discard_staged'
   | 'promote'; // audit typing only — NOT in WRITE_TOOLS; promote never flows through authorize()
 
 /** REST audit/authorization actions - deliberately NOT part of ToolName (MCP surface unchanged). */
 export type ApiAction =
   | 'me.read'
-  | 'review_queue.list' | 'review_queue.read'
-  | 'review_queue.approve' | 'review_queue.reject'
-  | 'quarantine.list' | 'quarantine.read' | 'quarantine.restore'
-  | 'memories.list' | 'memory.confirm' | 'memory.retire' | 'memory.retire_by_pr';
+  | 'review_queue.list'
+  | 'review_queue.read'
+  | 'review_queue.approve'
+  | 'review_queue.reject'
+  | 'quarantine.list'
+  | 'quarantine.read'
+  | 'quarantine.restore'
+  | 'memories.list'
+  | 'memory.confirm'
+  | 'memory.retire'
+  | 'memory.retire_by_pr'
+  | 'memory.read'
+  | 'memory.preview'
+  | 'memory.create'
+  | 'memory.amend';
 
 /** Audit detail for REST actions - ids and counters only, never titles, bodies or reasons. */
 export interface ApiAuditDetail {
@@ -132,6 +148,10 @@ export interface ApiAuditDetail {
   status?: string;
   /** Retire-by-PR target PR number (C4). */
   originPr?: number;
+  /** sha256Hex of the normalized list search (C5); stored in access_log.query_hash, never in detail. */
+  queryHash?: string;
+  /** What a confirm would do, from a preview (C5). */
+  previewOutcome?: 'apply' | 'quarantine' | 'unavailable';
 }
 
 /** A completed platform job run (C3 jobs router / scripts). Counts only. */
@@ -326,8 +346,10 @@ export interface AppServices extends AuthServices {
   reviewService: ReviewServiceLike;
   /** Quarantine list/detail/restore (C3, HU-10) — consumed by the /api quarantine routes. */
   quarantineService: QuarantineServiceLike;
-  /** Memory lifecycle: list/confirm/retire/retire-by-pr + revalidation sweep (C4). */
+  /** Memory lifecycle: confirm/retire/retire-by-pr + revalidation sweep (C4). */
   lifecycleService: LifecycleServiceLike;
+  /** Direct memory management: list/detail/preview/create/amend (C5, HU-13). */
+  directMemoryService: DirectMemoryServiceLike;
 }
 
 /**

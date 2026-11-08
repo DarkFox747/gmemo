@@ -403,7 +403,11 @@ describe('HU-05 personal data is masked, not blocked', () => {
     const outcome = await service.promote(SESSION_ID, META);
 
     expect(outcome.quarantined).toBe(1);
-    expect(judge.evaluateCalls).toHaveLength(0);
+    // C5 persist order: evaluateCandidate (write-free) judges first, then the mask
+    // is persisted — the judge saw the masked text and nothing was recorded.
+    expect(judge.evaluateCalls).toHaveLength(1);
+    expect(judge.evaluateCalls[0]!.item.body).toContain('[EMAIL]');
+    expect(repo.decisionCalls).toHaveLength(0);
     const call = repo.quarantineCalls[0]!;
     expect(call.q).toMatchObject({ reason: 'duplicate_content', redact: 'none', decision: null });
     expect(call.item.body).toContain('[EMAIL]');

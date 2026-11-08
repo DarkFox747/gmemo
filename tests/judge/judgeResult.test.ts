@@ -10,6 +10,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   ALLOWED_PAIRS,
   failClosed,
+  isEvaluationUnavailable,
   normalizeJudgeResult,
   type JudgeContextItem,
   type JudgeResult,
@@ -153,5 +154,20 @@ describe('normalizeJudgeResult', () => {
   it('non-string reason (runtime garbage) → failClosed', () => {
     const r = result({ reason: 42 as never });
     expect(normalizeJudgeResult(r, CONTEXT)).toEqual(failClosed('judge_output_invalid'));
+  });
+});
+
+describe('isEvaluationUnavailable (C5 SEC-M2)', () => {
+  it('judge or context down → true', () => {
+    expect(isEvaluationUnavailable(failClosed('judge_unavailable'))).toBe(true);
+    expect(isEvaluationUnavailable(failClosed('judge_context_unavailable'))).toBe(true);
+  });
+
+  it('invalid output, a real uncertain verdict or an accepted one → false', () => {
+    expect(isEvaluationUnavailable(failClosed('judge_output_invalid'))).toBe(false);
+    expect(isEvaluationUnavailable(result({ verdict: 'uncertain', criterion: 'grounding' }))).toBe(
+      false,
+    );
+    expect(isEvaluationUnavailable(result({ reason: 'judge_unavailable' }))).toBe(false);
   });
 });

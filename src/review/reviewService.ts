@@ -195,7 +195,7 @@ function toQueueItemDto(r: ReviewQueueRow | ReviewItemRow): ReviewQueueItemDto {
   };
 }
 
-function toMemoryRefDto(r: MemoryRefRow): MemoryRefDto {
+export function toMemoryRefDto(r: MemoryRefRow): MemoryRefDto {
   return {
     id: r.id,
     type: r.type,

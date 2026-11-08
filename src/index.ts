@@ -30,6 +30,7 @@ import { PgPromotionRepository } from './db/promotionRepository.js';
 import { PgReviewQueueRepository } from './db/reviewQueueRepository.js';
 import { PgQuarantineRepository } from './db/quarantineRepository.js';
 import { PgLifecycleRepository } from './db/lifecycleRepository.js';
+import { PgMemoryAdminRepository } from './db/memoryAdminRepository.js';
 import { CognitoAuthenticator } from './auth/authenticator.js';
 import { DevAuthenticator } from './auth/devAuthenticator.js';
 import { DevOidcAuthenticator } from './auth/devOidcAuthenticator.js';
@@ -52,6 +53,8 @@ import { QuarantineService } from './quarantine/quarantineService.js';
 import { purgeExpiredQuarantine, QUARANTINE_PURGE_JOB } from './quarantine/purge.js';
 import { LifecycleService } from './lifecycle/lifecycleService.js';
 import { REVALIDATION_SWEEP_JOB } from './lifecycle/types.js';
+import { DirectMemoryService } from './memory/directMemoryService.js';
+import { reapStaleWebSessions, WEB_SESSION_REAPER_JOB } from './memory/webSessionReaper.js';
 import type { JobsRouterDeps } from './jobs/jobsRouter.js';
 import { isJobsEnabled } from './jobs/jobsRouter.js';
 import type { AppServices, Authenticator } from './mcp/context.js';
@@ -227,8 +230,9 @@ const promoteService = new PromoteService({
 });
 
 // --- 5k. Human review queue (HU-07): reads via the queue repository, writes via promotion ---
+const reviewQueueRepository = new PgReviewQueueRepository(pool);
 const reviewService = new ReviewService({
-  reviewQueueRepository: new PgReviewQueueRepository(pool),
+  reviewQueueRepository,
   promotionRepository,
   embedder,
   confidenceThreshold: config.JUDGE_CONFIDENCE_THRESHOLD,
@@ -238,11 +242,24 @@ const reviewService = new ReviewService({
 const quarantineRepository = new PgQuarantineRepository(pool);
 const quarantineService = new QuarantineService({ quarantineRepository, promoteService });
 
-// --- 5l'. Memory lifecycle (C4, HU-12, HU-11.4): list/confirm/retire + revalidation sweep ---
+// --- 5l'. Memory lifecycle (C4, HU-12, HU-11.4): confirm/retire + revalidation sweep ---
 const lifecycleService = new LifecycleService({
   lifecycleRepository: new PgLifecycleRepository(pool, {
     revalidationDays: config.REVALIDATION_DAYS,
   }),
+});
+
+// --- 5l''. Direct memory management (C5, HU-13): browse, preview, confirm add/amend.
+// Same judge, routing object and PromoteService as promotion (human-approved mode). ---
+const directMemoryService = new DirectMemoryService({
+  memoryAdminRepository: new PgMemoryAdminRepository(pool),
+  stagingRepository,
+  promotionRepository,
+  promoteService,
+  reviewQueueRepository,
+  quarantineRepository,
+  judge,
+  routing,
 });
 
 const services: AppServices = {
@@ -262,6 +279,7 @@ const services: AppServices = {
   reviewService,
   quarantineService,
   lifecycleService,
+  directMemoryService,
 };
 
 // --- 5m. Internal jobs (/internal/jobs): enabled anywhere a JOBS_TOKEN is
@@ -273,6 +291,7 @@ const jobs: JobsRouterDeps = {
   jobs: {
     [QUARANTINE_PURGE_JOB]: () => purgeExpiredQuarantine(quarantineRepository),
     [REVALIDATION_SWEEP_JOB]: () => lifecycleService.sweep(),
+    [WEB_SESSION_REAPER_JOB]: () => reapStaleWebSessions(stagingRepository),
   },
   token: config.JOBS_TOKEN,
   enabled: jobsEnabled,

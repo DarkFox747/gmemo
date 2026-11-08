@@ -76,6 +76,22 @@ export function failClosed(reason: FailClosedReason): JudgeResult {
   };
 }
 
+/** Fail-closed reasons that mean "no evaluation at all" (the judge or its context was down). */
+const UNAVAILABLE_REASONS: ReadonlySet<string> = new Set<FailClosedReason>([
+  'judge_unavailable',
+  'judge_context_unavailable',
+]);
+
+/**
+ * True when a decision is the fail-closed result of an unavailable judge or
+ * judge context (C5 SEC-M2: a human may approve an evaluation, never its
+ * absence). Matches on the failClosed shape, so a judge implementation that
+ * catches its own errors (BedrockJudge) is covered too.
+ */
+export function isEvaluationUnavailable(d: { verdict: Verdict; reason: string }): boolean {
+  return d.verdict === 'uncertain' && UNAVAILABLE_REASONS.has(d.reason);
+}
+
 const MAX_REASON_LENGTH = 500;
 
 /**

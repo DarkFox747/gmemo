@@ -44,9 +44,10 @@ const ItemId = z.string().uuid();
 
 const JSON_CONTENT_TYPE = /^application\/json\s*(?:;|$)/i;
 
-/** State-changing POSTs must be JSON (blocks form-encoded cross-site posts). Runs after authz. */
+/** State-changing POSTs/PUTs must be JSON (blocks form-encoded cross-site posts). Runs after authz. */
 export function requireJsonContentType(req: Request, _res: ApiResponse, next: express.NextFunction): void {
-  if (req.method === 'POST' && !JSON_CONTENT_TYPE.test(req.get('content-type') ?? '')) {
+  const writes = req.method === 'POST' || req.method === 'PUT';
+  if (writes && !JSON_CONTENT_TYPE.test(req.get('content-type') ?? '')) {
     throw new AppError(ErrorCode.INVALID_REQUEST);
   }
   next();

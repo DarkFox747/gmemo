@@ -7,11 +7,8 @@
  */
 
 import type { MemoryType } from '../../src/contracts/memory.js';
-import type {
-  LifecycleRepository,
-  MemoryListRow,
-  MemoryStatus,
-} from '../../src/db/lifecycleRepository.js';
+import type { LifecycleRepository } from '../../src/db/lifecycleRepository.js';
+import type { MemoryStatus } from '../../src/db/memoryAdminRepository.js';
 
 export interface FakeLifecycleMemory {
   id: string;
@@ -73,33 +70,6 @@ export class FakeLifecycleRepository implements LifecycleRepository {
 
   find(id: string): FakeLifecycleMemory | undefined {
     return this.memories.find((m) => m.id === id);
-  }
-
-  async listMemories(
-    projectId: string,
-    q: { status: MemoryStatus; limit: number },
-  ): Promise<{ rows: MemoryListRow[]; truncated: boolean }> {
-    this.calls.push({ method: 'listMemories', args: [projectId, q] });
-    const matching = this.memories
-      .filter((m) => m.projectId === projectId && m.status === q.status)
-      .sort((a, b) => {
-        const ta = a.revalidateAt?.getTime() ?? Number.POSITIVE_INFINITY;
-        const tb = b.revalidateAt?.getTime() ?? Number.POSITIVE_INFINITY;
-        return ta - tb || a.id.localeCompare(b.id);
-      });
-    const rows = matching.slice(0, q.limit).map((m) => ({
-      id: m.id,
-      type: m.type,
-      title: m.title,
-      summary: m.summary,
-      status: m.status,
-      current_revision: m.currentRevision,
-      origin_branch: m.originBranch,
-      origin_pr: m.originPr,
-      revalidate_at: m.revalidateAt,
-      updated_at: m.updatedAt,
-    }));
-    return { rows, truncated: matching.length > q.limit };
   }
 
   async confirm(

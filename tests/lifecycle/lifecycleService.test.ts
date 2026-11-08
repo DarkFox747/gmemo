@@ -1,6 +1,6 @@
 /**
  * LifecycleService unit tests (C4, HU-12, HU-11.4) over FakeLifecycleRepository:
- * DTO mapping, reason policy (secret → invalid_reason before any repository
+ * DTO mapping (the list moved to DirectMemoryService in C5), reason policy (secret → invalid_reason before any repository
  * call, PII masked, clamp to 500), sweep aggregation and idempotence.
  */
 
@@ -22,45 +22,6 @@ let svc: LifecycleService;
 beforeEach(() => {
   repo = new FakeLifecycleRepository();
   svc = new LifecycleService({ lifecycleRepository: repo });
-});
-
-describe('LifecycleService.list', () => {
-  it('maps rows to camelCase DTOs with ISO timestamps and passes the truncation flag', async () => {
-    const due = new Date('2026-03-01T10:00:00.000Z');
-    const m = makeMemory({
-      projectId: P,
-      status: 'pending_revalidation',
-      revalidateAt: due,
-      originPr: 42,
-      currentRevision: 3,
-    });
-    repo.memories.push(m, makeMemory({ projectId: P, status: 'pending_revalidation' }));
-
-    const dto = await svc.list(P, { status: 'pending_revalidation', limit: 1 });
-    expect(dto.truncated).toBe(true);
-    expect(dto.items).toEqual([
-      {
-        id: m.id,
-        type: 'gotcha',
-        title: m.title,
-        summary: m.summary,
-        status: 'pending_revalidation',
-        version: 3,
-        originBranch: 'main',
-        originPr: 42,
-        revalidateAt: '2026-03-01T10:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-      },
-    ]);
-  });
-
-  it('maps a NULL deadline to null', async () => {
-    repo.memories.push(
-      makeMemory({ projectId: P, status: 'pending_revalidation', revalidateAt: null }),
-    );
-    const dto = await svc.list(P, { status: 'pending_revalidation', limit: 10 });
-    expect(dto.items[0]!.revalidateAt).toBeNull();
-  });
 });
 
 describe('LifecycleService.confirm', () => {

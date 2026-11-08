@@ -69,6 +69,7 @@ import type {
 import type { ReviewServiceLike } from '../../src/http/api/types.js';
 import type { QuarantineServiceLike } from '../../src/quarantine/quarantineService.js';
 import type { LifecycleServiceLike } from '../../src/lifecycle/types.js';
+import type { DirectMemoryServiceLike } from '../../src/memory/types.js';
 import type { Judge, JudgeItem } from '../../src/judge/judge.js';
 import type { OidcVerifier, PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
 import { PromoteService } from '../../src/promote/promoteService.js';
@@ -424,6 +425,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
       Promise.resolve({ id: '', judgeState: 'pending' as const, deduped: false }),
     listStagingItems: () => Promise.resolve([]),
     discardStagingItem: () => Promise.resolve(false),
+    createSingleItemSession: (i) => Promise.resolve({ sessionId: i.sessionId, itemId: '' }),
   };
 
   // Stub promotion repository: all methods return benign values.
@@ -525,13 +527,21 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     restore: () => Promise.resolve({ kind: 'not_found' as const }),
   };
 
-  // Stub lifecycle service: empty list; every memory lookup is not_found; sweep is a no-op.
+  // Stub lifecycle service: every memory lookup is not_found; sweep is a no-op.
   const stubLifecycleService: LifecycleServiceLike = {
-    list: () => Promise.resolve({ items: [], truncated: false }),
     confirm: () => Promise.resolve({ kind: 'not_found' as const }),
     retire: () => Promise.resolve({ kind: 'not_found' as const }),
     retireByPr: () => Promise.resolve({ kind: 'retired' as const, dto: { retired: 0 } }),
     sweep: () => Promise.resolve({ job: 'revalidation-sweep', count: 0, detail: {} }),
+  };
+
+  // Stub direct memory service (C5): empty list; every lookup/write is not_found.
+  const stubDirectMemoryService: DirectMemoryServiceLike = {
+    list: () => Promise.resolve({ items: [], nextCursor: null, truncated: false }),
+    get: () => Promise.resolve(null),
+    preview: () => Promise.resolve({ kind: 'not_found' as const }),
+    create: () => Promise.resolve({ kind: 'not_found' as const }),
+    amend: () => Promise.resolve({ kind: 'not_found' as const }),
   };
 
   return {
@@ -551,6 +561,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     reviewService: stubReviewService,
     quarantineService: stubQuarantineService,
     lifecycleService: stubLifecycleService,
+    directMemoryService: stubDirectMemoryService,
     ...overrides,
   };
 }

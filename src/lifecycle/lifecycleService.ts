@@ -11,10 +11,9 @@
  * - Audit is the routes' job, as in C2.
  */
 
-import type { LifecycleRepository, MemoryListRow } from '../db/lifecycleRepository.js';
+import type { LifecycleRepository } from '../db/lifecycleRepository.js';
 import type { JobResult } from '../jobs/jobsRouter.js';
 import type { AdminActor } from '../mcp/context.js';
-import type { MemoryListItemDto, MemoryListDto, MemoryListQueryInput } from '../http/api/types.js';
 import { scanForSecrets } from '../security/secretScan.js';
 import { normalizeForScan } from '../security/normalizeForScan.js';
 import { maskPii } from '../security/piiMask.js';
@@ -34,21 +33,6 @@ const REASON_MAX = 500;
 
 export interface LifecycleServiceDeps {
   lifecycleRepository: LifecycleRepository;
-}
-
-function toListItemDto(r: MemoryListRow): MemoryListItemDto {
-  return {
-    id: r.id,
-    type: r.type,
-    title: r.title,
-    summary: r.summary,
-    status: r.status,
-    version: r.current_revision,
-    originBranch: r.origin_branch,
-    originPr: r.origin_pr,
-    revalidateAt: r.revalidate_at?.toISOString() ?? null,
-    updatedAt: r.updated_at.toISOString(),
-  };
 }
 
 /**
@@ -74,11 +58,6 @@ function sanitizeReason(reason: string, logCtx: Record<string, unknown>): string
 
 export class LifecycleService implements LifecycleServiceLike {
   constructor(private readonly deps: LifecycleServiceDeps) {}
-
-  async list(projectId: string, q: MemoryListQueryInput): Promise<MemoryListDto> {
-    const { rows, truncated } = await this.deps.lifecycleRepository.listMemories(projectId, q);
-    return { items: rows.map(toListItemDto), truncated };
-  }
 
   async confirm(_actor: AdminActor, projectId: string, memoryId: string): Promise<ConfirmOutcome> {
     const r = await this.deps.lifecycleRepository.confirm(projectId, memoryId);

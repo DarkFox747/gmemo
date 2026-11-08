@@ -365,4 +365,63 @@ describeWithDb('PgStagingRepository integration', () => {
     const itemsAfter = await repo!.listStagingItems(tenant1);
     expect(itemsAfter.some((i) => i.id === itemId)).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // C5: createSingleItemSession (direct web write)
+  // -------------------------------------------------------------------------
+
+  async function singleItem(projectId: string, repoId: string, title: string) {
+    const { ulid } = await import('../../src/db/ulid.js');
+    const sessionId = ulid();
+    return repo!.createSingleItemSession({
+      sessionId,
+      projectId,
+      repoId,
+      branch: `web/u-tl/${sessionId}`,
+      openedBy: 'sub-tl',
+      item: {
+        op: 'add', type: 'gotcha', title, summary: 'S', body: 'B', fields: {},
+        contentHash: `c5-single-${title}`, targetMemoryId: null, targetRevision: null,
+        judgeState: 'pending', authorIdentity: 'sub-tl', judgeCriterion: null,
+        mandatoryReview: false, judgeReason: null,
+      },
+    });
+  }
+
+  it('createSingleItemSession: session + pending item in one txn, branch and opened_by stored', async () => {
+    const r = await singleItem(projectId1, repoId1, 'one');
+    const { rows: s } = await pool!.query(
+      `SELECT project_id, repo_id, branch, status, opened_by FROM staging_session WHERE id = $1`,
+      [r.sessionId],
+    );
+    expect(s[0]).toEqual({
+      project_id: projectId1, repo_id: repoId1, branch: `web/u-tl/${r.sessionId}`,
+      status: 'open', opened_by: 'sub-tl',
+    });
+    const { rows: i } = await pool!.query(
+      `SELECT session_id, judge_state, author_identity FROM staging_item WHERE id = $1`,
+      [r.itemId],
+    );
+    expect(i[0]).toEqual({ session_id: r.sessionId, judge_state: 'pending', author_identity: 'sub-tl' });
+  });
+
+  it('createSingleItemSession: a repo of another project → NOT_FOUND and nothing inserted', async () => {
+    const { count: before } = (await pool!.query(`SELECT count(*)::int AS count FROM staging_session`)).rows[0];
+    await expect(singleItem(projectId1, repoId2, 'foreign')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    const { count: after } = (await pool!.query(`SELECT count(*)::int AS count FROM staging_session`)).rows[0];
+    expect(after).toBe(before);
+    const { rows } = await pool!.query(`SELECT 1 FROM staging_item WHERE content_hash = 'c5-single-foreign'`);
+    expect(rows).toHaveLength(0);
+  });
+
+  it('createSingleItemSession: two writes by the same user on the same repo → two open sessions', async () => {
+    const a = await singleItem(projectId1, repoId1, 'twin-a');
+    const b = await singleItem(projectId1, repoId1, 'twin-b');
+    expect(a.sessionId).not.toBe(b.sessionId);
+    const { rows } = await pool!.query(
+      `SELECT count(*)::int AS n FROM staging_session WHERE id = ANY($1) AND status = 'open'`,
+      [[a.sessionId, b.sessionId]],
+    );
+    expect(rows[0].n).toBe(2);
+  });
 });

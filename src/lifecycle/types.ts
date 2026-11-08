@@ -7,8 +7,6 @@ import type { JobResult } from '../jobs/jobsRouter.js';
 import type { AdminActor } from '../mcp/context.js';
 import type {
   ConfirmResponseDto,
-  MemoryListDto,
-  MemoryListQueryInput,
   RetireByPrResponseDto,
   RetireResponseDto,
 } from '../http/api/types.js';
@@ -22,7 +20,6 @@ export type RetireByPrOutcome =
   { kind: 'retired'; dto: RetireByPrResponseDto } | { kind: 'invalid_reason' };
 
 export interface LifecycleServiceLike {
-  list(projectId: string, q: MemoryListQueryInput): Promise<MemoryListDto>;
   confirm(actor: AdminActor, projectId: string, memoryId: string): Promise<ConfirmOutcome>;
   retire(
     actor: AdminActor,

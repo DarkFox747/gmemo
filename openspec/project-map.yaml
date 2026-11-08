@@ -178,6 +178,17 @@ key_files:
       - job revalidation-sweep in the /internal/jobs map (src/index.ts) + scripts/jobs/revalidation.ts (pnpm job:revalidation)
       - read path unchanged (status='active' predicates); per-status exclusion tests unit + DB-gated
       - list_staged / discard_staged reject reserved branches (restore/, web/) with INVALID_REFERENCE
+    direct_memory_management_implemented:   # change direct-memory-management (C5, HU-13)
+      - src/memory/{types,directMemoryService}.ts (DirectMemoryService: list/get/preview/create/amend; pre-checks repo∈project → target active/revision/type; every outcome closes the web session — finalize or abandonOpenSession)
+      - src/promote/evaluate.ts (evaluateCandidate: sanitize → judge context → judge → normalize → route, NO writes; shared by PromoteService.processItem and the preview; persistMasked now runs after the judge)
+      - "promoteItem(…, opts?: { humanApproved: { approverUserId } }): R5–R7 queue → apply (no recordDecision/notify), NO_MANDATORY_TYPES (type-change guard kept), stale → ItemResult 'conflict' target_changed; S1–S3, R2–R4, A3 unchanged; promote() hard-wired automatic; reachability source-scan test"
+      - ApplyContext.provenance ('pr_reviewed'|'web_ui') + approvedBy → $14/$15 in INSERT_MEMORY_SQL / UPDATE_MEMORY_AMEND_SQL (no forked SQL); approved_by = approver of the current revision (automatic apply → NULL; C2 approve → reviewer via ctx, old R7 UPDATE removed; dedup leaves it)
+      - StagingRepository.createSingleItemSession (one txn; branch web/<userId>/<sessionId ULID>; repo re-asserted in SQL; opened_by/author = actor subject)
+      - src/db/memoryAdminRepository.ts (PgMemoryAdminRepository — list default active, page 20, updated_at DESC id DESC, microsecond base64url cursor, q websearch_to_tsquery filter; detail any status + author/approver names; revisions JOIN-guarded max 100; findProjectRepoId) — replaces C4's list (LifecycleRepository is writes-only now)
+      - "C5 verify round-1: humanApproved never applies a fail-closed judge/context (isEvaluationUnavailable in src/judge/judge.ts) → ItemResult 'unavailable' → session abandoned → 503 evaluation_unavailable (preview outcome 'unavailable'); add dedup onto a non-active memory → 409 duplicate_inactive; detail DTO people = display_name only (approver: {name}); cursor dates validated before SQL (400)"
+      - "job web-session-reaper (src/memory/webSessionReaper.ts + PgStagingRepository.reapStaleWebSessions single CTE; /internal/jobs map in src/index.ts; scripts/jobs/web-session-reaper.ts, pnpm job:web-session-reaper): abandons web/% sessions open > 5 min, deletes their non-promoted items"
+      - "NOTE (CR-L3): C2 review approve of a DEPRECATE no longer sets memory.approved_by (the old R7 UPDATE was removed; approved_by is written only through ApplyContext on add/amend/supersede, deprecate never touches it)"
+      - "src/http/api/memoryRoutes.ts: GET /memories (C5 contract), POST /memories/preview, GET/PUT /memories/:memoryId, POST /memories (zod .strict, confirm literal true, expectedRevision int>0, assertValidFields → 400; POST/PUT JSON only; 404 opaque, 409 target_changed|target_inactive); ApiAction memory.read|preview|create|amend; list q audited as access_log.query_hash"
     workspace_and_demo_files:
       pnpm_workspace: pnpm-workspace.yaml (workspace root config; packages/*)
       web_package: packages/web (@gmemo/web — manifest-only, future React web UI; no code yet)

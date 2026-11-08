@@ -90,6 +90,9 @@ export interface PromotionItemRow {
   promoted_memory_id: string | null;
 }
 
+/** memory.provenance written by an apply: promotion/review vs direct web write (C5). */
+export type MemoryProvenance = 'pr_reviewed' | 'web_ui';
+
 /**
  * Tenant + promotion metadata threaded into every apply/quarantine call.
  * sessionId is required for quarantine origin_session_id.
@@ -100,6 +103,13 @@ export interface ApplyContext {
   originBranch: string;
   originPr: number | null;
   sessionId: string;
+  /** memory.provenance on add/supersede/amend ($14). Required so every construction site is explicit. */
+  provenance: MemoryProvenance;
+  /**
+   * memory.approved_by ($15): app_user.id of the human approver of the written
+   * revision; null = automatic apply (the approver of the current revision).
+   */
+  approvedBy: string | null;
 }
 
 export type ApplyResult =
@@ -305,15 +315,17 @@ SELECT promoted_at, reviewed_at FROM staging_item WHERE id = $1 FOR UPDATE
 // $1=project_id $2=repo_id $3=type $4=title $5=summary $6=body $7=fields(jsonb)
 // $8=author_identity $9=content_hash $10=origin_branch $11=origin_pr $12=embedding(vector|null)
 // $13=revalidation_days (C4): revalidate_at = now() + N days, NULL for outcome (never expires).
+// $14=provenance $15=approved_by (C5): from ApplyContext; a dedup (ON CONFLICT) leaves both untouched.
 const INSERT_MEMORY_SQL = `
 INSERT INTO memory
   (project_id, repo_id, type, title, summary, body, fields,
    status, provenance, author_identity, content_hash, current_revision,
-   origin_branch, origin_pr, embedding, revalidate_at)
+   origin_branch, origin_pr, embedding, revalidate_at, approved_by)
 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb,
-        'active', 'pr_reviewed', $8, $9, 1, $10, $11, $12::vector,
+        'active', $14::provenance, $8, $9, 1, $10, $11, $12::vector,
         CASE WHEN $3::memory_type = 'outcome' THEN NULL
-             ELSE now() + make_interval(days => $13::int) END)
+             ELSE now() + make_interval(days => $13::int) END,
+        $15::uuid)
 ON CONFLICT (project_id, content_hash) DO NOTHING
 RETURNING id
 `.trim();
@@ -348,13 +360,16 @@ SELECT id, current_revision, status, type FROM memory WHERE id = $1 AND project_
 // May throw 23505 if content_hash already exists on a different row.
 // $1=title $2=summary $3=body $4=fields(jsonb) $5=type $6=content_hash
 // $7=author_identity $8=origin_branch $9=origin_pr $10=memory_id $11=project_id
-// $12=embedding(vector|null) $13=revalidation_days (C4)
+// $12=embedding(vector|null) $13=revalidation_days (C4) $14=provenance $15=approved_by (C5)
 // L3: AND project_id = $11 ensures cross-project targets are treated as stale.
 // Amend may change the type ($5), so the deadline CASE uses the NEW type.
+// approved_by = $15 (no COALESCE): an automatic amend clears the previous approver,
+// who never saw the new content.
 const UPDATE_MEMORY_AMEND_SQL = `
 UPDATE memory
 SET title = $1, summary = $2, body = $3, fields = $4::jsonb, type = $5,
-    content_hash = $6, author_identity = $7, provenance = 'pr_reviewed',
+    content_hash = $6, author_identity = $7, provenance = $14::provenance,
+    approved_by = $15::uuid,
     origin_branch = $8, origin_pr = $9, embedding = $12::vector,
     revalidate_at = CASE WHEN $5::memory_type = 'outcome' THEN NULL
                          ELSE now() + make_interval(days => $13::int) END,
@@ -503,11 +518,6 @@ SET promoted_at = now(), promoted_memory_id = $1,
 WHERE id = $3 AND promoted_at IS NULL AND reviewed_at IS NULL
 `.trim();
 
-// R7: record the human approver. $1=approved_by $2=memory_id $3=project_id
-const SET_APPROVED_BY_SQL = `
-UPDATE memory SET approved_by = $1 WHERE id = $2 AND project_id = $3
-`.trim();
-
 // R8: supersede the related active memory. $1=memory_id $2=project_id
 const SUPERSEDE_RELATED_SQL = `
 UPDATE memory SET status = 'superseded', updated_at = now()
@@ -652,8 +662,11 @@ function toItemRow(r: RawPromotionItemRow): PromotionItemRow {
   };
 }
 
-/** Human approval: a mandatory-review target type does not block the reviewer. */
-const NO_MANDATORY_TYPES: ReadonlySet<MemoryType> = new Set();
+/**
+ * Human approval (review approve, C5 direct write): a mandatory-review target
+ * type does not block the human. The type-change half of SEC M-1 still applies.
+ */
+export const NO_MANDATORY_TYPES: ReadonlySet<MemoryType> = new Set();
 
 // ---------------------------------------------------------------------------
 // Judge-context query builder
@@ -844,6 +857,8 @@ export class PgPromotionRepository implements PromotionRepository {
         ctx.originBranch, ctx.originPr,
         toVectorParam(embedding),   // $12
         this.opts.revalidationDays, // $13
+        ctx.provenance,             // $14
+        ctx.approvedBy,             // $15
       ]);
 
       if (memRes.rows.length === 0) {
@@ -896,6 +911,8 @@ export class PgPromotionRepository implements PromotionRepository {
           ctx.projectId,          // $11 — L3 tenant guard
           toVectorParam(embedding), // $12
           this.opts.revalidationDays, // $13
+          ctx.provenance,             // $14
+          ctx.approvedBy,             // $15
         ]);
       } catch (err) {
         if ((err as { code?: string }).code === '23505') return { status: 'duplicate' };
@@ -940,6 +957,8 @@ export class PgPromotionRepository implements PromotionRepository {
         ctx.originBranch, ctx.originPr,
         toVectorParam(embedding),   // $12
         this.opts.revalidationDays, // $13
+        ctx.provenance,             // $14
+        ctx.approvedBy,             // $15
       ]);
 
       let newMemoryId: string;
@@ -1130,11 +1149,15 @@ export class PgPromotionRepository implements PromotionRepository {
     };
   }
 
-  /** R0: locks a queued item of the project; null when it is not (or no longer) queued. */
+  /**
+   * R0: locks a queued item of the project; null when it is not (or no longer) queued.
+   * approvedBy: the reviewer on approve (written as memory.approved_by); null on reject.
+   */
   private async lockQueuedItem(
     client: pg.PoolClient,
     itemId: string,
     projectId: string,
+    approvedBy: string | null,
   ): Promise<{ item: PromotionItemRow; ctx: ApplyContext } | null> {
     const { rows } = await client.query<RawQueuedItemRow>(LOCK_QUEUED_ITEM_SQL, [itemId, projectId]);
     const r = rows[0];
@@ -1147,6 +1170,9 @@ export class PgPromotionRepository implements PromotionRepository {
       originBranch: r.branch,
       originPr: r.pr_number,
       sessionId: r.session_id,
+      // C2: human approval goes in approved_by, not in provenance.
+      provenance: 'pr_reviewed',
+      approvedBy,
     };
     return { item, ctx };
   }
@@ -1156,7 +1182,8 @@ export class PgPromotionRepository implements PromotionRepository {
    * leaves the item queued. Steps R0–R8 (see design):
    *  R0 lock + queue guard → R1 lock target (op ≠ add) → R2 revision check →
    *  R3 rebase a stale target the reviewer confirmed → R4 embedding guard →
-   *  R5 shared apply core → R6 mark approved → R7 approved_by → R8 related.
+   *  R5 shared apply core (writes approved_by = reviewer via ctx; a dedup leaves
+   *  the existing approver) → R6 mark approved → R8 related.
    *
    * SEC M-1 on the human path: the reviewer IS the human gate, so a
    * mandatory-review target type does not block approval (the core gets an
@@ -1171,7 +1198,7 @@ export class PgPromotionRepository implements PromotionRepository {
       await client.query('BEGIN');
 
       // R0
-      const locked = await this.lockQueuedItem(client, i.itemId, i.projectId);
+      const locked = await this.lockQueuedItem(client, i.itemId, i.projectId, i.reviewerUserId);
       if (!locked) {
         await this.safeRollback(client);
         return { status: 'not_found' };
@@ -1236,11 +1263,6 @@ export class PgPromotionRepository implements PromotionRepository {
         return { status: 'not_found' };
       }
 
-      // R7: a dedup leaves the existing memory's approver untouched.
-      if (!r.deduped) {
-        await client.query(SET_APPROVED_BY_SQL, [i.reviewerUserId, r.memoryId, i.projectId]);
-      }
-
       // R8
       let relatedSuperseded = false;
       const related = item.related_memory_id;
@@ -1279,7 +1301,7 @@ export class PgPromotionRepository implements PromotionRepository {
     try {
       await client.query('BEGIN');
 
-      const locked = await this.lockQueuedItem(client, i.itemId, i.projectId);
+      const locked = await this.lockQueuedItem(client, i.itemId, i.projectId, null);
       if (!locked) {
         await this.safeRollback(client);
         return 'not_found';

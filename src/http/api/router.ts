@@ -5,7 +5,7 @@
  *                                    → /v1/projects/:projectId/quarantine → projectMember (Gate 2, any role)
  *                                                                         → quarantine routes (C3)
  *                                    → /v1/projects/:projectId → projectAdmin (Gate 2) → review routes
- *                                                                                      → memory lifecycle routes (C4)
+ *                                                                                      → memory routes (C4 lifecycle, C5 direct management)
  *                                    → catch-all JSON 404
  *
  * The catch-all means an unknown /api/* path is a JSON 404 (401 when

@@ -12,7 +12,8 @@
  * | AppError(INVALID_REQUEST) or a 4xx body-parser error          | 400    | {"error":"Invalid request"}        |
  * | anything else                                                 | 500    | {"error":"Internal server error"}  |
  *
- * 409 is not produced here: approve writes it directly (expected outcome).
+ * 409 and 503 are not produced here: the routes write them directly (expected
+ * outcomes — e.g. 503 evaluation_unavailable on a direct memory confirm).
  * Client errors are logged at debug with the code only (never input or cause).
  */
 

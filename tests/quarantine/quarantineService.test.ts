@@ -168,6 +168,18 @@ describe('QuarantineService.restore', () => {
     });
   });
 
+  it('conflict (human-approved only, unreachable from restore) → INTERNAL, logged', async () => {
+    const err = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { service } = build({ outcome: 'conflict', itemId: 'item-restore', code: 'target_changed' });
+    await expect(service.restore(ADMIN, PROJECT, ROW.id)).rejects.toMatchObject({
+      code: ErrorCode.INTERNAL,
+    });
+    expect(err).toHaveBeenCalledWith(
+      '[quarantine] restore produced a human-approval conflict',
+      { quarantineId: ROW.id, itemId: 'item-restore' },
+    );
+  });
+
   it('skipped → INTERNAL', async () => {
     vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const { service } = build({ outcome: 'skipped', itemId: 'item-restore' });

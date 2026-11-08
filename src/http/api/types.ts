@@ -16,17 +16,23 @@ import type {
 } from '../../mcp/context.js';
 import type { AuthRepository } from '../../db/authRepository.js';
 import type { MemoryType } from '../../contracts/memory.js';
-import type { DecisionCriterion } from '../../judge/judge.js';
+import type { DecisionCriterion, Verdict } from '../../judge/judge.js';
 import type { QuarantineCriterion, QuarantineReasonCode } from '../../quarantine/reason.js';
 import type { QuarantineServiceLike } from '../../quarantine/quarantineService.js';
 import type { LifecycleServiceLike } from '../../lifecycle/types.js';
-import type { MemoryStatus } from '../../db/lifecycleRepository.js';
+import type { MemoryStatus } from '../../db/memoryAdminRepository.js';
+import type { DirectMemoryServiceLike } from '../../memory/types.js';
 
 /**
  * Approve outcomes the caller can fix by reloading the item.
  * Declared here; the promotion repository (batch C) re-exports it.
  */
-export type ConflictCode = 'target_changed' | 'target_inactive' | 'duplicate_content';
+export type ConflictCode =
+  | 'target_changed'
+  | 'target_inactive'
+  | 'duplicate_content'
+  /** C5 SEC-L4: a direct add whose content equals a non-active memory. */
+  | 'duplicate_inactive';
 
 export interface ApiLocals {
   principal: Principal;
@@ -57,16 +63,24 @@ export type ApproveOutcome =
   | { kind: 'conflict'; code: ConflictCode };
 
 export type RejectOutcome =
-  | { kind: 'rejected'; dto: RejectResponseDto }
-  | { kind: 'not_found' }
-  | { kind: 'invalid_reason' };
+  { kind: 'rejected'; dto: RejectResponseDto } | { kind: 'not_found' } | { kind: 'invalid_reason' };
 
 /** Review service surface consumed by the routes; implemented in src/review/reviewService.ts. */
 export interface ReviewServiceLike {
   list(projectId: string, q: QueueQueryInput): Promise<ReviewQueueListDto>;
   get(projectId: string, itemId: string): Promise<ReviewItemDetailDto | null>;
-  approve(actor: AdminActor, projectId: string, itemId: string, b: ApproveInput): Promise<ApproveOutcome>;
-  reject(actor: AdminActor, projectId: string, itemId: string, b: RejectInput): Promise<RejectOutcome>;
+  approve(
+    actor: AdminActor,
+    projectId: string,
+    itemId: string,
+    b: ApproveInput,
+  ): Promise<ApproveOutcome>;
+  reject(
+    actor: AdminActor,
+    projectId: string,
+    itemId: string,
+    b: RejectInput,
+  ): Promise<RejectOutcome>;
 }
 
 export interface ApiRouterDeps {
@@ -80,6 +94,8 @@ export interface ApiRouterDeps {
   quarantineService: QuarantineServiceLike;
   /** Memory lifecycle routes (C4). */
   lifecycleService: LifecycleServiceLike;
+  /** Direct memory management: list, detail, preview, create, amend (C5). */
+  directMemoryService: DirectMemoryServiceLike;
 }
 
 export interface ApiRouterOptions {
@@ -88,8 +104,16 @@ export interface ApiRouterOptions {
 }
 
 export type ApiErrorBody =
-  | { error: 'Unauthorized' | 'Not found' | 'Invalid request' | 'Internal server error' | 'Too Many Requests' }
-  | { error: 'Conflict'; code: ConflictCode };
+  | {
+      error:
+        | 'Unauthorized'
+        | 'Not found'
+        | 'Invalid request'
+        | 'Internal server error'
+        | 'Too Many Requests';
+    }
+  | { error: 'Conflict'; code: ConflictCode }
+  | { error: 'Service unavailable'; code: 'evaluation_unavailable' };
 
 export interface MeDto {
   user: { id: string; email: string; displayName: string | null };
@@ -216,6 +240,7 @@ export interface MemoryListItemDto {
   summary: string;
   status: MemoryStatus;
   version: number;
+  provenance: string;
   originBranch: string | null;
   originPr: number | null;
   revalidateAt: string | null;
@@ -224,12 +249,18 @@ export interface MemoryListItemDto {
 
 export interface MemoryListDto {
   items: MemoryListItemDto[];
+  /** Opaque keyset cursor of the next page; null on the last page. */
+  nextCursor: string | null;
+  /** nextCursor !== null (C4 compatibility). */
   truncated: boolean;
 }
 
-/** C5 widens status and adds filters/search/cursor. */
+/** C5: status (default active), type, free-text q, cursor, page size (default 20). */
 export interface MemoryListQueryInput {
-  status: 'pending_revalidation';
+  status: MemoryStatus;
+  type: MemoryType | null;
+  q: string | null;
+  cursor: string | null;
   limit: number;
 }
 
@@ -248,3 +279,83 @@ export interface RetireResponseDto {
 export interface RetireByPrResponseDto {
   retired: number;
 }
+
+// ---------------------------------------------------------------------------
+// Direct memory management (C5, HU-13)
+// ---------------------------------------------------------------------------
+
+export interface MemoryRevisionDto {
+  revisionNo: number;
+  op: 'add' | 'amend' | 'supersede' | 'deprecate';
+  type: MemoryType;
+  title: string;
+  summary: string;
+  body: string;
+  fields: Record<string, unknown>;
+  /** Display name only; null when the author has none (SEC-L3). */
+  author: string | null;
+  createdAt: string;
+}
+
+export interface MemoryDetailDto {
+  id: string;
+  type: MemoryType;
+  title: string;
+  summary: string;
+  body: string;
+  fields: Record<string, unknown>;
+  status: MemoryStatus;
+  version: number;
+  provenance: string;
+  /** Display name only — never the email, idp subject or app_user id (SEC-L3). */
+  author: string | null;
+  /** Present when the current revision was human-approved; display name only. */
+  approver: { name: string | null } | null;
+  repo: { id: string; slug: string | null } | null;
+  originBranch: string | null;
+  originPr: number | null;
+  createdAt: string;
+  updatedAt: string;
+  revalidateAt: string | null;
+  retiredReason: string | null;
+  /** Newest first, at most 100. */
+  revisions: MemoryRevisionDto[];
+  revisionsTruncated: boolean;
+}
+
+export interface PreviewResponseDto {
+  /**
+   * What a confirm would do. 'unavailable': the judge or its context failed
+   * closed, so a confirm is refused with 503 evaluation_unavailable (SEC-M2).
+   */
+  outcome: 'apply' | 'quarantine' | 'unavailable';
+  /** What an agent promotion of the same unit would do. */
+  withoutApproval: 'apply' | 'queue_uncertain' | 'queue_mandatory' | 'quarantine';
+  pipeline: {
+    blocked: boolean;
+    reasonCode: 'secret_detected' | 'embedded_instructions' | 'sanitize_failed' | null;
+    /** Detector categories only, never matched text. */
+    findings: { secrets?: string[]; injection?: string[]; pii?: string[] };
+  };
+  /** Masked content as it would be stored; null when it is not provably secret-free. */
+  preview: { title: string; summary: string; body: string; fields: Record<string, unknown> } | null;
+  /** null when the pipeline blocked the unit (the judge is not called). */
+  judge: null | {
+    verdict: Verdict;
+    criterion: DecisionCriterion;
+    confidence: number | null;
+    threshold: number;
+    reason: string;
+    related: MemoryRefDto | null;
+  };
+  quarantineReasonCode: QuarantineReasonCode | null;
+}
+
+export type DirectWriteResponseDto =
+  | { outcome: 'applied'; deduped: boolean; memory: MemoryDetailDto }
+  | {
+      outcome: 'quarantined';
+      quarantineId: string;
+      reasonCode: QuarantineReasonCode | null;
+      criterion: QuarantineCriterion | null;
+    };

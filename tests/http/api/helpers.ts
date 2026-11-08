@@ -25,6 +25,15 @@ import { QuarantineService } from '../../../src/quarantine/quarantineService.js'
 import { FakeQuarantineRepository, ScriptedPromoteService } from '../../quarantine/fakes.js';
 import { LifecycleService } from '../../../src/lifecycle/lifecycleService.js';
 import { FakeLifecycleRepository } from '../../lifecycle/fakes.js';
+import { DirectMemoryService } from '../../../src/memory/directMemoryService.js';
+import {
+  DIRECT_ROUTING,
+  FakeMemoryAdminRepository,
+  RecordingPromotionRepository,
+  RecordingStagingRepository,
+  ScriptedDirectPromote,
+} from '../../memory/directFakes.js';
+import { FakeJudge } from '../../promote/fakes.js';
 
 // ---------------------------------------------------------------------------
 // Seed: two projects, one admin each, plus every non-admin shape.
@@ -142,6 +151,15 @@ export interface ApiTestKit {
   quarantinePromote: ScriptedPromoteService;
   /** Backing fake of the default (real) LifecycleService (C4). */
   lifecycleRepo: FakeLifecycleRepository;
+  /** Backing fakes of the default (real) DirectMemoryService (C5). */
+  direct: {
+    adminRepo: FakeMemoryAdminRepository;
+    staging: RecordingStagingRepository;
+    promotion: RecordingPromotionRepository;
+    promote: ScriptedDirectPromote;
+    quarantine: FakeQuarantineRepository;
+    judge: FakeJudge;
+  };
 }
 
 export function makeApiTestApp(
@@ -156,6 +174,14 @@ export function makeApiTestApp(
   const quarantineRepo = new FakeQuarantineRepository();
   const quarantinePromote = new ScriptedPromoteService();
   const lifecycleRepo = new FakeLifecycleRepository();
+  const direct = {
+    adminRepo: new FakeMemoryAdminRepository(),
+    staging: new RecordingStagingRepository(),
+    promotion: new RecordingPromotionRepository(),
+    promote: new ScriptedDirectPromote(),
+    quarantine: new FakeQuarantineRepository(),
+    judge: new FakeJudge(),
+  };
 
   const deps: ApiRouterDeps = {
     authenticator,
@@ -173,6 +199,16 @@ export function makeApiTestApp(
       promoteService: quarantinePromote,
     }),
     lifecycleService: new LifecycleService({ lifecycleRepository: lifecycleRepo }),
+    directMemoryService: new DirectMemoryService({
+      memoryAdminRepository: direct.adminRepo,
+      stagingRepository: direct.staging,
+      promotionRepository: direct.promotion,
+      promoteService: direct.promote,
+      reviewQueueRepository: direct.adminRepo,
+      quarantineRepository: direct.quarantine,
+      judge: direct.judge,
+      routing: DIRECT_ROUTING,
+    }),
     ...overrides,
   };
 
@@ -182,6 +218,6 @@ export function makeApiTestApp(
   app.use('/api', apiErrorHandler);
   return {
     app, authRepo, authenticator, queueRepo, promotionRepo, embedder, quarantineRepo, quarantinePromote,
-    lifecycleRepo,
+    lifecycleRepo, direct,
   };
 }

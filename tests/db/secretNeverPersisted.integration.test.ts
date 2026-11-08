@@ -15,6 +15,7 @@
 import pg from 'pg';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import type { ProjectMember } from '../../src/mcp/context.js';
+import { scanTextColumnsForFragments } from './helpers/secretColumnScan.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const describeWithDb = DATABASE_URL ? describe : describe.skip;
@@ -34,6 +35,8 @@ const SLACK = `xoxb-4242-${SLACK_BODY}`;
 const R2_SECRET = 'hunter2hunter2';
 // SEC-M1: PEM header in the title, key body in the body (no pattern on the body alone).
 const CROSS_PEM_BODY = 'MIIEpCrossFieldNeverStoredQ8';
+// C5: a credential in a direct web write (POST /memories confirm path).
+const DIRECT_KEY = 'AKIADIRECTNOSTORE8K2';
 
 const FRAGMENTS = [
   AWS_KEY,
@@ -49,6 +52,8 @@ const FRAGMENTS = [
   'hunter2',
   CROSS_PEM_BODY,
   'CrossFieldNeverStored',
+  DIRECT_KEY,
+  'DIRECTNOSTORE8K2',
 ];
 
 describeWithDb('secret never persisted (all tables)', () => {
@@ -191,6 +196,31 @@ for release signing in scripts/release.ts.`,
       const res = await quarantineService.restore(member, projectId, r.id);
       expect(res.kind).toBe('not_found');
     }
+
+    // C5: the same credential treatment on a direct web confirm (human-approved mode).
+    const { DirectMemoryService } = await import('../../src/memory/directMemoryService.js');
+    const { PgMemoryAdminRepository } = await import('../../src/db/memoryAdminRepository.js');
+    const { PgStagingRepository } = await import('../../src/db/stagingRepository.js');
+    const { PgReviewQueueRepository } = await import('../../src/db/reviewQueueRepository.js');
+    const direct = new DirectMemoryService({
+      memoryAdminRepository: new PgMemoryAdminRepository(pool),
+      stagingRepository: new PgStagingRepository(pool),
+      promotionRepository,
+      promoteService,
+      reviewQueueRepository: new PgReviewQueueRepository(pool),
+      quarantineRepository: new PgQuarantineRepository(pool),
+      judge: new DeterministicJudge({ acceptedConfidence: 0.9 }),
+      routing: { confidenceThreshold: 0.8, mandatoryReviewTypes: new Set(['decision']) },
+    });
+    const written = await direct.create(member, projectId, {
+      type: 'gotcha',
+      title: 'Direct write with a leaked key',
+      summary: 'Deploy bucket access from the web.',
+      body: `Use ${DIRECT_KEY} for the deploy bucket in src/deploy.ts.`,
+      fields: {},
+      repoId: null,
+    });
+    expect(written).toMatchObject({ kind: 'done', dto: { outcome: 'quarantined', reasonCode: 'secret_detected' } });
   });
 
   afterAll(async () => {
@@ -212,29 +242,9 @@ for release signing in scripts/release.ts.`,
   });
 
   it('no secret fragment appears in any text/json column of any table', async () => {
-    const { rows: cols } = await pool.query<{ table_name: string; column_name: string }>(
-      `SELECT c.table_name, c.column_name
-         FROM information_schema.columns c
-         JOIN information_schema.tables t
-           ON t.table_schema = c.table_schema AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE'
-        WHERE c.table_schema = 'public'
-          AND (c.data_type IN ('text', 'character varying', 'json', 'jsonb') OR c.udt_name = '_text')`,
-    );
-    const tables = new Set(cols.map((c) => c.table_name));
+    const { tables, hits } = await scanTextColumnsForFragments(pool, FRAGMENTS);
     for (const t of ['quarantine', 'staging_item', 'memory', 'memory_revision', 'access_log']) {
       expect(tables.has(t)).toBe(true);
-    }
-
-    const quote = (ident: string) => `"${ident.replace(/"/g, '""')}"`;
-    const hits: string[] = [];
-    for (const { table_name, column_name } of cols) {
-      for (const fragment of FRAGMENTS) {
-        const { rows } = await pool.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM ${quote(table_name)} WHERE strpos(${quote(column_name)}::text, $1) > 0`,
-          [fragment],
-        );
-        if (rows[0]!.n > 0) hits.push(`${table_name}.${column_name}`);
-      }
     }
     expect(hits).toEqual([]);
   });

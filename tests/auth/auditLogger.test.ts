@@ -293,6 +293,10 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
     ['memory.confirm', 'update'],
     ['memory.retire', 'update'],
     ['memory.retire_by_pr', 'update'],
+    ['memory.read', 'read'],
+    ['memory.preview', 'read'],
+    ['memory.create', 'update'],
+    ['memory.amend', 'update'],
   ])('maps %s to access_log action "%s"', async (action, expected) => {
     await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, action);
 
@@ -396,6 +400,53 @@ describe('RdsAuditLogger — memory lifecycle detail (C4)', () => {
       userId: 'u-tl',
       originPr: 42,
       resultCount: 3,
+    });
+  });
+});
+
+describe('RdsAuditLogger — recordApi C5 detail (direct memory management)', () => {
+  const actor = { actorId: 'tl-sub', userId: 'u-tl', roles: ['project_admin'] };
+
+  it('moves queryHash to the query_hash column and out of detail', async () => {
+    const repo = new InMemoryAuthRepository();
+    const logger = new RdsAuditLogger(repo);
+    await logger.recordApi(actor, { projectId: PROJECT_ID }, 'memories.list', {
+      status: 'active',
+      resultCount: 1,
+      queryHash: 'a'.repeat(64),
+    });
+    const entry = repo.accessLogEntries[0];
+    expect(entry.queryHash).toBe('a'.repeat(64));
+    expect(entry.detail).toEqual({ api: 'memories.list', userId: 'u-tl', status: 'active', resultCount: 1 });
+  });
+
+  it('keeps previewOutcome/ids/counters; never titles, bodies or judge text', async () => {
+    const repo = new InMemoryAuthRepository();
+    const logger = new RdsAuditLogger(repo);
+    await logger.recordApi(actor, { projectId: PROJECT_ID }, 'memory.preview', {
+      type: 'gotcha',
+      previewOutcome: 'quarantine',
+      title: 'secret title',
+      body: 'secret body',
+      reason: 'judge text',
+    } as unknown as Parameters<RdsAuditLogger['recordApi']>[3]);
+    await logger.recordApi(actor, { projectId: PROJECT_ID }, 'memory.create', {
+      memoryId: 'm-1',
+      itemId: 'i-1',
+      outcome: 'applied',
+      deduped: false,
+    });
+    expect(repo.accessLogEntries[0].detail).toEqual({
+      api: 'memory.preview',
+      userId: 'u-tl',
+      type: 'gotcha',
+      previewOutcome: 'quarantine',
+    });
+    expect(repo.accessLogEntries[0].queryHash).toBeUndefined();
+    expect(repo.accessLogEntries[1]).toMatchObject({
+      action: 'update',
+      memoryId: 'm-1',
+      detail: { api: 'memory.create', memoryId: 'm-1', itemId: 'i-1', outcome: 'applied', deduped: false },
     });
   });
 });

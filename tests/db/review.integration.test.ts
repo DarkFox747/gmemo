@@ -290,10 +290,13 @@ describeWithDb('PgPromotionRepository human review integration', () => {
     const itemId = await insertItem({ op: 'deprecate', target: memId });
     const r = await repo.approveReviewItem(input(itemId));
     expect(r).toMatchObject({ status: 'approved', memoryId: memId });
-    const { rows } = await pool.query(`SELECT status, current_revision FROM memory WHERE id = $1`, [
-      memId,
-    ]);
-    expect(rows[0]).toEqual({ status: 'deprecated', current_revision: 2 });
+    const { rows } = await pool.query(
+      `SELECT status, current_revision, approved_by FROM memory WHERE id = $1`,
+      [memId],
+    );
+    // C5: approved_by is written only by the INSERT/amend statements ($15); a
+    // deprecate keeps the approver of the last content revision.
+    expect(rows[0]).toEqual({ status: 'deprecated', current_revision: 2, approved_by: null });
   });
 
   it('dedup add → deduped:true and the existing approver is untouched', async () => {
