@@ -6,7 +6,7 @@
  *  1. DevOidcAuthenticator — DEV-only stub that always returns the fixed
  *     DEV_PROMOTE_PRINCIPAL regardless of the Authorization header (or its
  *     absence). Verified shape: repository='crombie-llc/gmemo-demo',
- *     ref='refs/heads/main'.
+ *     ref='refs/heads/main' (or opts.devRef when given), headRef=null.
  *
  *  2. GithubOidcAuthenticator — real implementation with an injected fake
  *     OidcJwtVerifier. Tests cover the full fail-closed matrix without any
@@ -20,10 +20,7 @@ import {
   DevOidcAuthenticator,
   DEV_PROMOTE_PRINCIPAL,
 } from '../../src/auth/devOidcAuthenticator.js';
-import {
-  GithubOidcAuthenticator,
-  type OidcJwtVerifier,
-} from '../../src/auth/oidcAuthenticator.js';
+import { GithubOidcAuthenticator, type OidcJwtVerifier } from '../../src/auth/oidcAuthenticator.js';
 import { AppError, ErrorCode } from '../../src/errors/appError.js';
 
 // ---------------------------------------------------------------------------
@@ -40,7 +37,12 @@ function makeRejectingVerifier(err: unknown = new Error('jwt-verify-failed')): O
   return { verify: vi.fn<[string], Promise<Record<string, unknown>>>().mockRejectedValue(err) };
 }
 
-const VALID_CLAIMS = { repository: 'org/repo', ref: 'refs/heads/main', iss: 'github', aud: 'gmemo' };
+const VALID_CLAIMS = {
+  repository: 'org/repo',
+  ref: 'refs/heads/main',
+  iss: 'github',
+  aud: 'gmemo',
+};
 const VALID_HEADER = 'Bearer eyJhbGciOiJSUzI1NiJ9.fake.token';
 
 // ---------------------------------------------------------------------------
@@ -79,9 +81,24 @@ describe('DevOidcAuthenticator', () => {
     await expect(auth.verify('garbage!!!')).resolves.toEqual(DEV_PROMOTE_PRINCIPAL);
   });
 
-  it('returned object has exactly the repository and ref fields', async () => {
+  it('returned object has exactly the repository, ref and headRef fields', async () => {
     const principal = await auth.verify(undefined);
-    expect(Object.keys(principal).sort()).toEqual(['ref', 'repository']);
+    expect(Object.keys(principal).sort()).toEqual(['headRef', 'ref', 'repository']);
+    expect(principal.headRef).toBeNull();
+  });
+
+  it('honours opts.devRef as the ref (dev-only), keeping the fixed repository and headRef null', async () => {
+    const principal = await auth.verify(undefined, { devRef: 'refs/heads/feature/x' });
+    expect(principal).toEqual({
+      repository: 'crombie-llc/gmemo-demo',
+      ref: 'refs/heads/feature/x',
+      headRef: null,
+    });
+  });
+
+  it('does not mutate DEV_PROMOTE_PRINCIPAL when devRef is given', async () => {
+    await auth.verify(undefined, { devRef: 'refs/heads/feature/y' });
+    expect(DEV_PROMOTE_PRINCIPAL.ref).toBe('refs/heads/main');
   });
 });
 
@@ -92,16 +109,48 @@ describe('DevOidcAuthenticator', () => {
 describe('GithubOidcAuthenticator — injected fake verifier', () => {
   // --- Happy path ---
 
-  it('valid token → PromotePrincipal { repository, ref }', async () => {
+  it('valid token → PromotePrincipal { repository, ref, headRef: null }', async () => {
     const auth = new GithubOidcAuthenticator(makeFakeVerifier(VALID_CLAIMS));
     const principal = await auth.verify(VALID_HEADER);
-    expect(principal).toEqual({ repository: 'org/repo', ref: 'refs/heads/main' });
+    expect(principal).toEqual({ repository: 'org/repo', ref: 'refs/heads/main', headRef: null });
   });
 
-  it('returned principal has exactly the repository and ref fields', async () => {
+  it('returned principal has exactly the repository, ref and headRef fields', async () => {
     const auth = new GithubOidcAuthenticator(makeFakeVerifier(VALID_CLAIMS));
     const principal = await auth.verify(VALID_HEADER);
-    expect(Object.keys(principal).sort()).toEqual(['ref', 'repository']);
+    expect(Object.keys(principal).sort()).toEqual(['headRef', 'ref', 'repository']);
+  });
+
+  // --- head_ref claim (pull_request workflows) ---
+
+  it('head_ref claim present → extracted as headRef', async () => {
+    const auth = new GithubOidcAuthenticator(
+      makeFakeVerifier({ ...VALID_CLAIMS, ref: 'refs/pull/7/merge', head_ref: 'feature/x' }),
+    );
+    const principal = await auth.verify(VALID_HEADER);
+    expect(principal).toEqual({
+      repository: 'org/repo',
+      ref: 'refs/pull/7/merge',
+      headRef: 'feature/x',
+    });
+  });
+
+  it("head_ref claim empty string ('' on push workflows) → headRef null", async () => {
+    const auth = new GithubOidcAuthenticator(makeFakeVerifier({ ...VALID_CLAIMS, head_ref: '' }));
+    const principal = await auth.verify(VALID_HEADER);
+    expect(principal.headRef).toBeNull();
+  });
+
+  it('head_ref claim not a string → headRef null', async () => {
+    const auth = new GithubOidcAuthenticator(makeFakeVerifier({ ...VALID_CLAIMS, head_ref: 42 }));
+    const principal = await auth.verify(VALID_HEADER);
+    expect(principal.headRef).toBeNull();
+  });
+
+  it('ignores opts.devRef (only the dev stub honours it)', async () => {
+    const auth = new GithubOidcAuthenticator(makeFakeVerifier(VALID_CLAIMS));
+    const principal = await auth.verify(VALID_HEADER, { devRef: 'refs/heads/feature/evil' });
+    expect(principal.ref).toBe('refs/heads/main');
   });
 
   it('passes the raw JWT (after stripping Bearer prefix) to the underlying verifier', async () => {
@@ -159,7 +208,9 @@ describe('GithubOidcAuthenticator — injected fake verifier', () => {
 
   // nbf — not-yet-valid token: verifier rejects because nbf > now
   it('nbf: not-yet-valid token (verifier rejects nbf) → PERMISSION_DENIED (fail-closed)', async () => {
-    const auth = new GithubOidcAuthenticator(makeRejectingVerifier(new Error('token not yet valid (nbf)')));
+    const auth = new GithubOidcAuthenticator(
+      makeRejectingVerifier(new Error('token not yet valid (nbf)')),
+    );
     await expect(auth.verify(VALID_HEADER)).rejects.toSatisfy(
       (e: unknown) => e instanceof AppError && e.code === ErrorCode.PERMISSION_DENIED,
     );
@@ -195,9 +246,7 @@ describe('GithubOidcAuthenticator — injected fake verifier', () => {
   });
 
   it('empty ref claim → PERMISSION_DENIED', async () => {
-    const auth = new GithubOidcAuthenticator(
-      makeFakeVerifier({ repository: 'org/repo', ref: '' }),
-    );
+    const auth = new GithubOidcAuthenticator(makeFakeVerifier({ repository: 'org/repo', ref: '' }));
     await expect(auth.verify(VALID_HEADER)).rejects.toSatisfy(
       (e: unknown) => e instanceof AppError && e.code === ErrorCode.PERMISSION_DENIED,
     );
@@ -208,9 +257,9 @@ describe('GithubOidcAuthenticator — injected fake verifier', () => {
   it('all denial paths produce byte-identical opaque messages (no enumeration)', async () => {
     const cases: Array<[string, GithubOidcAuthenticator]> = [
       ['missing header', new GithubOidcAuthenticator(makeFakeVerifier(VALID_CLAIMS))],
-      ['wrong aud',      new GithubOidcAuthenticator(makeRejectingVerifier())],
-      ['missing repo',   new GithubOidcAuthenticator(makeFakeVerifier({ ref: 'refs/heads/main' }))],
-      ['missing ref',    new GithubOidcAuthenticator(makeFakeVerifier({ repository: 'org/repo' }))],
+      ['wrong aud', new GithubOidcAuthenticator(makeRejectingVerifier())],
+      ['missing repo', new GithubOidcAuthenticator(makeFakeVerifier({ ref: 'refs/heads/main' }))],
+      ['missing ref', new GithubOidcAuthenticator(makeFakeVerifier({ repository: 'org/repo' }))],
     ];
 
     const inputs: Array<[string, string | undefined]> = [

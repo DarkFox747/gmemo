@@ -4,7 +4,9 @@
  *
  *  - FakePromotionRepository: STATEFUL — recordDecision / persistMasked /
  *    quarantineItem / applyAccepted mutate the seeded rows, so running promote()
- *    twice on the same repo exercises the real idempotency path.
+ *    twice on the same repo exercises the real idempotency path. The human
+ *    review methods (approveReviewItem / rejectReviewItem / abandonOpenSession)
+ *    are stateful too: a resolved or discarded item gives not_found afterwards.
  *  - FakeJudge: scripted JudgeResult (or Error) per evaluate() call.
  *  - FakeNotifier, FakeAuditLogger: capture calls.
  *  - makeItem / makeService: fixtures with safe defaults.
@@ -21,6 +23,9 @@ import type {
   PersistedDecision,
   QuarantineInput,
   SanitizeFlags,
+  ReviewApproveInput,
+  ReviewApproveResult,
+  ReviewRejectInput,
 } from '../../src/db/promotionRepository.js';
 import type {
   Judge,
@@ -77,6 +82,19 @@ export class FakePromotionRepository implements PromotionRepository {
     status: 'promoted' | 'rejected' | 'partially_promoted';
   }> = [];
 
+  readonly approveCalls: ReviewApproveInput[] = [];
+  readonly rejectCalls: ReviewRejectInput[] = [];
+  readonly abandonCalls: Array<{ sessionId: string; projectId: string }> = [];
+  /** Human decisions by item id (mirrors staging_item.review_* columns). */
+  readonly reviews = new Map<
+    string,
+    { decision: 'approved' | 'rejected'; reviewerUserId: string; reason: string | null }
+  >();
+  /** Sessions already abandoned (abandonOpenSession is then a no-op). */
+  readonly abandonedSessions = new Set<string>();
+  /** Scripted approve outcomes by item id (e.g. a conflict); default: approved. */
+  readonly approveResults = new Map<string, ReviewApproveResult>();
+
   /** Scripted judge context (returned by findJudgeContext). */
   context: JudgeContextItem[] = [];
   /** When set, findJudgeContext rejects with it. */
@@ -92,12 +110,14 @@ export class FakePromotionRepository implements PromotionRepository {
   }
 
   findOpenSessionId(_tenant: TenantContext): Promise<string | null> {
-    return Promise.resolve('test-session');
+    return Promise.resolve(this.abandonedSessions.has('test-session') ? null : 'test-session');
   }
 
   fetchPromotableItems(_sessionId: string, _projectId: string): Promise<PromotionItemRow[]> {
     return Promise.resolve(
-      [...this.rows.values()].filter((r) => r.promoted_at === null).map((r) => ({ ...r })),
+      [...this.rows.values()]
+        .filter((r) => r.promoted_at === null && !this.reviews.has(r.id))
+        .map((r) => ({ ...r })),
     );
   }
 
@@ -188,6 +208,70 @@ export class FakePromotionRepository implements PromotionRepository {
   ): Promise<void> {
     this.finalizeCalls.push({ sessionId, status });
     return Promise.resolve();
+  }
+
+  /** Same queue predicate as the SQL, minus the session/project join (single-session fake). */
+  private queued(itemId: string): PromotionItemRow | undefined {
+    const row = this.rows.get(itemId);
+    if (!row || row.promoted_at !== null || this.reviews.has(itemId)) return undefined;
+    if (row.judge_state === 'rejected') return undefined;
+    return row.judge_state === 'uncertain' || row.mandatory_review ? row : undefined;
+  }
+
+  approveReviewItem(i: ReviewApproveInput): Promise<ReviewApproveResult> {
+    this.approveCalls.push(i);
+    const row = this.queued(i.itemId);
+    if (!row) return Promise.resolve({ status: 'not_found' });
+    const result: ReviewApproveResult = this.approveResults.get(i.itemId) ?? {
+      status: 'approved',
+      memoryId: `mem-${i.itemId}`,
+      deduped: false,
+      rebasedFromRevision: null,
+      rebasedToRevision: null,
+      relatedSuperseded: false,
+    };
+    if (result.status === 'approved') {
+      row.promoted_at = new Date();
+      row.promoted_memory_id = result.memoryId;
+      this.reviews.set(i.itemId, {
+        decision: 'approved',
+        reviewerUserId: i.reviewerUserId,
+        reason: null,
+      });
+    }
+    return Promise.resolve(result);
+  }
+
+  rejectReviewItem(i: ReviewRejectInput): Promise<'rejected' | 'not_found'> {
+    this.rejectCalls.push(i);
+    if (!this.queued(i.itemId)) return Promise.resolve('not_found');
+    this.reviews.set(i.itemId, {
+      decision: 'rejected',
+      reviewerUserId: i.reviewerUserId,
+      reason: i.reason,
+    });
+    return Promise.resolve('rejected');
+  }
+
+  /** Every seeded row belongs to the abandoned session (single-session fake). */
+  abandonOpenSession(
+    sessionId: string,
+    projectId: string,
+  ): Promise<{ abandoned: boolean; discarded: number }> {
+    this.abandonCalls.push({ sessionId, projectId });
+    if (this.abandonedSessions.has(sessionId)) {
+      return Promise.resolve({ abandoned: false, discarded: 0 });
+    }
+    this.abandonedSessions.add(sessionId);
+    let discarded = 0;
+    for (const [id, row] of this.rows) {
+      if (row.promoted_at === null) {
+        this.rows.delete(id);
+        this.reviews.delete(id);
+        discarded++;
+      }
+    }
+    return Promise.resolve({ abandoned: true, discarded });
   }
 }
 

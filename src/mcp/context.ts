@@ -14,6 +14,7 @@
  * Change B (data-model): AppServices extends AuthServices with memoryRepository (D7).
  */
 
+import type { MemoryType } from '../contracts/memory.js';
 import type { MemoryRepository } from '../db/memoryRepository.js';
 import type { StagingRepository } from '../db/stagingRepository.js';
 import type { PromotePrincipal, OidcVerifier } from '../auth/oidcAuthenticator.js';
@@ -23,22 +24,44 @@ import type { PromoteServiceLike } from '../promote/promoteService.js';
 import type { AuthRepository } from '../db/authRepository.js';
 import type { Embedder } from '../embedder/embedder.js';
 import type { Notifier } from '../notify/notifier.js';
+import type { ReviewServiceLike } from '../http/api/types.js';
 
 // ---------------------------------------------------------------------------
 // Core identity / context types
 // ---------------------------------------------------------------------------
 
-/** Tenant-scoped project/repo/branch context resolved per-request by TenantResolver. */
-export interface TenantContext {
+/** Project-only context (REST routes have no repo or branch). */
+export interface ProjectContext {
   projectId: string;
+}
+
+/** Tenant-scoped project/repo/branch context resolved per-request by TenantResolver. */
+export interface TenantContext extends ProjectContext {
   repoId: string;
   branch: string;
 }
 
 /** Caller identity derived from RDS project_membership by Authorizer (Gate 2). */
 export interface ActorIdentity {
+  /** idp_subject (users) | OIDC repository (CI). */
   actorId: string;
+  /** app_user.id; null on the machine (/promote) path. */
+  userId: string | null;
   roles: string[];
+}
+
+/** Actor proven to be project_admin of ProjectContext.projectId. */
+export interface AdminActor extends ActorIdentity {
+  userId: string;
+}
+
+/** Gate-2-only identity for /me. */
+export interface AuthenticatedUser {
+  actorId: string;
+  userId: string;
+  email: string;
+  displayName: string | null;
+  globalRole: string | null;
 }
 
 /** Combined per-request context threaded through every tool handler. */
@@ -69,6 +92,26 @@ export type ToolName =
   | 'remember' | 'list_staged' | 'discard_staged'
   | 'promote'; // audit typing only — NOT in WRITE_TOOLS; promote never flows through authorize()
 
+/** REST audit/authorization actions - deliberately NOT part of ToolName (MCP surface unchanged). */
+export type ApiAction =
+  | 'me.read'
+  | 'review_queue.list' | 'review_queue.read'
+  | 'review_queue.approve' | 'review_queue.reject';
+
+/** Audit detail for REST actions - ids and counters only, never titles, bodies or reasons. */
+export interface ApiAuditDetail {
+  itemId?: string;
+  memoryId?: string;
+  filter?: 'all' | 'uncertain' | 'mandatory';
+  type?: MemoryType;
+  resultCount?: number;
+  decision?: 'approved' | 'rejected';
+  deduped?: boolean;
+  rebasedFromRevision?: number;
+  rebasedToRevision?: number;
+  relatedSuperseded?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Gate-1 output: token-only principal (no RDS)
 // ---------------------------------------------------------------------------
@@ -95,8 +138,13 @@ export interface Principal {
  * SEAM — Gate 1: verify the Cognito access token and return a Principal.
  * Throws AppError(PERMISSION_DENIED) on any invalid, absent, or malformed token.
  */
+export interface AuthenticateOptions {
+  /** DEV ONLY. Honoured by DevAuthenticator; every other implementation MUST ignore it. */
+  devUser?: string;
+}
+
 export interface Authenticator {
-  authenticate(authorization: string | undefined): Promise<Principal>;
+  authenticate(authorization: string | undefined, opts?: AuthenticateOptions): Promise<Principal>;
 }
 
 /** SEAM — resolve tenant from git remote (contract §0). */
@@ -118,6 +166,13 @@ export interface Authorizer {
    * Throws AppError(PERMISSION_DENIED) on any failure (opaque, no oracle).
    */
   authorizePromote(principal: PromotePrincipal, tenant: TenantContext): Promise<ActorIdentity>;
+  /** Gate 2 only: enabled app_user. For /me. Opaque PERMISSION_DENIED on failure. */
+  authorizeUser(principal: Principal): Promise<AuthenticatedUser>;
+  /**
+   * Gate 2 + membership.role === 'project_admin' on projectId. Platform roles do NOT bypass.
+   * Throws the same opaque AppError(PERMISSION_DENIED) on every failure.
+   */
+  authorizeProjectAdmin(principal: Principal, projectId: string): Promise<AdminActor>;
 }
 
 /** SEAM — write access_log (contract §7); query_hash only, never raw text. */
@@ -153,6 +208,22 @@ export interface AuditLogger {
       prNumber: number | null;
       mergeSha: string | null;
     },
+  ): Promise<void>;
+  /**
+   * Records a successful REST read/write (actor_kind 'user'). Never stores content.
+   */
+  recordApi(
+    actor: ActorIdentity,
+    project: ProjectContext | null,
+    action: ApiAction,
+    detail?: ApiAuditDetail,
+  ): Promise<void>;
+  /**
+   * Records a closed_unmerged session abandon (actor_kind 'ci', action 'delete').
+   */
+  recordAbandon(
+    ctx: RequestContext,
+    p: { sessionId: string; discarded: number; prNumber: number },
   ): Promise<void>;
 }
 
@@ -219,6 +290,8 @@ export interface AppServices extends AuthServices {
   semanticFallbackK: number;
   /** Notifier seam — shared by remember (capture) and PromoteService. */
   notifier: Notifier;
+  /** Human review queue (HU-07) — consumed by the /api review routes. */
+  reviewService: ReviewServiceLike;
 }
 
 /**

@@ -41,6 +41,7 @@ import type {
 import type { Judge, JudgeContextItem, JudgeResult } from '../judge/judge.js';
 import { failClosed, normalizeJudgeResult } from '../judge/judge.js';
 import type { Embedder } from '../embedder/embedder.js';
+import { embedItemFailSoft } from '../embedder/embedder.js';
 import type { Notifier } from '../notify/notifier.js';
 import { safeNotify } from '../notify/notifier.js';
 import { computeContentHash } from '../security/hash.js';
@@ -284,7 +285,7 @@ export class PromoteService implements PromoteServiceLike {
         const r = await repo.applyAccepted(
           item,
           ctx,
-          await this.embed(item),
+          await embedItemFailSoft(this.deps.embedder, item),
           this.deps.routing.mandatoryReviewTypes,
         );
         switch (r.status) {
@@ -371,20 +372,6 @@ export class PromoteService implements PromoteServiceLike {
     }
 
     return normalizeJudgeResult(result, context, { itemId: item.id });
-  }
-
-  /** Embedding is fail-soft; deprecate has no content change (null). */
-  private async embed(item: PromotionItemRow): Promise<number[] | null> {
-    if (item.op === 'deprecate') return null;
-    try {
-      return await this.deps.embedder.embed(`${item.title}\n${item.summary}\n${item.body}`);
-    } catch (err) {
-      logger.warn('[promote] embedding failed — writing NULL (fail-soft)', {
-        itemId: item.id,
-        errorName: errorName(err),
-      });
-      return null;
-    }
   }
 }
 

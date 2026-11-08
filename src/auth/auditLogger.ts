@@ -12,7 +12,39 @@
  */
 
 import type { AuthRepository } from '../db/authRepository.js';
-import type { AuditLogger, RequestContext, ToolName } from '../mcp/context.js';
+import type {
+  ActorIdentity,
+  ApiAction,
+  ApiAuditDetail,
+  AuditLogger,
+  ProjectContext,
+  RequestContext,
+  ToolName,
+} from '../mcp/context.js';
+
+/** REST actions that change state; every other ApiAction is a read. */
+const API_UPDATE_ACTIONS: ReadonlySet<ApiAction> = new Set([
+  'review_queue.approve',
+  'review_queue.reject',
+]);
+
+/**
+ * The only detail keys recordApi persists (ids, counters, flags). Copying by
+ * allow-list keeps titles, bodies and reasons out of access_log even if a
+ * caller passes an object carrying extra fields.
+ */
+const API_DETAIL_KEYS: ReadonlyArray<keyof ApiAuditDetail> = [
+  'itemId',
+  'memoryId',
+  'filter',
+  'type',
+  'resultCount',
+  'decision',
+  'deduped',
+  'rebasedFromRevision',
+  'rebasedToRevision',
+  'relatedSuperseded',
+];
 
 export class RdsAuditLogger implements AuditLogger {
   constructor(private readonly repo: AuthRepository) {}
@@ -118,6 +150,62 @@ export class RdsAuditLogger implements AuditLogger {
         prNumber: p.prNumber,
         mergeSha: p.mergeSha,
         repoId: ctx.tenant.repoId,
+      },
+    });
+  }
+
+  /**
+   * Inserts one access_log row for a successful REST read or write.
+   * Called only after the action succeeded; denials and 404s are never audited.
+   *
+   * action: 'update' for approve/reject, 'read' otherwise. project_id is null
+   * for project-less routes (me.read). detail carries the ApiAction, the
+   * app_user.id and allow-listed ids/counters only — never content.
+   */
+  async recordApi(
+    actor: ActorIdentity,
+    project: ProjectContext | null,
+    action: ApiAction,
+    detail?: ApiAuditDetail,
+  ): Promise<void> {
+    const safeDetail: Record<string, unknown> = {};
+    for (const key of API_DETAIL_KEYS) {
+      if (detail?.[key] !== undefined) {
+        safeDetail[key] = detail[key];
+      }
+    }
+
+    await this.repo.insertAccessLog({
+      actorIdentity: actor.actorId,
+      actorKind: 'user',
+      action: API_UPDATE_ACTIONS.has(action) ? 'update' : 'read',
+      projectId: project?.projectId ?? null,
+      memoryId: detail?.memoryId,
+      detail: { ...safeDetail, api: action, userId: actor.userId },
+    });
+  }
+
+  /**
+   * Inserts one access_log row for a closed_unmerged PR that abandoned its
+   * open staging session. actorKind 'ci', action 'delete'; counters only.
+   */
+  async recordAbandon(
+    ctx: RequestContext,
+    p: { sessionId: string; discarded: number; prNumber: number },
+  ): Promise<void> {
+    await this.repo.insertAccessLog({
+      actorIdentity: ctx.actor.actorId,
+      actorKind: 'ci',
+      action: 'delete',
+      projectId: ctx.tenant.projectId,
+      sessionId: p.sessionId,
+      detail: {
+        event: 'closed_unmerged',
+        sessionId: p.sessionId,
+        discarded: p.discarded,
+        prNumber: p.prNumber,
+        repoId: ctx.tenant.repoId,
+        branch: ctx.tenant.branch,
       },
     });
   }

@@ -1,4 +1,5 @@
-# promote.yml — trigger gmemo memory promotion on push to the default branch.
+# promote.yml — trigger gmemo memory promotion on push to the default branch,
+# and discard a branch's staged items when its PR is closed without merging.
 #
 # When a commit is pushed to the repository's default branch (typically via a
 # merged PR), this workflow:
@@ -30,15 +31,25 @@
 #   - The endpoint enforces: iss, aud, exp/nbf, signature, repo claim,
 #     ref == source_branch, source_branch == default_branch, active machine_credential.
 #   - Only one branch (the default branch) can ever trigger a successful promote.
+#
+# discard job (HU-04.2): on pull_request closed with merged == false, POSTs
+# {event: "closed_unmerged", source_branch: <head branch>, pr_number} so the
+# branch's open staging session is abandoned. The endpoint requires the token's
+# ref == refs/pull/<pr_number>/merge AND head_ref == source_branch, and never
+# touches the default branch. Fork PRs are skipped (no id-token for forks).
+# The head branch name is untrusted: it is passed via env and jq --arg only.
 
 name: gmemo Promote
 
 on:
   push:
     branches: [main]
+  pull_request:
+    types: [closed]
 
 jobs:
   promote:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     permissions:
@@ -89,3 +100,51 @@ jobs:
               --arg source_branch "${GH_REF_NAME}" \
               --arg merge_sha "${GH_SHA}" \
               '{repo: $repo, source_branch: $source_branch, merge_sha: $merge_sha}')"
+
+  discard:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write   # required to mint the OIDC token
+      contents: read
+
+    steps:
+      - name: Mint OIDC token
+        id: tok
+        # actions/github-script v7.0.1 — pinned to full commit SHA (same pin as the promote job).
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          GMEMO_OIDC_AUDIENCE: ${{ vars.GMEMO_OIDC_AUDIENCE }}
+        with:
+          script: |
+            // Same minting as the promote job: audience from env, token masked.
+            const audience = process.env.GMEMO_OIDC_AUDIENCE;
+            const token = await core.getIDToken(audience);
+            core.setSecret(token);
+            core.setOutput('token', token);
+
+      - name: POST /promote (closed_unmerged)
+        env:
+          OIDC_TOKEN: ${{ steps.tok.outputs.token }}
+          PROMOTE_URL: ${{ vars.GMEMO_PROMOTE_URL }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_HEAD_REF: ${{ github.event.pull_request.head.ref }}   # untrusted → env + jq --arg only
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --request POST \
+            --url "${PROMOTE_URL}" \
+            --header "Authorization: Bearer ${OIDC_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "$(jq --null-input \
+              --arg repo "${GH_REPOSITORY}" \
+              --arg source_branch "${GH_HEAD_REF}" \
+              --argjson pr_number "${PR_NUMBER}" \
+              '{repo: $repo, source_branch: $source_branch, pr_number: $pr_number, event: "closed_unmerged"}')"

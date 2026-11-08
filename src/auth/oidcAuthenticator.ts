@@ -36,6 +36,17 @@ export interface PromotePrincipal {
   repository: string;
   /** Git ref the workflow is running on (e.g. 'refs/heads/main'). */
   ref: string;
+  /**
+   * PR head branch (GitHub `head_ref` claim, set only for pull_request
+   * workflows). null when absent or empty.
+   */
+  headRef: string | null;
+}
+
+/** Options for OidcVerifier.verify. */
+export interface OidcVerifyOptions {
+  /** DEV ONLY. Honoured by DevOidcAuthenticator; every other implementation MUST ignore it. */
+  devRef?: string;
 }
 
 /**
@@ -44,7 +55,7 @@ export interface PromotePrincipal {
  * return a verified PromotePrincipal, or throw AppError(PERMISSION_DENIED).
  */
 export interface OidcVerifier {
-  verify(authorization: string | undefined): Promise<PromotePrincipal>;
+  verify(authorization: string | undefined, opts?: OidcVerifyOptions): Promise<PromotePrincipal>;
 }
 
 /**
@@ -68,7 +79,7 @@ export interface OidcJwtVerifier {
  *
  * The injected `verifier` (built at the composition root via
  * `JwtRsaVerifier.create`) validates iss, aud, exp, nbf, and signature
- * automatically.  We extract `repository` and `ref` from the returned claims
+ * automatically.  We extract `repository`, `ref` and the optional `head_ref` from the returned claims
  * and map any error to an opaque PERMISSION_DENIED.
  */
 export class GithubOidcAuthenticator implements OidcVerifier {
@@ -86,11 +97,16 @@ export class GithubOidcAuthenticator implements OidcVerifier {
   /**
    * Verifies the GitHub Actions OIDC JWT from the Authorization header.
    *
+   * `_opts` (dev-only ref override) is intentionally ignored here.
+   *
    * @param authorization - Raw value of the HTTP Authorization header.
-   * @returns Verified PromotePrincipal { repository, ref }.
+   * @returns Verified PromotePrincipal { repository, ref, headRef }.
    * @throws AppError(PERMISSION_DENIED) on ANY verification failure (opaque).
    */
-  async verify(authorization: string | undefined): Promise<PromotePrincipal> {
+  async verify(
+    authorization: string | undefined,
+    _opts?: OidcVerifyOptions,
+  ): Promise<PromotePrincipal> {
     try {
       // RFC 7235: scheme tokens are case-insensitive.
       if (!authorization || !/^bearer /i.test(authorization)) {
@@ -113,7 +129,13 @@ export class GithubOidcAuthenticator implements OidcVerifier {
         throw new AppError(ErrorCode.PERMISSION_DENIED);
       }
 
-      return { repository, ref };
+      // Optional: GitHub sets head_ref only for pull_request workflows.
+      const headRef =
+        typeof claims['head_ref'] === 'string' && claims['head_ref'] !== ''
+          ? claims['head_ref']
+          : null;
+
+      return { repository, ref, headRef };
     } catch (err) {
       // Re-throw our own AppError as-is; map everything else opaquely.
       if (err instanceof AppError) throw err;

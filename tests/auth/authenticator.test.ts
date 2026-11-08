@@ -90,6 +90,19 @@ describe('CognitoAuthenticator — Gate 1', () => {
     expect(principal.scopes).toEqual(['read:memory']);
   });
 
+  it('ignores opts.devUser: identity comes only from the verified token', async () => {
+    fakeVerifier.verify.mockResolvedValue(VALID_PAYLOAD);
+
+    const principal = await authenticator.authenticate(VALID_HEADER, { devUser: 'tl@demo.local' });
+
+    expect(principal).toEqual<Principal>(MULTI_SCOPE_PRINCIPAL);
+    await expect(
+      authenticator.authenticate(undefined, { devUser: 'tl@demo.local' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof AppError && err.code === ErrorCode.PERMISSION_DENIED,
+    );
+  });
+
   // --- Denial paths — all must throw AppError(PERMISSION_DENIED) ---
 
   it('throws PERMISSION_DENIED when Authorization header is undefined', async () => {

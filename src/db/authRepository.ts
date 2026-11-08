@@ -8,6 +8,9 @@
  *   3. findMembershipRole    — RBAC check (projectId + userId → project_role)
  *   4. insertAccessLog       — audit trail (write after full authorization)
  *
+ * C2 (web API) adds two reads: findEnabledUserByEmail (dev login by email)
+ * and listProjectsForUser (/me project list, non-archived only).
+ *
  * All SQL uses parameterized queries exclusively — no string concatenation.
  * The `PgAuthRepository` is the only production implementation; tests use an
  * in-memory fake (tests/auth/fakes.ts) so security-critical branching is
@@ -32,6 +35,16 @@ export interface AppUser {
   userId: string;
   /** Null when the user has no platform-level role. */
   globalRole: string | null;
+  email: string;
+  displayName: string | null;
+}
+
+/** One non-archived project the user belongs to, with their membership role. */
+export interface UserProject {
+  projectId: string;
+  slug: string;
+  name: string;
+  role: string;
 }
 
 /** Payload written to `access_log` on each authorized read. */
@@ -74,11 +87,27 @@ export interface AuthRepository {
   findEnabledUserBySubject(subject: string): Promise<AppUser | null>;
 
   /**
+   * Finds an enabled app_user by email (DEV login only). The caller passes the
+   * email already trimmed and lowercased; matching is case-insensitive.
+   * Returns null for unknown, disabled, or ambiguous emails (no oracle).
+   */
+  findEnabledUserByEmail(email: string): Promise<{ userId: string; idpSubject: string } | null>;
+
+  /**
+   * Lists the non-archived projects the user holds a membership in, ordered
+   * by project name then id. Returns [] when there are none.
+   */
+  listProjectsForUser(userId: string): Promise<UserProject[]>;
+
+  /**
    * Fetches the `project_role` for (projectId, userId). Returns null when
    * no membership row exists. Global-role holders still require a membership
    * row for read access (design decision D4).
    */
   findMembershipRole(projectId: string, userId: string): Promise<string | null>;
+
+  /** True when the project exists and is not archived (archived_at IS NULL). */
+  isProjectActive(projectId: string): Promise<boolean>;
 
   /**
    * Inserts one row into `access_log`. Called only after full authorization
@@ -112,6 +141,23 @@ WHERE project_id = $1
   AND role IN ('service_agent','contributor','project_admin')
   AND revoked_at IS NULL
   AND expires_at > now()
+`.trim();
+
+// Dev login by email. lower(email) keeps the match case-insensitive even for
+// mixed-case stored emails; LIMIT 2 lets the caller reject an ambiguous match.
+// $1=email (trimmed + lowercased by the caller)
+const FIND_ENABLED_USER_BY_EMAIL_SQL = `
+SELECT id, idp_subject FROM app_user
+WHERE lower(email) = $1 AND disabled_at IS NULL
+LIMIT 2
+`.trim();
+
+// /me project list — non-archived projects only. $1=user_id
+const LIST_PROJECTS_FOR_USER_SQL = `
+SELECT p.id, p.slug, p.name, pm.role
+FROM project_membership pm JOIN project p ON p.id = pm.project_id
+WHERE pm.user_id = $1 AND p.archived_at IS NULL
+ORDER BY p.name, p.id
 `.trim();
 
 // ---------------------------------------------------------------------------
@@ -153,8 +199,10 @@ export class PgAuthRepository implements AuthRepository {
     const { rows } = await this.pool.query<{
       id: string;
       global_role: string | null;
+      email: string;
+      display_name: string | null;
     }>(
-      'SELECT id, global_role FROM app_user WHERE idp_subject = $1 AND disabled_at IS NULL',
+      'SELECT id, global_role, email, display_name FROM app_user WHERE idp_subject = $1 AND disabled_at IS NULL',
       [subject],
     );
 
@@ -162,7 +210,31 @@ export class PgAuthRepository implements AuthRepository {
     return {
       userId: rows[0].id,
       globalRole: rows[0].global_role,
+      email: rows[0].email,
+      displayName: rows[0].display_name,
     };
+  }
+
+  async findEnabledUserByEmail(
+    email: string,
+  ): Promise<{ userId: string; idpSubject: string } | null> {
+    const { rows } = await this.pool.query<{ id: string; idp_subject: string }>(
+      FIND_ENABLED_USER_BY_EMAIL_SQL,
+      [email],
+    );
+    // Zero or ambiguous (two rows differing only by case) → deny.
+    if (rows.length !== 1) return null;
+    return { userId: rows[0].id, idpSubject: rows[0].idp_subject };
+  }
+
+  async listProjectsForUser(userId: string): Promise<UserProject[]> {
+    const { rows } = await this.pool.query<{
+      id: string;
+      slug: string;
+      name: string;
+      role: string;
+    }>(LIST_PROJECTS_FOR_USER_SQL, [userId]);
+    return rows.map((r) => ({ projectId: r.id, slug: r.slug, name: r.name, role: r.role }));
   }
 
   async findMembershipRole(projectId: string, userId: string): Promise<string | null> {
@@ -173,6 +245,14 @@ export class PgAuthRepository implements AuthRepository {
 
     if (rows.length === 0) return null;
     return rows[0].role;
+  }
+
+  async isProjectActive(projectId: string): Promise<boolean> {
+    const { rows } = await this.pool.query(
+      'SELECT 1 FROM project WHERE id = $1 AND archived_at IS NULL',
+      [projectId],
+    );
+    return rows.length > 0;
   }
 
   async insertAccessLog(entry: AccessLogEntry): Promise<void> {

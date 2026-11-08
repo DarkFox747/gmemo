@@ -30,7 +30,8 @@
  */
 
 import pg from 'pg';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { logger } from '../../src/observability/logger.js';
 import type {
   PromotionItemRow,
   ApplyContext,
@@ -1007,6 +1008,20 @@ describeWithDb('PgPromotionRepository integration', () => {
     expect(bRows[0].content_hash).toBe('promo-integ-mask-b');
   });
 
+  it('persistMasked does not touch an already-reviewed item', async () => {
+    const id = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-mask-reviewed' });
+    await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [id]);
+    const masked = { title: 'T2', summary: 'S2', body: 'B2', fields: {} };
+
+    await repo!.persistMasked(id, masked, 'promo-integ-mask-reviewed-new', {});
+
+    const { rows } = await pool!.query(
+      `SELECT title, content_hash FROM staging_item WHERE id = $1`, [id],
+    );
+    expect(rows[0].content_hash).toBe('promo-integ-mask-reviewed');
+    expect(rows[0].title).not.toBe('T2');
+  });
+
   // -------------------------------------------------------------------------
   // findJudgeContext / toOrQuery
   // -------------------------------------------------------------------------
@@ -1367,5 +1382,79 @@ describeWithDb('PgPromotionRepository integration', () => {
     expect(rows[0].title).toBe(maskedTitle);
     const { rows: q } = await pool!.query(`SELECT title FROM quarantine WHERE origin_item_id = $1`, [rawId]);
     expect(q[0].title).toBe(maskedTitle);
+  });
+
+  // -------------------------------------------------------------------------
+  // C2 guards: promotion never overwrites a human decision
+  // -------------------------------------------------------------------------
+
+  it('C2 guard: applyAccepted on a human-reviewed row → already, nothing written', async () => {
+    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c2-reviewed-apply' });
+    const item = await fetchItem(SESS_MAIN, itemId);
+    await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
+
+    expect(await repo!.applyAccepted(item, mainCtx(), null, new Set())).toEqual({ status: 'already' });
+    const { rows: mem } = await pool!.query(
+      `SELECT count(*)::int AS n FROM memory WHERE project_id = $1 AND content_hash = $2`,
+      [projectId, 'promo-integ-c2-reviewed-apply'],
+    );
+    expect(mem[0].n).toBe(0);
+    const { rows: st } = await pool!.query(
+      `SELECT promoted_at, judge_state FROM staging_item WHERE id = $1`, [itemId],
+    );
+    expect(st[0]).toEqual({ promoted_at: null, judge_state: 'pending' });
+  });
+
+  it('C2 guard: quarantineItem on a human-reviewed row logs a warning and writes nothing', async () => {
+    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c2-reviewed-q' });
+    const item = await fetchItem(SESS_MAIN, itemId);
+    await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    await repo!.quarantineItem(item, mainCtx(), {
+      reason: 'specificity', redact: false, decision: null, sanitizeFlags: {},
+    });
+    expect(warn).toHaveBeenCalledWith('[promote] quarantine skipped: item resolved concurrently', { itemId });
+    warn.mockRestore();
+    const { rows } = await pool!.query(
+      `SELECT count(*)::int AS n FROM quarantine WHERE origin_item_id = $1`, [itemId],
+    );
+    expect(rows[0].n).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // abandonOpenSession (HU-04.2)
+  // -------------------------------------------------------------------------
+
+  it('abandonOpenSession abandons the session and deletes only non-promoted items', async () => {
+    const SESS_AB = 'promo-integ-abandon-01';
+    await pool!.query(
+      `INSERT INTO staging_session (id, project_id, repo_id, branch, opened_by)
+       VALUES ($1, $2, $3, 'feature/abandon', 'integ-test-user')`,
+      [SESS_AB, projectId, repoId],
+    );
+    const promotedId = await insertAddItem({ sessionId: SESS_AB, contentHash: 'promo-integ-ab-promoted' });
+    const promoted = await fetchItem(SESS_AB, promotedId);
+    expect((await repo!.applyAccepted(promoted, { ...mainCtx(), sessionId: SESS_AB }, null, new Set())).status)
+      .toBe('applied');
+    for (const h of ['promo-integ-ab-1', 'promo-integ-ab-2', 'promo-integ-ab-3']) {
+      await insertAddItem({ sessionId: SESS_AB, contentHash: h });
+    }
+
+    // Wrong project: nothing happens.
+    const { rows: other } = await pool!.query(
+      `INSERT INTO project (slug, name) VALUES ('promo-integ-abandon-other', 'x')
+       ON CONFLICT (slug) DO UPDATE SET name = 'x' RETURNING id`,
+    );
+    expect(await repo!.abandonOpenSession(SESS_AB, other[0].id)).toEqual({ abandoned: false, discarded: 0 });
+
+    expect(await repo!.abandonOpenSession(SESS_AB, projectId)).toEqual({ abandoned: true, discarded: 3 });
+    const { rows: sess } = await pool!.query(`SELECT status FROM staging_session WHERE id = $1`, [SESS_AB]);
+    expect(sess[0].status).toBe('abandoned');
+    const { rows: left } = await pool!.query(`SELECT id FROM staging_item WHERE session_id = $1`, [SESS_AB]);
+    expect(left.map((r) => r.id)).toEqual([promotedId]);
+
+    // Repeat: no-op.
+    expect(await repo!.abandonOpenSession(SESS_AB, projectId)).toEqual({ abandoned: false, discarded: 0 });
+    await pool!.query(`DELETE FROM project WHERE slug = 'promo-integ-abandon-other'`);
   });
 });

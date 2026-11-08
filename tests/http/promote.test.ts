@@ -15,9 +15,12 @@
  *  5. Malformed body (missing source_branch) → opaque 500, no schema echo.
  *  6. Malformed body (extra field rejected by .strict()) → opaque 500, no schema echo.
  *  7. Injected fault in promoteService.promote → opaque 500, no message/stack leakage.
+ *  8. HU-04.2 closed_unmerged: discard, repeat no_op, promoted rows kept, and the
+ *     PR-bound OIDC ref rules (C1–C4) all deny opaquely.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { logger } from '../../src/observability/logger.js';
 import request from 'supertest';
 import { createApp } from '../../src/http/app.js';
 import { makeStubAuthServices, InMemoryAuthRepository } from '../auth/fakes.js';
@@ -26,8 +29,19 @@ import type { PromoteOutcome } from '../../src/promote/promoteService.js';
 import type { PromoteServiceLike } from '../../src/promote/promoteService.js';
 import type { OidcVerifier } from '../../src/auth/oidcAuthenticator.js';
 import type { PromotionRepository } from '../../src/db/promotionRepository.js';
-import type { ActorIdentity, Authorizer, Principal, TenantContext, ToolName } from '../../src/mcp/context.js';
-import type { PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
+import type {
+  ActorIdentity,
+  AdminActor,
+  AuthenticatedUser,
+  Authorizer,
+  Principal,
+  RequestContext,
+  TenantContext,
+  ToolName,
+} from '../../src/mcp/context.js';
+import type { OidcVerifyOptions, PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
+import { DevOidcAuthenticator } from '../../src/auth/devOidcAuthenticator.js';
+import { FakePromotionRepository, makeItem } from '../promote/fakes.js';
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -78,11 +92,16 @@ const OPAQUE_ERROR_BODY = { error: 'Internal server error' };
  * OidcVerifier that resolves with the given repository slug.
  * All real OIDC verification is bypassed.
  */
-function makeOidcVerifier(repository: string, ref = 'refs/heads/main'): OidcVerifier {
+function makeOidcVerifier(
+  repository: string,
+  ref = 'refs/heads/main',
+  headRef: string | null = null,
+): OidcVerifier {
   return {
     verify: async (_authorization) => ({
       repository,
       ref,
+      headRef,
     }),
   };
 }
@@ -105,6 +124,16 @@ function makePromotionRepo(sessionId: string | null): PromotionRepository {
     }),
     quarantineItem: async () => {},
     finalizeSession: async () => {},
+    approveReviewItem: async () => ({
+      status: 'approved' as const,
+      memoryId: 'mem-t022',
+      deduped: false,
+      rebasedFromRevision: null,
+      rebasedToRevision: null,
+      relatedSuperseded: false,
+    }),
+    rejectReviewItem: async () => 'rejected' as const,
+    abandonOpenSession: async () => ({ abandoned: true, discarded: 0 }),
   };
 }
 
@@ -301,6 +330,7 @@ describe('POST /promote', () => {
         verify: async (_authorization) => ({
           repository: OWNER_REPO,
           ref: 'refs/heads/deploy/prod',
+          headRef: null,
         }),
       },
       authRepository: new InMemoryAuthRepository([
@@ -343,9 +373,22 @@ describe('POST /promote', () => {
 
     // Custom authorizer that passes the Cognito path but denies authorizePromote
     const denyingAuthorizer: Authorizer = {
-      authorize: (_principal: Principal, _tenant: TenantContext, _tool: ToolName): Promise<ActorIdentity> =>
-        Promise.resolve({ actorId: 'stub', roles: ['viewer'] }),
-      authorizePromote: (_principal: PromotePrincipal, _tenant: TenantContext): Promise<ActorIdentity> => {
+      authorize: (
+        _principal: Principal,
+        _tenant: TenantContext,
+        _tool: ToolName,
+      ): Promise<ActorIdentity> =>
+        Promise.resolve({ actorId: 'stub', userId: null, roles: ['viewer'] }),
+      authorizePromote: (
+        _principal: PromotePrincipal,
+        _tenant: TenantContext,
+      ): Promise<ActorIdentity> => {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      },
+      authorizeUser: (_principal: Principal): Promise<AuthenticatedUser> => {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      },
+      authorizeProjectAdmin: (_principal: Principal, _projectId: string): Promise<AdminActor> => {
         throw new AppError(ErrorCode.PERMISSION_DENIED);
       },
     };
@@ -446,5 +489,329 @@ describe('POST /promote', () => {
     expect(serialised).not.toContain('promote-fault-sentinel-do-not-leak');
     expect(serialised).not.toContain('stack');
     expect(serialised).not.toContain('message');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HU-04.2 — closed_unmerged
+// ---------------------------------------------------------------------------
+
+/** FakePromotionRepository reports this id as the single open session. */
+const FAKE_SESSION_ID = 'test-session';
+const FEATURE = 'feature/x';
+const PR = 7;
+const CLOSED_BODY = {
+  repo: OWNER_REPO,
+  source_branch: FEATURE,
+  pr_number: PR,
+  event: 'closed_unmerged',
+};
+
+interface ClosedSetup {
+  principal?: Partial<PromotePrincipal>;
+  repo?: FakePromotionRepository;
+  authorizer?: Authorizer;
+  seedRepo?: boolean;
+}
+
+/**
+ * Services for the closed_unmerged path: stateful FakePromotionRepository
+ * seeded with 3 unpromoted items, PR-bound principal by default, and an audit
+ * logger that captures recordAbandon calls.
+ */
+function makeClosedServices(setup: ClosedSetup = {}) {
+  const repo =
+    setup.repo ?? new FakePromotionRepository([makeItem('i1'), makeItem('i2'), makeItem('i3')]);
+  const principal: PromotePrincipal = {
+    repository: OWNER_REPO,
+    ref: `refs/pull/${PR}/merge`,
+    headRef: FEATURE,
+    ...setup.principal,
+  };
+  const verifyOpts: Array<OidcVerifyOptions | undefined> = [];
+  const abandonAudits: Array<{
+    ctx: RequestContext;
+    p: { sessionId: string; discarded: number; prNumber: number };
+  }> = [];
+
+  const base = makeStubAuthServices();
+  const services = makeStubAuthServices({
+    oidcVerifier: {
+      verify: async (_authorization, opts) => {
+        verifyOpts.push(opts);
+        return principal;
+      },
+    },
+    authRepository: new InMemoryAuthRepository(
+      setup.seedRepo === false
+        ? []
+        : [
+            {
+              remoteUrl: REMOTE_URL,
+              repoId: REPO_ID,
+              projectId: PROJECT_ID,
+              defaultBranch: 'main',
+            },
+          ],
+    ),
+    promotionRepository: repo,
+    promoteService: makeThrowingPromoteService(), // closed_unmerged must never promote
+    auditLogger: {
+      ...base.auditLogger,
+      recordAbandon: async (ctx, p) => {
+        abandonAudits.push({ ctx, p });
+      },
+    },
+    ...(setup.authorizer ? { authorizer: setup.authorizer } : {}),
+  });
+  return { services, repo, verifyOpts, abandonAudits };
+}
+
+function postPromote(app: ReturnType<typeof createApp>, body: Record<string, unknown>) {
+  return request(app).post('/promote').set('Authorization', 'Bearer fake-oidc-token').send(body);
+}
+
+describe('POST /promote — closed_unmerged (HU-04.2)', () => {
+  it('3 staged items on feature/x → 200 {abandoned, discarded:3}, items gone, audit recorded', async () => {
+    const { services, repo, abandonAudits } = makeClosedServices();
+
+    const res = await postPromote(createApp(services), CLOSED_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'abandoned', discarded: 3 });
+    expect(repo.abandonCalls).toEqual([{ sessionId: FAKE_SESSION_ID, projectId: PROJECT_ID }]);
+    expect(repo.rows.size).toBe(0);
+    expect(abandonAudits).toHaveLength(1);
+    expect(abandonAudits[0].ctx.tenant).toEqual({
+      projectId: PROJECT_ID,
+      repoId: REPO_ID,
+      branch: FEATURE,
+    });
+    expect(abandonAudits[0].p).toEqual({ sessionId: FAKE_SESSION_ID, discarded: 3, prNumber: PR });
+  });
+
+  it('audit failure after a committed abandon is logged (session id) and fails closed', async () => {
+    const spy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    try {
+      const { services } = makeClosedServices();
+      services.auditLogger.recordAbandon = () => Promise.reject(new Error('db down'));
+
+      const res = await postPromote(createApp(services), CLOSED_BODY);
+
+      expect(res.status).toBe(500);
+      expect(spy.mock.calls.some((c) => JSON.stringify(c).includes(FAKE_SESSION_ID))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('repeated close → 200 no_op with discarded 0 and no second audit', async () => {
+    const { services, abandonAudits } = makeClosedServices();
+    const app = createApp(services);
+
+    await postPromote(app, CLOSED_BODY);
+    const res = await postPromote(app, CLOSED_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'no_op', discarded: 0 });
+    expect(abandonAudits).toHaveLength(1);
+  });
+
+  it('promoted rows are kept; only non-promoted items are discarded', async () => {
+    const repo = new FakePromotionRepository([
+      makeItem('i1'),
+      makeItem('i2'),
+      makeItem('p1', { promoted_at: new Date(), promoted_memory_id: 'mem-1' }),
+    ]);
+    const { services } = makeClosedServices({ repo });
+
+    const res = await postPromote(createApp(services), CLOSED_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'abandoned', discarded: 2 });
+    expect([...repo.rows.keys()]).toEqual(['p1']);
+  });
+
+  it('abandon raced (abandoned:false) → same no_op body and no audit', async () => {
+    const repo = new FakePromotionRepository([makeItem('i1')]);
+    repo.abandonOpenSession = async () => ({ abandoned: false, discarded: 0 });
+    const { services, abandonAudits } = makeClosedServices({ repo });
+
+    const res = await postPromote(createApp(services), CLOSED_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'no_op', discarded: 0 });
+    expect(abandonAudits).toHaveLength(0);
+  });
+
+  it('push-style ref refs/heads/<source_branch> (headRef null) is accepted', async () => {
+    const { services } = makeClosedServices({
+      principal: { ref: `refs/heads/${FEATURE}`, headRef: null },
+    });
+
+    const res = await postPromote(createApp(services), CLOSED_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'abandoned', discarded: 3 });
+  });
+
+  it('passes devRef refs/heads/<source_branch> to the verifier', async () => {
+    const { services, verifyOpts } = makeClosedServices();
+
+    await postPromote(createApp(services), CLOSED_BODY);
+
+    expect(verifyOpts).toEqual([{ devRef: `refs/heads/${FEATURE}` }]);
+  });
+
+  // --- Denials: opaque 500, nothing abandoned, nothing audited ---
+
+  const denyingPromoteAuthorizer: Authorizer = {
+    ...makeStubAuthServices().authorizer,
+    authorizePromote: async () => {
+      throw new AppError(ErrorCode.PERMISSION_DENIED);
+    },
+  };
+
+  const denials: Array<[string, ClosedSetup, Record<string, unknown>]> = [
+    [
+      'missing pr_number',
+      {},
+      { repo: OWNER_REPO, source_branch: FEATURE, event: 'closed_unmerged' },
+    ],
+    ['with merge_sha', {}, { ...CLOSED_BODY, merge_sha: 'abc123' }],
+    ['unknown event value', {}, { ...CLOSED_BODY, event: 'reopened' }],
+    [
+      'refs/pull/7/merge with head_ref different from source_branch',
+      { principal: { headRef: 'feature/other' } },
+      CLOSED_BODY,
+    ],
+    ['refs/pull/7/merge with head_ref absent', { principal: { headRef: null } }, CLOSED_BODY],
+    ['refs/pull/8/merge for pr_number 7', { principal: { ref: 'refs/pull/8/merge' } }, CLOSED_BODY],
+    [
+      'refs/heads/<other branch>',
+      { principal: { ref: 'refs/heads/feature/other', headRef: null } },
+      CLOSED_BODY,
+    ],
+    [
+      'source_branch = default branch (main)',
+      { principal: { ref: 'refs/heads/main', headRef: null } },
+      { ...CLOSED_BODY, source_branch: 'main' },
+    ],
+    [
+      'source_branch = default branch via PR ref (head_ref main)',
+      { principal: { headRef: 'main' } },
+      { ...CLOSED_BODY, source_branch: 'main' },
+    ],
+    [
+      'body.repo differs from principal.repository',
+      { principal: { repository: 'other-org/other-repo' } },
+      CLOSED_BODY,
+    ],
+    ['unknown repo', { seedRepo: false }, CLOSED_BODY],
+    [
+      'no active machine credential (authorizePromote denies)',
+      { authorizer: denyingPromoteAuthorizer },
+      CLOSED_BODY,
+    ],
+  ];
+
+  it.each(denials)('%s → opaque 500, nothing discarded', async (_name, setup, body) => {
+    const { services, repo, abandonAudits } = makeClosedServices(setup);
+
+    const res = await postPromote(createApp(services), body);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual(OPAQUE_ERROR_BODY);
+    expect(repo.abandonCalls).toHaveLength(0);
+    expect(repo.rows.size).toBe(3);
+    expect(abandonAudits).toHaveLength(0);
+    const serialised = JSON.stringify(res.body);
+    expect(serialised).not.toContain('feature');
+    expect(serialised).not.toContain(PROJECT_ID);
+  });
+});
+
+describe('POST /promote — merged path with event discriminator', () => {
+  it("explicit event 'merged' on the default branch → unchanged outcome", async () => {
+    const app = createApp(makeHappyServices());
+
+    const res = await postPromote(app, { ...VALID_BODY, event: 'merged' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(HAPPY_OUTCOME);
+  });
+
+  it('merged without event on a feature branch is denied as before, even with a PR ref', async () => {
+    const services = makeStubAuthServices({
+      oidcVerifier: makeOidcVerifier(OWNER_REPO, `refs/pull/${PR}/merge`, FEATURE),
+      authRepository: new InMemoryAuthRepository([
+        { remoteUrl: REMOTE_URL, repoId: REPO_ID, projectId: PROJECT_ID, defaultBranch: 'main' },
+      ]),
+      promotionRepository: makePromotionRepo(SESSION_ID),
+      promoteService: makeScriptedPromoteService(HAPPY_OUTCOME),
+    });
+
+    const res = await postPromote(createApp(services), {
+      repo: OWNER_REPO,
+      source_branch: FEATURE,
+      pr_number: PR,
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual(OPAQUE_ERROR_BODY);
+  });
+});
+
+describe('POST /promote — DevOidcAuthenticator (devRef)', () => {
+  const DEV_REPO = 'crombie-llc/gmemo-demo';
+
+  function makeDevServices() {
+    const repo = new FakePromotionRepository([makeItem('i1'), makeItem('i2')]);
+    const services = makeStubAuthServices({
+      oidcVerifier: new DevOidcAuthenticator(),
+      authRepository: new InMemoryAuthRepository([
+        {
+          remoteUrl: `https://github.com/${DEV_REPO}.git`,
+          repoId: REPO_ID,
+          projectId: PROJECT_ID,
+          defaultBranch: 'main',
+        },
+      ]),
+      promotionRepository: repo,
+      promoteService: makeScriptedPromoteService(HAPPY_OUTCOME),
+    });
+    return { services, repo };
+  }
+
+  it('closed_unmerged on feature/x works with the dev ref refs/heads/feature/x', async () => {
+    const { services } = makeDevServices();
+
+    const res = await postPromote(createApp(services), {
+      repo: DEV_REPO,
+      source_branch: FEATURE,
+      pr_number: PR,
+      event: 'closed_unmerged',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'abandoned', discarded: 2 });
+  });
+
+  it('merged on feature/x is still denied (default-branch check)', async () => {
+    const { services } = makeDevServices();
+
+    const res = await postPromote(createApp(services), { repo: DEV_REPO, source_branch: FEATURE });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual(OPAQUE_ERROR_BODY);
+  });
+
+  it('merged on main → promote outcome as before', async () => {
+    const { services } = makeDevServices();
+
+    const res = await postPromote(createApp(services), { repo: DEV_REPO, source_branch: 'main' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(HAPPY_OUTCOME);
   });
 });

@@ -20,6 +20,11 @@ import type { TenantContext } from '../mcp/context.js';
 import type { DecisionCriterion, JudgeContextItem, Verdict } from '../judge/judge.js';
 import { toVectorParam } from './vector.js';
 import { computeContentHash } from '../security/hash.js';
+import { logger } from '../observability/logger.js';
+import { QUEUED_PREDICATE } from './reviewQueueRepository.js';
+import type { ConflictCode } from '../http/api/types.js';
+
+export type { ConflictCode };
 
 // ---------------------------------------------------------------------------
 // Types (exported for use by PromoteService and fakes)
@@ -100,6 +105,46 @@ export type ApplyResult =
   // nothing written, the item must go to the human review queue (SEC M-1).
   | { status: 'review_required' };
 
+/** Outcome of the transaction-scoped apply core (no BEGIN/COMMIT/ROLLBACK inside). */
+type OpResult =
+  | { status: 'applied'; memoryId: string; deduped: boolean }
+  | { status: 'stale' }
+  | { status: 'duplicate' }
+  | { status: 'review_required' };
+
+export interface ReviewApproveInput {
+  projectId: string;
+  itemId: string;
+  /** app_user.id of the project_admin approving. */
+  reviewerUserId: string;
+  /** Hash of the row the embedding was computed from. */
+  expectedContentHash: string;
+  embedding: number[] | null;
+  /** The target revision the reviewer saw; null = not supplied. */
+  targetRevision: number | null;
+  markRelatedSuperseded: boolean;
+}
+
+export type ReviewApproveResult =
+  | {
+      status: 'approved';
+      memoryId: string;
+      deduped: boolean;
+      rebasedFromRevision: number | null;
+      rebasedToRevision: number | null;
+      relatedSuperseded: boolean;
+    }
+  | { status: 'not_found' }
+  | { status: 'conflict'; code: ConflictCode };
+
+export interface ReviewRejectInput {
+  projectId: string;
+  itemId: string;
+  reviewerUserId: string;
+  /** Already validated, secret-scanned and PII-masked by the caller. */
+  reason: string;
+}
+
 // ---------------------------------------------------------------------------
 // Interface
 // ---------------------------------------------------------------------------
@@ -167,6 +212,25 @@ export interface PromotionRepository {
     sessionId: string,
     status: 'promoted' | 'rejected' | 'partially_promoted',
   ): Promise<void>;
+
+  /**
+   * Human approval of a queued item (HU-07.2) in one transaction, reusing the
+   * promotion apply SQL. First writer wins: a resolved item gives not_found.
+   * judge_state is never touched.
+   */
+  approveReviewItem(i: ReviewApproveInput): Promise<ReviewApproveResult>;
+
+  /** Human rejection (HU-07.3): quarantine 'human_review: <reason>' + review columns. */
+  rejectReviewItem(i: ReviewRejectInput): Promise<'rejected' | 'not_found'>;
+
+  /**
+   * PR closed without merge (HU-04.2): marks the open session abandoned and
+   * deletes its non-promoted items, in one transaction.
+   */
+  abandonOpenSession(
+    sessionId: string,
+    projectId: string,
+  ): Promise<{ abandoned: boolean; discarded: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +275,7 @@ const PERSIST_MASKED_SQL = `
 UPDATE staging_item
 SET title = $1, summary = $2, body = $3, fields = $4::jsonb,
     content_hash = $5, sanitize_flags = $6::jsonb
-WHERE id = $7 AND promoted_at IS NULL
+WHERE id = $7 AND promoted_at IS NULL AND reviewed_at IS NULL
 `.trim();
 
 // $1=websearch query string  $2=project_id  $3=exclude memory id | null
@@ -224,9 +288,10 @@ ORDER BY ts_rank_cd(m.content_tsv, q) DESC, m.id DESC
 LIMIT 3
 `.trim();
 
-// S0: Lock + idempotency guard. $1=item_id
+// S0: Lock + idempotency guard. A human-reviewed row is never applied by
+// promotion (reviewed_at set → 'already'). $1=item_id
 const LOCK_ITEM_SQL = `
-SELECT promoted_at FROM staging_item WHERE id = $1 FOR UPDATE
+SELECT promoted_at, reviewed_at FROM staging_item WHERE id = $1 FOR UPDATE
 `.trim();
 
 // A1/S2: Insert authoritative memory (add and supersede ops).
@@ -381,6 +446,81 @@ SET judge_state = 'rejected', judge_reason = $1, judge_criterion = $2,
 WHERE id = $11 AND promoted_at IS NULL AND reviewed_at IS NULL
 `.trim();
 
+// ---------------------------------------------------------------------------
+// Human review (C2). Lock order: item → target memory → related memory, the
+// same order as applyAccepted (item → memory).
+// ---------------------------------------------------------------------------
+
+// R0: lock a queued item of the project + its session metadata. Under READ
+// COMMITTED a concurrent committed approve/reject makes the re-evaluated
+// predicate fail → 0 rows (first writer wins). $1=item_id $2=project_id
+const LOCK_QUEUED_ITEM_SQL = `
+SELECT si.id, si.op, si.type, si.title, si.summary, si.body, si.fields, si.content_hash,
+       si.target_memory_id, si.target_revision,
+       si.judge_state, si.judge_reason,
+       si.judge_criterion, si.judge_confidence, si.related_memory_id,
+       si.mandatory_review, si.sanitize_flags,
+       si.author_identity, si.promoted_at, si.promoted_memory_id,
+       ss.id AS session_id, ss.repo_id, ss.branch, ss.pr_number
+FROM staging_item si
+JOIN staging_session ss ON ss.id = si.session_id
+WHERE si.id = $1 AND ss.project_id = $2 AND ${QUEUED_PREDICATE}
+FOR UPDATE OF si
+`.trim();
+
+// R3: rebase a stale item onto the revision the reviewer confirmed.
+// $1=target_revision $2=item_id
+const REBASE_ITEM_SQL = `
+UPDATE staging_item SET target_revision = $1 WHERE id = $2
+`.trim();
+
+// R6: mark applied + approved. judge_state is NOT touched (keeps the judge label).
+// $1=promoted_memory_id $2=reviewed_by $3=item_id
+const MARK_APPROVED_SQL = `
+UPDATE staging_item
+SET promoted_at = now(), promoted_memory_id = $1,
+    reviewed_by = $2, review_decision = 'approved', reviewed_at = now()
+WHERE id = $3 AND promoted_at IS NULL AND reviewed_at IS NULL
+`.trim();
+
+// R7: record the human approver. $1=approved_by $2=memory_id $3=project_id
+const SET_APPROVED_BY_SQL = `
+UPDATE memory SET approved_by = $1 WHERE id = $2 AND project_id = $3
+`.trim();
+
+// R8: supersede the related active memory. $1=memory_id $2=project_id
+const SUPERSEDE_RELATED_SQL = `
+UPDATE memory SET status = 'superseded', updated_at = now()
+WHERE id = $1 AND project_id = $2 AND status = 'active'
+`.trim();
+
+// R8: human-sourced supersedes edge. $1=from_memory (new) $2=to_memory (related)
+const INSERT_HUMAN_RELATION_SQL = `
+INSERT INTO memory_relation (from_memory, to_memory, relation_type, source)
+VALUES ($1, $2, 'supersedes', 'human')
+ON CONFLICT (from_memory, to_memory, relation_type) DO NOTHING
+`.trim();
+
+// Reject: review columns; judge_state is NOT touched.
+// $1=reviewed_by $2=review_reason $3=item_id
+const MARK_REJECTED_SQL = `
+UPDATE staging_item
+SET reviewed_by = $1, review_decision = 'rejected', review_reason = $2, reviewed_at = now()
+WHERE id = $3 AND promoted_at IS NULL AND reviewed_at IS NULL
+`.trim();
+
+// Abandon (HU-04.2). $1=session_id $2=project_id
+const ABANDON_SESSION_SQL = `
+UPDATE staging_session SET status = 'abandoned', last_activity_at = now()
+WHERE id = $1 AND project_id = $2 AND status = 'open'
+`.trim();
+
+// Promoted rows are kept: memory_revision.promoted_from_item points at them.
+// $1=session_id
+const DELETE_UNPROMOTED_ITEMS_SQL = `
+DELETE FROM staging_item WHERE session_id = $1 AND promoted_at IS NULL
+`.trim();
+
 // Finalize session: set terminal status.
 // $1=status ('promoted'|'rejected'|'partially_promoted')  $2=session_id
 const FINALIZE_SESSION_SQL = `
@@ -446,6 +586,43 @@ function requiresReview(
 
 const REDACT_SENTINEL = '[REDACTED: secret detected]';
 
+/** Raw R0 lock row: item columns (no target_type) + session metadata. */
+interface RawQueuedItemRow extends Omit<RawPromotionItemRow, 'target_type'> {
+  session_id: string;
+  repo_id: string;
+  branch: string;
+  pr_number: number | null;
+}
+
+function toItemRow(r: RawPromotionItemRow): PromotionItemRow {
+  return {
+    id: r.id,
+    op: r.op as PromotionItemRow['op'],
+    type: r.type as MemoryType,
+    title: r.title,
+    summary: r.summary,
+    body: r.body,
+    fields: r.fields,
+    content_hash: r.content_hash,
+    target_memory_id: r.target_memory_id,
+    target_revision: r.target_revision,
+    target_type: r.target_type as MemoryType | null,
+    judge_state: r.judge_state as PromotionItemRow['judge_state'],
+    judge_reason: r.judge_reason,
+    judge_criterion: r.judge_criterion as PromotionItemRow['judge_criterion'],
+    judge_confidence: r.judge_confidence,
+    related_memory_id: r.related_memory_id,
+    mandatory_review: r.mandatory_review,
+    sanitize_flags: r.sanitize_flags ?? {},
+    author_identity: r.author_identity,
+    promoted_at: r.promoted_at,
+    promoted_memory_id: r.promoted_memory_id,
+  };
+}
+
+/** Human approval: a mandatory-review target type does not block the reviewer. */
+const NO_MANDATORY_TYPES: ReadonlySet<MemoryType> = new Set();
+
 // ---------------------------------------------------------------------------
 // Judge-context query builder
 // ---------------------------------------------------------------------------
@@ -494,29 +671,7 @@ export class PgPromotionRepository implements PromotionRepository {
       FETCH_PROMOTABLE_ITEMS_SQL,
       [sessionId, projectId],
     );
-    return rows.map((r) => ({
-      id: r.id,
-      op: r.op as PromotionItemRow['op'],
-      type: r.type as MemoryType,
-      title: r.title,
-      summary: r.summary,
-      body: r.body,
-      fields: r.fields,
-      content_hash: r.content_hash,
-      target_memory_id: r.target_memory_id,
-      target_revision: r.target_revision,
-      target_type: r.target_type as MemoryType | null,
-      judge_state: r.judge_state as PromotionItemRow['judge_state'],
-      judge_reason: r.judge_reason,
-      judge_criterion: r.judge_criterion as PromotionItemRow['judge_criterion'],
-      judge_confidence: r.judge_confidence,
-      related_memory_id: r.related_memory_id,
-      mandatory_review: r.mandatory_review,
-      sanitize_flags: r.sanitize_flags ?? {},
-      author_identity: r.author_identity,
-      promoted_at: r.promoted_at,
-      promoted_memory_id: r.promoted_memory_id,
-    }));
+    return rows.map(toItemRow);
   }
 
   async findJudgeContext(
@@ -567,7 +722,8 @@ export class PgPromotionRepository implements PromotionRepository {
   /**
    * Applies one accepted item inside a per-item BEGIN…COMMIT/ROLLBACK transaction.
    * FOR UPDATE lock on the staging_item row + promoted_at IS NULL guard enforce
-   * first-writer-wins semantics across concurrent promote() calls.
+   * first-writer-wins semantics across concurrent promote() calls. A row already
+   * resolved by a human (reviewed_at set) is never applied → 'already'.
    * embedding is the pre-computed vector (null when embed failed or op=deprecate).
    * A target whose type differs from the item's, or is in mandatoryTypes, is not
    * touched → { status: 'review_required' } (SEC M-1 defence in depth).
@@ -582,214 +738,33 @@ export class PgPromotionRepository implements PromotionRepository {
     try {
       await client.query('BEGIN');
 
-      // S0: Lock the item row + idempotency guard.
-      const lockRes = await client.query<{ promoted_at: Date | null }>(LOCK_ITEM_SQL, [item.id]);
-      if ((lockRes.rows[0]?.promoted_at ?? null) !== null) {
-        // Already applied by a prior run — commit the no-op transaction.
+      // S0: Lock the item row + idempotency / human-decision guard.
+      const lockRes = await client.query<{ promoted_at: Date | null; reviewed_at: Date | null }>(
+        LOCK_ITEM_SQL,
+        [item.id],
+      );
+      const locked = lockRes.rows[0];
+      if ((locked?.promoted_at ?? null) !== null || (locked?.reviewed_at ?? null) !== null) {
+        // Already applied by a prior run or resolved by a human — commit the no-op.
         await client.query('COMMIT');
         return { status: 'already' };
       }
 
-      let memoryId: string;
-      let deduped = false;
-
-      if (item.op === 'add') {
-        // A1: Insert authoritative memory.
-        const memRes = await client.query<{ id: string }>(INSERT_MEMORY_SQL, [
-          ctx.projectId, ctx.repoId, item.type,
-          item.title, item.summary, item.body,
-          JSON.stringify(item.fields),
-          item.author_identity, item.content_hash,
-          ctx.originBranch, ctx.originPr,
-          toVectorParam(embedding),   // $12
-        ]);
-
-        if (memRes.rows.length === 0) {
-          // ON CONFLICT hit — content already in memory; find existing row.
-          const dupRes = await client.query<{ id: string }>(SELECT_MEMORY_BY_HASH_SQL, [
-            ctx.projectId, item.content_hash,
-          ]);
-          memoryId = dupRes.rows[0]!.id;
-          deduped = true;
-          // A2 SKIPPED — existing memory already carries revision 1.
-        } else {
-          memoryId = memRes.rows[0]!.id;
-          deduped = false;
-          // A2: Insert revision only for newly-inserted rows.
-          await client.query(INSERT_REVISION_ADD_SQL, [
-            memoryId,
-            item.title, item.summary, item.body,
-            JSON.stringify(item.fields),
-            item.type, item.content_hash,
-            item.author_identity, item.id,
-          ]);
-        }
-      } else if (item.op === 'amend') {
-        // M1: Lock target memory row + stale check (L3: project_id re-asserts tenant).
-        const targetRes = await client.query<RawMemoryLockRow>(LOCK_MEMORY_SQL, [
-          item.target_memory_id,
-          ctx.projectId,
-        ]);
-        if (
-          targetRes.rows.length === 0 ||
-          targetRes.rows[0]!.current_revision !== item.target_revision ||
-          targetRes.rows[0]!.status !== 'active'
-        ) {
-          await this.safeRollback(client);
-          return { status: 'stale' };
-        }
-        if (requiresReview(item, targetRes.rows[0]!.type, mandatoryTypes)) {
-          await this.safeRollback(client);
-          return { status: 'review_required' };
-        }
-        const prevRevision = targetRes.rows[0]!.current_revision;
-
-        // M2: Update memory content — may throw 23505 on duplicate content_hash.
-        try {
-          await client.query(UPDATE_MEMORY_AMEND_SQL, [
-            item.title, item.summary, item.body,
-            JSON.stringify(item.fields),
-            item.type, item.content_hash,
-            item.author_identity,
-            ctx.originBranch, ctx.originPr,
-            item.target_memory_id,
-            ctx.projectId,          // $11 — L3 tenant guard
-            toVectorParam(embedding), // $12
-          ]);
-        } catch (err) {
-          if ((err as { code?: string }).code === '23505') {
-            await this.safeRollback(client);
-            return { status: 'duplicate' };
-          }
-          throw err;
-        }
-
-        // M3: Insert revision.
-        await client.query(INSERT_REVISION_AMEND_SQL, [
-          item.target_memory_id, prevRevision + 1,
-          item.title, item.summary, item.body,
-          JSON.stringify(item.fields),
-          item.type, item.content_hash,
-          item.author_identity, item.id,
-        ]);
-
-        memoryId = item.target_memory_id!;
-        deduped = false;
-      } else if (item.op === 'supersede') {
-        // S1: Lock + stale check on the old target memory row (L3: project_id re-asserts tenant).
-        const targetRes = await client.query<RawMemoryLockRow>(LOCK_MEMORY_SQL, [
-          item.target_memory_id,
-          ctx.projectId,
-        ]);
-        if (
-          targetRes.rows.length === 0 ||
-          targetRes.rows[0]!.current_revision !== item.target_revision ||
-          targetRes.rows[0]!.status !== 'active'
-        ) {
-          await this.safeRollback(client);
-          return { status: 'stale' };
-        }
-        if (requiresReview(item, targetRes.rows[0]!.type, mandatoryTypes)) {
-          await this.safeRollback(client);
-          return { status: 'review_required' };
-        }
-
-        // S2: Insert new memory (same column list as A1).
-        const newMemRes = await client.query<{ id: string }>(INSERT_MEMORY_SQL, [
-          ctx.projectId, ctx.repoId, item.type,
-          item.title, item.summary, item.body,
-          JSON.stringify(item.fields),
-          item.author_identity, item.content_hash,
-          ctx.originBranch, ctx.originPr,
-          toVectorParam(embedding),   // $12
-        ]);
-
-        let newMemoryId: string;
-        if (newMemRes.rows.length === 0) {
-          // Dedup: new content already exists in memory.
-          const dupRes = await client.query<{ id: string }>(SELECT_MEMORY_BY_HASH_SQL, [
-            ctx.projectId, item.content_hash,
-          ]);
-          newMemoryId = dupRes.rows[0]!.id;
-          deduped = true;
-          // S3 SKIPPED — existing memory already has its revision.
-        } else {
-          newMemoryId = newMemRes.rows[0]!.id;
-          deduped = false;
-          // S3: Insert revision for the new memory row.
-          await client.query(INSERT_REVISION_SUPERSEDE_SQL, [
-            newMemoryId,
-            item.title, item.summary, item.body,
-            JSON.stringify(item.fields),
-            item.type, item.content_hash,
-            item.author_identity, item.id,
-          ]);
-        }
-
-        // L1 self-supersede guard: if dedup resolved the new content to the same
-        // memory row as the target, the item's content is identical to what it
-        // intended to replace. Inserting a self-relation would violate
-        // CHECK (from_memory <> to_memory) with code 23514 → short-circuit as duplicate.
-        if (newMemoryId === item.target_memory_id) {
-          await this.safeRollback(client);
-          return { status: 'duplicate' };
-        }
-
-        // S4: Mark old memory as superseded (L3: project_id re-asserts tenant).
-        await client.query(UPDATE_MEMORY_SUPERSEDED_SQL, [item.target_memory_id, ctx.projectId]);
-
-        // S5: Insert typed edge — ON CONFLICT DO NOTHING makes re-runs idempotent.
-        await client.query(INSERT_MEMORY_RELATION_SQL, [newMemoryId, item.target_memory_id]);
-
-        memoryId = newMemoryId;
-      } else {
-        // op === 'deprecate'
-
-        // D1: Lock target memory row + stale check; also snapshot current content.
-        // L3: project_id passed to re-assert tenant ownership.
-        const targetRes = await client.query<RawMemoryDeprecateLockRow>(
-          LOCK_MEMORY_FOR_DEPRECATE_SQL,
-          [item.target_memory_id, ctx.projectId],
-        );
-        if (
-          targetRes.rows.length === 0 ||
-          targetRes.rows[0]!.current_revision !== item.target_revision ||
-          targetRes.rows[0]!.status !== 'active'
-        ) {
-          await this.safeRollback(client);
-          return { status: 'stale' };
-        }
-        const snap = targetRes.rows[0]!;
-        if (requiresReview(item, snap.type, mandatoryTypes)) {
-          await this.safeRollback(client);
-          return { status: 'review_required' };
-        }
-
-        // D2: Flip status to deprecated + bump current_revision (L3: project_id guard).
-        await client.query(UPDATE_MEMORY_DEPRECATED_SQL, [item.target_memory_id, ctx.projectId]);
-
-        // D3: Insert revision using the snapshotted target content.
-        await client.query(INSERT_REVISION_DEPRECATE_SQL, [
-          item.target_memory_id, snap.current_revision + 1,
-          snap.title, snap.summary, snap.body,
-          JSON.stringify(snap.fields),
-          snap.type, snap.content_hash,
-          item.author_identity, item.id,
-        ]);
-
-        memoryId = item.target_memory_id!;
-        deduped = false;
+      const r = await this.applyOpInTxn(client, item, ctx, embedding, mandatoryTypes);
+      if (r.status !== 'applied') {
+        await this.safeRollback(client);
+        return r;
       }
 
       // Common final: first-writer-wins UPDATE — 0 rows means raced by another process.
-      const finalRes = await client.query(MARK_APPLIED_SQL, [memoryId, item.id]);
+      const finalRes = await client.query(MARK_APPLIED_SQL, [r.memoryId, item.id]);
       if ((finalRes.rowCount ?? 0) === 0) {
         await this.safeRollback(client);
         return { status: 'already' };
       }
 
       await client.query('COMMIT');
-      return { status: 'applied', memoryId, deduped };
+      return r;
     } catch (err) {
       await this.safeRollback(client);
       throw err;
@@ -799,24 +774,203 @@ export class PgPromotionRepository implements PromotionRepository {
   }
 
   /**
+   * Transaction-scoped apply core shared by promotion (applyAccepted) and human
+   * review (approveReviewItem): the op branches A1/A2, M1–M3, S1–S5, D1–D3.
+   * Never issues BEGIN, COMMIT or ROLLBACK — the caller rolls back on any
+   * non-applied result (after a 23505 the transaction is already aborted).
+   */
+  private async applyOpInTxn(
+    client: pg.PoolClient,
+    item: PromotionItemRow,
+    ctx: ApplyContext,
+    embedding: number[] | null,
+    mandatoryTypes: ReadonlySet<MemoryType>,
+  ): Promise<OpResult> {
+    if (item.op === 'add') {
+      // A1: Insert authoritative memory.
+      const memRes = await client.query<{ id: string }>(INSERT_MEMORY_SQL, [
+        ctx.projectId, ctx.repoId, item.type,
+        item.title, item.summary, item.body,
+        JSON.stringify(item.fields),
+        item.author_identity, item.content_hash,
+        ctx.originBranch, ctx.originPr,
+        toVectorParam(embedding),   // $12
+      ]);
+
+      if (memRes.rows.length === 0) {
+        // ON CONFLICT hit — content already in memory; find existing row.
+        const dupRes = await client.query<{ id: string }>(SELECT_MEMORY_BY_HASH_SQL, [
+          ctx.projectId, item.content_hash,
+        ]);
+        // A2 SKIPPED — existing memory already carries revision 1.
+        return { status: 'applied', memoryId: dupRes.rows[0]!.id, deduped: true };
+      }
+      const memoryId = memRes.rows[0]!.id;
+      // A2: Insert revision only for newly-inserted rows.
+      await client.query(INSERT_REVISION_ADD_SQL, [
+        memoryId,
+        item.title, item.summary, item.body,
+        JSON.stringify(item.fields),
+        item.type, item.content_hash,
+        item.author_identity, item.id,
+      ]);
+      return { status: 'applied', memoryId, deduped: false };
+    }
+
+    if (item.op === 'amend') {
+      // M1: Lock target memory row + stale check (L3: project_id re-asserts tenant).
+      const targetRes = await client.query<RawMemoryLockRow>(LOCK_MEMORY_SQL, [
+        item.target_memory_id,
+        ctx.projectId,
+      ]);
+      if (
+        targetRes.rows.length === 0 ||
+        targetRes.rows[0]!.current_revision !== item.target_revision ||
+        targetRes.rows[0]!.status !== 'active'
+      ) {
+        return { status: 'stale' };
+      }
+      if (requiresReview(item, targetRes.rows[0]!.type, mandatoryTypes)) {
+        return { status: 'review_required' };
+      }
+      const prevRevision = targetRes.rows[0]!.current_revision;
+
+      // M2: Update memory content — may throw 23505 on duplicate content_hash.
+      try {
+        await client.query(UPDATE_MEMORY_AMEND_SQL, [
+          item.title, item.summary, item.body,
+          JSON.stringify(item.fields),
+          item.type, item.content_hash,
+          item.author_identity,
+          ctx.originBranch, ctx.originPr,
+          item.target_memory_id,
+          ctx.projectId,          // $11 — L3 tenant guard
+          toVectorParam(embedding), // $12
+        ]);
+      } catch (err) {
+        if ((err as { code?: string }).code === '23505') return { status: 'duplicate' };
+        throw err;
+      }
+
+      // M3: Insert revision.
+      await client.query(INSERT_REVISION_AMEND_SQL, [
+        item.target_memory_id, prevRevision + 1,
+        item.title, item.summary, item.body,
+        JSON.stringify(item.fields),
+        item.type, item.content_hash,
+        item.author_identity, item.id,
+      ]);
+
+      return { status: 'applied', memoryId: item.target_memory_id!, deduped: false };
+    }
+
+    if (item.op === 'supersede') {
+      // S1: Lock + stale check on the old target memory row (L3: project_id re-asserts tenant).
+      const targetRes = await client.query<RawMemoryLockRow>(LOCK_MEMORY_SQL, [
+        item.target_memory_id,
+        ctx.projectId,
+      ]);
+      if (
+        targetRes.rows.length === 0 ||
+        targetRes.rows[0]!.current_revision !== item.target_revision ||
+        targetRes.rows[0]!.status !== 'active'
+      ) {
+        return { status: 'stale' };
+      }
+      if (requiresReview(item, targetRes.rows[0]!.type, mandatoryTypes)) {
+        return { status: 'review_required' };
+      }
+
+      // S2: Insert new memory (same column list as A1).
+      const newMemRes = await client.query<{ id: string }>(INSERT_MEMORY_SQL, [
+        ctx.projectId, ctx.repoId, item.type,
+        item.title, item.summary, item.body,
+        JSON.stringify(item.fields),
+        item.author_identity, item.content_hash,
+        ctx.originBranch, ctx.originPr,
+        toVectorParam(embedding),   // $12
+      ]);
+
+      let newMemoryId: string;
+      let deduped: boolean;
+      if (newMemRes.rows.length === 0) {
+        // Dedup: new content already exists in memory.
+        const dupRes = await client.query<{ id: string }>(SELECT_MEMORY_BY_HASH_SQL, [
+          ctx.projectId, item.content_hash,
+        ]);
+        newMemoryId = dupRes.rows[0]!.id;
+        deduped = true;
+        // S3 SKIPPED — existing memory already has its revision.
+      } else {
+        newMemoryId = newMemRes.rows[0]!.id;
+        deduped = false;
+        // S3: Insert revision for the new memory row.
+        await client.query(INSERT_REVISION_SUPERSEDE_SQL, [
+          newMemoryId,
+          item.title, item.summary, item.body,
+          JSON.stringify(item.fields),
+          item.type, item.content_hash,
+          item.author_identity, item.id,
+        ]);
+      }
+
+      // L1 self-supersede guard: if dedup resolved the new content to the same
+      // memory row as the target, the item's content is identical to what it
+      // intended to replace. Inserting a self-relation would violate
+      // CHECK (from_memory <> to_memory) with code 23514 → short-circuit as duplicate.
+      if (newMemoryId === item.target_memory_id) return { status: 'duplicate' };
+
+      // S4: Mark old memory as superseded (L3: project_id re-asserts tenant).
+      await client.query(UPDATE_MEMORY_SUPERSEDED_SQL, [item.target_memory_id, ctx.projectId]);
+
+      // S5: Insert typed edge — ON CONFLICT DO NOTHING makes re-runs idempotent.
+      await client.query(INSERT_MEMORY_RELATION_SQL, [newMemoryId, item.target_memory_id]);
+
+      return { status: 'applied', memoryId: newMemoryId, deduped };
+    }
+
+    // op === 'deprecate'
+    // D1: Lock target memory row + stale check; also snapshot current content.
+    // L3: project_id passed to re-assert tenant ownership.
+    const targetRes = await client.query<RawMemoryDeprecateLockRow>(
+      LOCK_MEMORY_FOR_DEPRECATE_SQL,
+      [item.target_memory_id, ctx.projectId],
+    );
+    if (
+      targetRes.rows.length === 0 ||
+      targetRes.rows[0]!.current_revision !== item.target_revision ||
+      targetRes.rows[0]!.status !== 'active'
+    ) {
+      return { status: 'stale' };
+    }
+    const snap = targetRes.rows[0]!;
+    if (requiresReview(item, snap.type, mandatoryTypes)) {
+      return { status: 'review_required' };
+    }
+
+    // D2: Flip status to deprecated + bump current_revision (L3: project_id guard).
+    await client.query(UPDATE_MEMORY_DEPRECATED_SQL, [item.target_memory_id, ctx.projectId]);
+
+    // D3: Insert revision using the snapshotted target content.
+    await client.query(INSERT_REVISION_DEPRECATE_SQL, [
+      item.target_memory_id, snap.current_revision + 1,
+      snap.title, snap.summary, snap.body,
+      JSON.stringify(snap.fields),
+      snap.type, snap.content_hash,
+      item.author_identity, item.id,
+    ]);
+
+    return { status: 'applied', memoryId: item.target_memory_id!, deduped: false };
+  }
+
+  /**
    * Snapshots the item in quarantine and marks it terminal in staging.
    * When q.redact=true (secret path), title/summary/body become the sentinel and
    * fields becomes {} in BOTH tables; reason is category-only (no matched text).
+   * An item applied or human-reviewed meanwhile is left alone (no orphan snapshot).
    */
   async quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<void> {
-    const title = q.redact ? REDACT_SENTINEL : item.title;
-    const summary = q.redact ? REDACT_SENTINEL : item.summary;
-    const body = q.redact ? REDACT_SENTINEL : item.body;
-    const fields = q.redact ? {} : item.fields;
-    const fieldsJson = JSON.stringify(fields);
     const d = q.decision;
-    // SEC L-7: a redacted snapshot never carries the hash of the secret-bearing content.
-    const quarantineHash = q.redact
-      ? computeContentHash({
-          op: item.op, type: item.type, title, summary, body, fields,
-          target: item.target_memory_id,
-        })
-      : item.content_hash;
     // Reviewer M1: a non-redacted judge rejection (duplication / specificity)
     // keeps the judge justification on the staging row; quarantine keeps the code.
     const stagingReason = !q.redact && d?.verdict === 'rejected' ? d.reason : q.reason;
@@ -826,30 +980,258 @@ export class PgPromotionRepository implements PromotionRepository {
       await client.query('BEGIN');
 
       // Q1: Self-contained snapshot (no FK to staging -> sweep-safe).
-      await client.query(INSERT_QUARANTINE_SQL, [
-        ctx.projectId, ctx.repoId,
-        ctx.sessionId, item.id,
-        item.op, item.type,
-        title, summary, body,
-        fieldsJson,
-        quarantineHash, q.reason, item.author_identity,
-      ]);
+      const snap = await this.insertQuarantineSnapshot(client, item, ctx, q.reason, q.redact);
 
       // Q2: Mark staging item terminal (promoted_at stays NULL).
       const marked = await client.query(MARK_QUARANTINED_SQL, [
         stagingReason, d?.criterion ?? null, d?.confidence ?? null,
         d?.relatedMemoryId ?? null, d?.mandatoryReview ?? false,
         JSON.stringify(q.sanitizeFlags),
-        title, summary, body, fieldsJson,
+        snap.title, snap.summary, snap.body, snap.fieldsJson,
         item.id,
       ]);
       if ((marked.rowCount ?? 0) === 0) {
         // SEC M-3: applied or human-reviewed meanwhile — drop the Q1 snapshot too.
         await this.safeRollback(client);
+        logger.warn('[promote] quarantine skipped: item resolved concurrently', { itemId: item.id });
         return;
       }
 
       await client.query('COMMIT');
+    } catch (err) {
+      await this.safeRollback(client);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Transaction-scoped quarantine core (Q1) shared by promotion (quarantineItem)
+   * and human review (rejectReviewItem). Returns the stored content so the
+   * caller can mirror it on the staging row.
+   */
+  private async insertQuarantineSnapshot(
+    client: pg.PoolClient,
+    item: PromotionItemRow,
+    ctx: ApplyContext,
+    reason: string,
+    redact: boolean,
+  ): Promise<{ title: string; summary: string; body: string; fieldsJson: string }> {
+    const title = redact ? REDACT_SENTINEL : item.title;
+    const summary = redact ? REDACT_SENTINEL : item.summary;
+    const body = redact ? REDACT_SENTINEL : item.body;
+    const fields = redact ? {} : item.fields;
+    const fieldsJson = JSON.stringify(fields);
+    // SEC L-7: a redacted snapshot never carries the hash of the secret-bearing content.
+    const quarantineHash = redact
+      ? computeContentHash({
+          op: item.op, type: item.type, title, summary, body, fields,
+          target: item.target_memory_id,
+        })
+      : item.content_hash;
+
+    await client.query(INSERT_QUARANTINE_SQL, [
+      ctx.projectId, ctx.repoId,
+      ctx.sessionId, item.id,
+      item.op, item.type,
+      title, summary, body,
+      fieldsJson,
+      quarantineHash, reason, item.author_identity,
+    ]);
+    return { title, summary, body, fieldsJson };
+  }
+
+  /** R0: locks a queued item of the project; null when it is not (or no longer) queued. */
+  private async lockQueuedItem(
+    client: pg.PoolClient,
+    itemId: string,
+    projectId: string,
+  ): Promise<{ item: PromotionItemRow; ctx: ApplyContext } | null> {
+    const { rows } = await client.query<RawQueuedItemRow>(LOCK_QUEUED_ITEM_SQL, [itemId, projectId]);
+    const r = rows[0];
+    if (!r) return null;
+    // target_type is filled from the locked target row (R1) when needed.
+    const item = toItemRow({ ...r, target_type: null });
+    const ctx: ApplyContext = {
+      projectId,
+      repoId: r.repo_id,
+      originBranch: r.branch,
+      originPr: r.pr_number,
+      sessionId: r.session_id,
+    };
+    return { item, ctx };
+  }
+
+  /**
+   * Human approval (HU-07.2). One transaction; every early exit rolls back and
+   * leaves the item queued. Steps R0–R8 (see design):
+   *  R0 lock + queue guard → R1 lock target (op ≠ add) → R2 revision check →
+   *  R3 rebase a stale target the reviewer confirmed → R4 embedding guard →
+   *  R5 shared apply core → R6 mark approved → R7 approved_by → R8 related.
+   *
+   * SEC M-1 on the human path: the reviewer IS the human gate, so a
+   * mandatory-review target type does not block approval (the core gets an
+   * empty mandatory set). A target whose type differs from the item's would
+   * still change the target's type, so it is refused as `target_inactive`
+   * (the item can only be rejected; reloading would not help, unlike
+   * `target_changed`).
+   */
+  async approveReviewItem(i: ReviewApproveInput): Promise<ReviewApproveResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // R0
+      const locked = await this.lockQueuedItem(client, i.itemId, i.projectId);
+      if (!locked) {
+        await this.safeRollback(client);
+        return { status: 'not_found' };
+      }
+      const { item, ctx } = locked;
+
+      let rebasedFromRevision: number | null = null;
+      let rebasedToRevision: number | null = null;
+      if (item.op !== 'add') {
+        // R1
+        const target = item.target_memory_id
+          ? (await client.query<RawMemoryLockRow>(LOCK_MEMORY_SQL, [item.target_memory_id, i.projectId]))
+              .rows[0]
+          : undefined;
+        if (!target || target.status !== 'active' || target.type !== item.type) {
+          await this.safeRollback(client);
+          return { status: 'conflict', code: 'target_inactive' };
+        }
+        item.target_type = target.type as MemoryType;
+
+        // R2: the reviewer must confirm the version they saw.
+        const cur = target.current_revision;
+        const stale = cur !== item.target_revision;
+        if ((i.targetRevision !== null && i.targetRevision !== cur) || (stale && i.targetRevision !== cur)) {
+          await this.safeRollback(client);
+          return { status: 'conflict', code: 'target_changed' };
+        }
+
+        // R3
+        if (stale) {
+          await client.query(REBASE_ITEM_SQL, [cur, item.id]);
+          rebasedFromRevision = item.target_revision;
+          rebasedToRevision = cur;
+          item.target_revision = cur;
+        }
+      }
+
+      // R4: a concurrent persistMasked changed the content → fail-soft null.
+      let embedding = i.embedding;
+      if (embedding !== null && item.content_hash !== i.expectedContentHash) {
+        logger.warn('[review] embedding dropped: item content changed', { itemId: item.id });
+        embedding = null;
+      }
+
+      // R5: same apply SQL as promotion; no mandatory-type block (human gate).
+      const r = await this.applyOpInTxn(client, item, ctx, embedding, NO_MANDATORY_TYPES);
+      if (r.status !== 'applied') {
+        await this.safeRollback(client);
+        const code: ConflictCode =
+          r.status === 'duplicate'
+            ? 'duplicate_content'
+            : r.status === 'stale'
+              ? 'target_changed' // unreachable after R1–R3; defensive
+              : 'target_inactive'; // review_required: type mismatch, refused by R1 already
+        return { status: 'conflict', code };
+      }
+
+      // R6
+      const marked = await client.query(MARK_APPROVED_SQL, [r.memoryId, i.reviewerUserId, item.id]);
+      if ((marked.rowCount ?? 0) === 0) {
+        await this.safeRollback(client);
+        return { status: 'not_found' };
+      }
+
+      // R7: a dedup leaves the existing memory's approver untouched.
+      if (!r.deduped) {
+        await client.query(SET_APPROVED_BY_SQL, [i.reviewerUserId, r.memoryId, i.projectId]);
+      }
+
+      // R8
+      let relatedSuperseded = false;
+      const related = item.related_memory_id;
+      if (i.markRelatedSuperseded && related && item.op !== 'deprecate' && related !== r.memoryId) {
+        const sup = await client.query(SUPERSEDE_RELATED_SQL, [related, i.projectId]);
+        if ((sup.rowCount ?? 0) === 1) {
+          await client.query(INSERT_HUMAN_RELATION_SQL, [r.memoryId, related]);
+          relatedSuperseded = true;
+        }
+      }
+
+      await client.query('COMMIT');
+      return {
+        status: 'approved',
+        memoryId: r.memoryId,
+        deduped: r.deduped,
+        rebasedFromRevision,
+        rebasedToRevision,
+        relatedSuperseded,
+      };
+    } catch (err) {
+      await this.safeRollback(client);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Human rejection (HU-07.3): quarantine snapshot with judge_reason
+   * 'human_review: <reason>' + review columns, in one transaction. Queued items
+   * never carry secrets (sanitize quarantines those first), so no redaction.
+   */
+  async rejectReviewItem(i: ReviewRejectInput): Promise<'rejected' | 'not_found'> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const locked = await this.lockQueuedItem(client, i.itemId, i.projectId);
+      if (!locked) {
+        await this.safeRollback(client);
+        return 'not_found';
+      }
+      const { item, ctx } = locked;
+
+      await this.insertQuarantineSnapshot(client, item, ctx, `human_review: ${i.reason}`, false);
+
+      const marked = await client.query(MARK_REJECTED_SQL, [i.reviewerUserId, i.reason, item.id]);
+      if ((marked.rowCount ?? 0) === 0) {
+        await this.safeRollback(client);
+        return 'not_found';
+      }
+
+      await client.query('COMMIT');
+      return 'rejected';
+    } catch (err) {
+      await this.safeRollback(client);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async abandonOpenSession(
+    sessionId: string,
+    projectId: string,
+  ): Promise<{ abandoned: boolean; discarded: number }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const upd = await client.query(ABANDON_SESSION_SQL, [sessionId, projectId]);
+      if ((upd.rowCount ?? 0) === 0) {
+        // Not open (already abandoned / finalized) or not this project's session.
+        await this.safeRollback(client);
+        return { abandoned: false, discarded: 0 };
+      }
+      const del = await client.query(DELETE_UNPROMOTED_ITEMS_SQL, [sessionId]);
+      await client.query('COMMIT');
+      return { abandoned: true, discarded: del.rowCount ?? 0 };
     } catch (err) {
       await this.safeRollback(client);
       throw err;

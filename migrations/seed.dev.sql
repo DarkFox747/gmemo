@@ -107,3 +107,20 @@ VALUES ('00000000-0000-0000-0000-000000000060',
         'Demonstrates the local promotion vertical end to end: judge (stub) accepts, applyAccepted inserts memory + revision, session goes promoted.',
         'stage-add-demo-0001', 'pending', 'dev-local-user')
 ON CONFLICT DO NOTHING;
+
+-- 9) Demo users for the web/API (C2). Use them via the X-Dev-User header under AUTH_DEV_BYPASS.
+--    C8 adds project "Portal de Clientes" and enriches the data; ids 0005-0009 / 0034-0039 are left free.
+INSERT INTO app_user (id, idp_subject, email, display_name, global_role) VALUES
+  ('00000000-0000-0000-0000-000000000002', 'demo-tl',     'tl@demo.local',     'Tech Lead (demo)', NULL),
+  ('00000000-0000-0000-0000-000000000003', 'demo-dev',    'dev@demo.local',    'Developer (demo)', NULL),
+  ('00000000-0000-0000-0000-000000000004', 'demo-viewer', 'viewer@demo.local', 'Viewer (demo)',    NULL)
+ON CONFLICT (idp_subject) DO NOTHING;
+
+INSERT INTO project_membership (id, project_id, user_id, role, granted_by) VALUES
+  ('00000000-0000-0000-0000-000000000031', '00000000-0000-0000-0000-000000000010',
+   '00000000-0000-0000-0000-000000000002', 'project_admin', '00000000-0000-0000-0000-000000000001'),
+  ('00000000-0000-0000-0000-000000000032', '00000000-0000-0000-0000-000000000010',
+   '00000000-0000-0000-0000-000000000003', 'contributor',   '00000000-0000-0000-0000-000000000001'),
+  ('00000000-0000-0000-0000-000000000033', '00000000-0000-0000-0000-000000000010',
+   '00000000-0000-0000-0000-000000000004', 'viewer',        '00000000-0000-0000-0000-000000000001')
+ON CONFLICT (project_id, user_id) DO NOTHING;

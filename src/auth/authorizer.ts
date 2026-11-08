@@ -20,6 +20,9 @@
  * no code here consults machine_credential. A non-Cognito bearer secret
  * fails Gate 1 before reaching this class.
  *
+ * REST (C2): authorizeUser (Gate 2 only, for /me) and authorizeProjectAdmin
+ * (Gate 2 + membership role === 'project_admin'; platform roles never bypass).
+ *
  * All denials are opaque (AppError PERMISSION_DENIED with the same generic
  * message regardless of which check failed).
  */
@@ -29,6 +32,8 @@ import type { AuthRepository } from '../db/authRepository.js';
 import type { PromotePrincipal } from './oidcAuthenticator.js';
 import type {
   ActorIdentity,
+  AdminActor,
+  AuthenticatedUser,
   Authorizer,
   Principal,
   TenantContext,
@@ -91,6 +96,7 @@ export class RdsAuthorizer implements Authorizer {
 
       return {
         actorId: principal.subject,
+        userId: user.userId,
         roles,
       };
     } catch (err) {
@@ -121,7 +127,77 @@ export class RdsAuthorizer implements Authorizer {
       }
       return {
         actorId: principal.repository,
+        userId: null,
         roles: [cred.role],
+      };
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(ErrorCode.PERMISSION_DENIED, err);
+    }
+  }
+
+  /**
+   * Gate 2 only: the subject must map to an enabled app_user. No membership
+   * is required (used by /me, which lists the user's own projects).
+   *
+   * @throws AppError(PERMISSION_DENIED) when the user is absent or disabled,
+   *   or on any repository error — opaque.
+   */
+  async authorizeUser(principal: Principal): Promise<AuthenticatedUser> {
+    try {
+      const user = await this.repo.findEnabledUserBySubject(principal.subject);
+      if (!user) {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+      return {
+        actorId: principal.subject,
+        userId: user.userId,
+        email: user.email,
+        displayName: user.displayName,
+        globalRole: user.globalRole,
+      };
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(ErrorCode.PERMISSION_DENIED, err);
+    }
+  }
+
+  /**
+   * Gate 2 + project_admin membership on a non-archived projectId. A platform role without a
+   * project_admin membership row does NOT pass (D4). projectId is validated
+   * as a UUID by the caller before reaching SQL.
+   *
+   * @throws AppError(PERMISSION_DENIED) for every failure (absent, disabled,
+   *   no membership, other role, repository error) — byte-identical.
+   */
+  async authorizeProjectAdmin(principal: Principal, projectId: string): Promise<AdminActor> {
+    try {
+      const user = await this.repo.findEnabledUserBySubject(principal.subject);
+      if (!user) {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+
+      const membershipRole = await this.repo.findMembershipRole(projectId, user.userId);
+      if (membershipRole !== 'project_admin') {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+
+      // Archived (or missing) projects are closed to the review API.
+      if (!(await this.repo.isProjectActive(projectId))) {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+
+      // Same role ordering as authorize(): global role first, membership last.
+      const roles: string[] = [];
+      if (user.globalRole) {
+        roles.push(user.globalRole);
+      }
+      roles.push(membershipRole);
+
+      return {
+        actorId: principal.subject,
+        userId: user.userId,
+        roles,
       };
     } catch (err) {
       if (err instanceof AppError) throw err;

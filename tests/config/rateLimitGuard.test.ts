@@ -75,3 +75,47 @@ describe('config prod guard (RATE_LIMIT_ENABLED)', () => {
     expect(loadConfig().RATE_LIMIT_ENABLED).toBe(false);
   });
 });
+
+describe('config /api rate limit', () => {
+  const devEnv = () => ({
+    NODE_ENV: 'development',
+    DATABASE_URL: 'postgres://x/y',
+    AUTH_DEV_BYPASS: 'true',
+    JUDGE_STUB: 'true',
+    PROMOTE_OIDC_DEV_BYPASS: 'true',
+    EMBEDDER_STUB: 'true',
+  });
+
+  it('defaults to 60000 ms window and 120 requests', async () => {
+    process.env = devEnv();
+    const cfg = (await loadFresh())();
+    expect(cfg.RATE_LIMIT_API_WINDOW_MS).toBe(60000);
+    expect(cfg.RATE_LIMIT_API_MAX).toBe(120);
+  });
+
+  it('fails fast when RATE_LIMIT_API_MAX=0', async () => {
+    process.env = { ...devEnv(), RATE_LIMIT_API_MAX: '0' };
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('exit');
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const loadConfig = await loadFresh();
+
+    expect(() => loadConfig()).toThrow('exit');
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(JSON.stringify(errorSpy.mock.calls)).toContain('RATE_LIMIT_API_MAX');
+  });
+
+  it('production guard still forbids RATE_LIMIT_ENABLED=false (covers /api)', async () => {
+    process.env = { ...validProdEnv(), RATE_LIMIT_ENABLED: 'false', RATE_LIMIT_API_MAX: '50' };
+    vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('exit');
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const loadConfig = await loadFresh();
+
+    expect(() => loadConfig()).toThrow('exit');
+  });
+});

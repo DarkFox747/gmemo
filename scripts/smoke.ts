@@ -12,6 +12,10 @@ const BASE_URL = (process.env.BASE_URL ?? 'http://localhost:3000').replace(/\/+$
 const REMOTE = 'https://github.com/crombie-llc/gmemo-demo.git';
 const REPO = 'crombie-llc/gmemo-demo';
 const BRANCH = 'main';
+/** Seeded demo project + tech lead (migrations/seed.dev.sql section 9). */
+const DEMO_PROJECT_ID = '00000000-0000-0000-0000-000000000010';
+const DEMO_TL = 'tl@demo.local';
+const DEMO_VIEWER = 'viewer@demo.local';
 const TIMEOUT_MS = 10_000;
 
 const runId = Date.now().toString(36);
@@ -183,6 +187,49 @@ async function main(): Promise<void> {
     const outcome = await promote();
     if (outcome.status !== 'no_op') fail(`status is ${String(outcome.status)}, expected "no_op"`);
     if (outcome.applied !== 0) fail(`applied is ${String(outcome.applied)}, expected 0`);
+  });
+
+  await step('api me as tech lead', async () => {
+    const res = await request('/api/v1/me', { method: 'GET', headers: { 'X-Dev-User': DEMO_TL } });
+    if (res.status !== 200) fail(`HTTP ${res.status} from /api/v1/me`);
+    const body = (await res.json()) as {
+      user?: { email?: string };
+      projects?: Array<{ id?: string; role?: string }>;
+    };
+    if (body.user?.email !== DEMO_TL) fail(`user.email is ${String(body.user?.email)}, expected ${DEMO_TL}`);
+    const role = body.projects?.find((p) => p.id === DEMO_PROJECT_ID)?.role;
+    if (role !== 'project_admin') fail(`role on the demo project is ${String(role)}, expected project_admin`);
+  });
+
+  await step('api me as viewer', async () => {
+    const res = await request('/api/v1/me', { method: 'GET', headers: { 'X-Dev-User': DEMO_VIEWER } });
+    if (res.status !== 200) fail(`HTTP ${res.status} from /api/v1/me`);
+    const body = (await res.json()) as { projects?: Array<{ id?: string; role?: string }> };
+    const role = body.projects?.find((p) => p.id === DEMO_PROJECT_ID)?.role;
+    if (role !== 'viewer') fail(`role on the demo project is ${String(role)}, expected viewer`);
+  });
+
+  await step('api review-queue as tech lead', async () => {
+    const res = await request(`/api/v1/projects/${DEMO_PROJECT_ID}/review-queue`, {
+      method: 'GET',
+      headers: { 'X-Dev-User': DEMO_TL },
+    });
+    if (res.status !== 200) fail(`HTTP ${res.status} from review-queue`);
+    const body = (await res.json()) as { items?: unknown; counters?: unknown };
+    if (!Array.isArray(body.items)) fail('review-queue response has no items array');
+    if (typeof body.counters !== 'object' || body.counters === null) {
+      fail('review-queue response has no counters');
+    }
+  });
+
+  await step('api review-queue as viewer is opaque 404', async () => {
+    const res = await request(`/api/v1/projects/${DEMO_PROJECT_ID}/review-queue`, {
+      method: 'GET',
+      headers: { 'X-Dev-User': DEMO_VIEWER },
+    });
+    if (res.status !== 404) fail(`HTTP ${res.status}, expected 404`);
+    const text = await res.text();
+    if (text !== '{"error":"Not found"}') fail(`body is ${text}, expected {"error":"Not found"}`);
   });
 }
 

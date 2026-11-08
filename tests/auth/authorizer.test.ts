@@ -126,6 +126,27 @@ describe('RdsAuthorizer — Gate 2 + RBAC', () => {
     expect(actor.actorId).toBe('active-user');
   });
 
+  it('userId on the returned ActorIdentity is the app_user.id', async () => {
+    const actor = await authorizer.authorize(principalFor('active-user'), tenant, 'recall');
+
+    expect(actor.userId).toBe('u-001');
+  });
+
+  it('authorizePromote returns userId null (machine path has no app_user)', async () => {
+    const machineRepo = new InMemoryAuthRepository(
+      [],
+      [],
+      [],
+      [{ projectId: PROJECT_ID, principalName: 'owner/repo', role: 'service_agent', active: true }],
+    );
+    const actor = await new RdsAuthorizer(machineRepo).authorizePromote(
+      { repository: 'owner/repo', ref: 'refs/heads/main' },
+      tenant,
+    );
+
+    expect(actor.userId).toBeNull();
+  });
+
   it('roles array includes the project membership role', async () => {
     const actor = await authorizer.authorize(principalFor('active-user'), tenant, 'recall');
 

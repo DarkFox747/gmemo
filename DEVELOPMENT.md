@@ -76,7 +76,8 @@ BASE_URL=http://localhost:3000 pnpm smoke
 ```
 
 Corre, en orden y cortando en el primer fallo: `GET /health`, `initialize` MCP, `recall`, `remember`,
-`list_staged`, `POST /promote` y un segundo `/promote` idempotente (`no_op`). Imprime `PASS <paso>` /
+`list_staged`, `POST /promote`, un segundo `/promote` idempotente (`no_op`) y `GET /api/v1/me` como
+`tl@demo.local` (debe ser `project_admin` del proyecto del seed). Imprime `PASS <paso>` /
 `FAIL <paso>: <motivo>`. Se puede repetir sin `docker compose down -v`.
 
 Códigos de salida: `0` todo OK · `1` falló una verificación · `2` el stack no responde (¿está corriendo
@@ -147,3 +148,58 @@ curl -sS http://localhost:3000/promote \
   -H 'Authorization: Bearer dev-smoke' \
   -d '{"repo":"crombie-llc/gmemo-demo","source_branch":"main"}'
 ```
+
+`closed_unmerged` en dev (PR cerrado sin merge: abandona la sesión abierta de la rama y descarta sus items
+no promovidos). El bypass OIDC usa `refs/heads/<source_branch>` como ref; la rama no puede ser la default:
+
+```bash
+curl -sS http://localhost:3000/promote   -H 'Content-Type: application/json'   -H 'Authorization: Bearer dev-smoke'   -d '{"repo":"crombie-llc/gmemo-demo","source_branch":"feature/x","pr_number":7,"event":"closed_unmerged"}'
+# → {"status":"abandoned","discarded":N}  ·  repetido → {"status":"no_op","discarded":0}
+```
+
+## API REST (`/api/v1`) en dev
+
+Con `AUTH_DEV_BYPASS=true` (solo dev) la API acepta el header `X-Dev-User: <email>` y actúa como ese
+usuario **existente y habilitado**; Gate 2 (membresías reales), RBAC y audit corren de verdad. Sin el header
+actúa como el usuario dev por defecto (`dev@localhost`, contributor). Un email desconocido da 401. Con
+`NODE_ENV=production` el header no tiene ningún efecto (config, composición, transporte y autenticador lo
+bloquean por separado).
+
+Usuarios demo del seed (proyecto `00000000-0000-0000-0000-000000000010`):
+
+| Email | Rol en el proyecto |
+|---|---|
+| `tl@demo.local` | `project_admin` (puede usar la cola de revisión) |
+| `dev@demo.local` | `contributor` |
+| `viewer@demo.local` | `viewer` |
+
+```bash
+P=00000000-0000-0000-0000-000000000010
+# identidad + proyectos con rol
+curl -sS http://localhost:3000/api/v1/me -H 'X-Dev-User: tl@demo.local'
+# cola de revisión (solo project_admin; cualquier otro recibe el mismo 404 que un proyecto inexistente)
+curl -sS "http://localhost:3000/api/v1/projects/$P/review-queue?filter=all" -H 'X-Dev-User: tl@demo.local'
+curl -sS http://localhost:3000/api/v1/projects/$P/review-queue/<itemId> -H 'X-Dev-User: tl@demo.local'
+# aprobar (targetRevision confirma la versión vista si el target cambió) / rechazar (motivo 3-500 chars)
+curl -sS -X POST http://localhost:3000/api/v1/projects/$P/review-queue/<itemId>/approve   -H 'X-Dev-User: tl@demo.local' -H 'Content-Type: application/json' -d '{"markRelatedSuperseded":false}'
+curl -sS -X POST http://localhost:3000/api/v1/projects/$P/review-queue/<itemId>/reject   -H 'X-Dev-User: tl@demo.local' -H 'Content-Type: application/json' -d '{"reason":"too vague"}'
+```
+
+Errores: 401 `{"error":"Unauthorized"}`, 404 `{"error":"Not found"}` (también para cualquier falta de
+permiso), 400 `{"error":"Invalid request"}` (nunca repite la entrada), 409 `{"error":"Conflict","code":...}`
+al aprobar (`target_changed`, `target_inactive`, `duplicate_content`), 429 al superar
+`RATE_LIMIT_API_MAX`. Todas las respuestas llevan `Cache-Control: no-store`.
+
+### Web estática en dev
+
+Con `WEB_STATIC_DIR=<carpeta del build>` (por ejemplo `packages/web/dist`) Express sirve la web en `/`, con
+fallback SPA para rutas sin extensión. El fallback nunca intercepta `/api`, `/mcp`, `/promote` ni `/health`.
+Las respuestas HTML llevan una CSP estricta same-origin y `Cache-Control: no-cache`; las respuestas JSON
+no cambian. El server no arranca si la carpeta no tiene `index.html`. La variable está prohibida con
+`NODE_ENV=production` (la config falla al arrancar).
+
+### Producción: S3 + CloudFront
+
+En producción Express no sirve la web. El build se sube a un bucket S3 privado detrás de CloudFront, con un
+comportamiento `/api/*` que reenvía al ALB, así la web y la API quedan en el mismo origen (sin CORS ni
+cookies, por lo que CSRF no aplica). La misma CSP se configura como response-headers policy de CloudFront.

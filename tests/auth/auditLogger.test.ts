@@ -21,7 +21,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { RdsAuditLogger } from '../../src/auth/auditLogger.js';
 import { InMemoryAuthRepository } from './fakes.js';
 import { sha256Hex } from '../../src/security/hash.js';
-import type { RequestContext, ToolName } from '../../src/mcp/context.js';
+import type { ActorIdentity, ApiAction, RequestContext, ToolName } from '../../src/mcp/context.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -33,7 +33,7 @@ const ACTOR_ID = 'user-sub-abc';
 
 const CTX: RequestContext = {
   tenant: { projectId: PROJECT_ID, repoId: REPO_ID, branch: 'main' },
-  actor: { actorId: ACTOR_ID, roles: ['viewer'] },
+  actor: { actorId: ACTOR_ID, userId: 'u-abc', roles: ['viewer'] },
 };
 
 // ---------------------------------------------------------------------------
@@ -267,5 +267,108 @@ describe('RdsAuditLogger — recordWrite (discard_staged)', () => {
     await logger.recordWrite(CTX, { tool: 'discard_staged', itemId: ITEM_ID });
 
     expect(repo.accessLogEntries[0].queryHash == null).toBe(true);
+  });
+});
+
+describe('RdsAuditLogger — recordApi (REST)', () => {
+  const ADMIN: ActorIdentity = { actorId: 'tl-sub', userId: 'u-tl', roles: ['project_admin'] };
+  let repo: InMemoryAuthRepository;
+  let logger: RdsAuditLogger;
+
+  beforeEach(() => {
+    repo = new InMemoryAuthRepository();
+    logger = new RdsAuditLogger(repo);
+  });
+
+  it.each<[ApiAction, 'read' | 'update']>([
+    ['me.read', 'read'],
+    ['review_queue.list', 'read'],
+    ['review_queue.read', 'read'],
+    ['review_queue.approve', 'update'],
+    ['review_queue.reject', 'update'],
+  ])('maps %s to access_log action "%s"', async (action, expected) => {
+    await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, action);
+
+    expect(repo.accessLogEntries).toHaveLength(1);
+    expect(repo.accessLogEntries[0].action).toBe(expected);
+    expect(repo.accessLogEntries[0].actorKind).toBe('user');
+    expect(repo.accessLogEntries[0].actorIdentity).toBe('tl-sub');
+  });
+
+  it('stores project_id null for me.read (no project)', async () => {
+    await logger.recordApi(ADMIN, null, 'me.read');
+
+    const entry = repo.accessLogEntries[0];
+    expect(entry.projectId).toBeNull();
+    expect(entry.detail).toEqual({ api: 'me.read', userId: 'u-tl' });
+  });
+
+  it('stores ids/counters in detail and memory_id from detail.memoryId', async () => {
+    await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, 'review_queue.approve', {
+      itemId: 'item-1',
+      memoryId: 'mem-1',
+      decision: 'approved',
+      deduped: false,
+    });
+
+    const entry = repo.accessLogEntries[0];
+    expect(entry.projectId).toBe(PROJECT_ID);
+    expect(entry.memoryId).toBe('mem-1');
+    expect(entry.detail).toEqual({
+      api: 'review_queue.approve',
+      userId: 'u-tl',
+      itemId: 'item-1',
+      memoryId: 'mem-1',
+      decision: 'approved',
+      deduped: false,
+    });
+  });
+
+  it('never stores content keys; detail cannot override api/userId', async () => {
+    const hostile = {
+      itemId: 'item-1',
+      title: 'secret title',
+      body: 'secret body',
+      reason: 'secret reason',
+      api: 'forged',
+      userId: 'forged',
+    } as unknown as Parameters<RdsAuditLogger['recordApi']>[3];
+    await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, 'review_queue.reject', hostile);
+
+    const detail = repo.accessLogEntries[0].detail;
+    expect(detail.api).toBe('review_queue.reject');
+    expect(detail.userId).toBe('u-tl');
+    expect(JSON.stringify(detail)).not.toMatch(/secret/);
+  });
+});
+
+describe('RdsAuditLogger — recordAbandon', () => {
+  it('writes one ci/delete row with counters only', async () => {
+    const repo = new InMemoryAuthRepository();
+    const logger = new RdsAuditLogger(repo);
+    const ctx: RequestContext = {
+      tenant: { projectId: PROJECT_ID, repoId: REPO_ID, branch: 'feature/x' },
+      actor: { actorId: 'owner/repo', userId: null, roles: ['service_agent'] },
+    };
+
+    await logger.recordAbandon(ctx, { sessionId: 'sess-1', discarded: 3, prNumber: 7 });
+
+    expect(repo.accessLogEntries).toEqual([
+      {
+        actorIdentity: 'owner/repo',
+        actorKind: 'ci',
+        action: 'delete',
+        projectId: PROJECT_ID,
+        sessionId: 'sess-1',
+        detail: {
+          event: 'closed_unmerged',
+          sessionId: 'sess-1',
+          discarded: 3,
+          prNumber: 7,
+          repoId: REPO_ID,
+          branch: 'feature/x',
+        },
+      },
+    ]);
   });
 });

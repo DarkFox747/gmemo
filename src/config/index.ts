@@ -118,6 +118,12 @@ const envSchema = z
     RATE_LIMIT_MCP_MAX: z.coerce.number().int().min(1).default(120),
     RATE_LIMIT_PROMOTE_WINDOW_MS: z.coerce.number().int().min(1).default(60000),
     RATE_LIMIT_PROMOTE_MAX: z.coerce.number().int().min(1).default(10),
+    RATE_LIMIT_API_WINDOW_MS: z.coerce.number().int().min(1).default(60000),
+    RATE_LIMIT_API_MAX: z.coerce.number().int().min(1).default(120),
+
+    // Dev-only: directory with the built web app served by Express. Forbidden in
+    // production (superRefine below); production serves the web from S3 + CloudFront.
+    WEB_STATIC_DIR: z.string().min(1).optional(),
   })
   .superRefine((cfg, ctx) => {
     // ── LOAD-BEARING PROD GUARD ───────────────────────────────────────────────
@@ -243,6 +249,15 @@ const envSchema = z
         message:
           'RATE_LIMIT_ENABLED=false is forbidden when NODE_ENV=production — ' +
           'rate limiting must be active in production.',
+      });
+    }
+
+    // ── LOAD-BEARING PROD GUARD — static web serving ─────────────────────────
+    if (cfg.WEB_STATIC_DIR && cfg.NODE_ENV === 'production') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['WEB_STATIC_DIR'],
+        message: 'WEB_STATIC_DIR is forbidden when NODE_ENV=production.',
       });
     }
 

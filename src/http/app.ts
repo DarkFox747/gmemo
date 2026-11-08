@@ -7,11 +7,19 @@
  *  - GET  /mcp     → 405 (no server-initiated SSE in stateless mode)
  *  - DELETE /mcp   → 405
  *  - POST /promote → promotion endpoint (OIDC-gated; machine_credential path)
+ *  - /api          → REST router (own rate limiter → Gate 1 → routes) + the
+ *                    /api error mapper (JSON 401/404/400/500)
+ *  - static web    → DEV ONLY, when options.webStaticDir is set (SPA fallback
+ *                    never matches /api, /mcp, /promote, /health)
  *  - 4-arg error handler (registered last) → opaque 500 with server-side logging
+ *
+ * Registration order: helmet → json → /health → /mcp → /promote → /api router
+ * → /api error mapper → static web → terminal handler.
  *
  * Security middleware applied globally (early):
  *  - helmet({ contentSecurityPolicy: false }) — standard HTTP security headers;
- *    CSP is disabled (API-only service, no HTML responses).
+ *    the global CSP stays off (JSON/MCP responses); the dev static web sets its
+ *    own strict CSP on HTML responses only (src/http/static.ts).
  *  - x-powered-by header disabled (information leakage).
  *  - trust proxy = 1 — single ALB hop; uses right-most XFF for IP keying by
  *    express-rate-limit (non-spoofable, satisfies v8 validate.trustProxy check).
@@ -33,6 +41,9 @@ import { makeMcpPostHandler, handleMcpDelete, handleMcpGet } from '../mcp/transp
 import type { AppServices } from '../mcp/context.js';
 import { makePromoteHandler } from './promote.js';
 import { makeRateLimiter } from './rateLimit.js';
+import { makeApiRouter, noStore } from './api/router.js';
+import { apiErrorHandler } from './api/errorHandler.js';
+import { mountWebStatic } from './static.js';
 
 export interface RateLimitOptions {
   enabled: boolean;
@@ -40,10 +51,16 @@ export interface RateLimitOptions {
   mcpMax: number;
   promoteWindowMs: number;
   promoteMax: number;
+  apiWindowMs: number;
+  apiMax: number;
 }
 
 export interface CreateAppOptions {
   rateLimit?: Partial<RateLimitOptions>;
+  /** DEV ONLY: forward X-Dev-User on /api (default false; ignored under production). */
+  devUserHeader?: boolean;
+  /** DEV ONLY: serve the web build from this directory (index.ts never passes it in production). */
+  webStaticDir?: string;
 }
 
 const RATE_LIMIT_DEFAULTS: RateLimitOptions = {
@@ -52,6 +69,8 @@ const RATE_LIMIT_DEFAULTS: RateLimitOptions = {
   mcpMax: 120,
   promoteWindowMs: 60000,
   promoteMax: 10,
+  apiWindowMs: 60000,
+  apiMax: 120,
 };
 
 export function createApp(services: AppServices, options?: CreateAppOptions): express.Express {
@@ -92,6 +111,24 @@ export function createApp(services: AppServices, options?: CreateAppOptions): ex
     app.post('/promote', promoteLimiter, makePromoteHandler(services));
   } else {
     app.post('/promote', makePromoteHandler(services));
+  }
+
+  // --- REST API (/api): limiter first so unauthenticated floods are limited too ---
+  // noStore first so the limiter's 429 is also uncacheable.
+  app.use('/api', noStore);
+  const apiRouter = makeApiRouter(services, { devUserHeader: options?.devUserHeader ?? false });
+  if (rl.enabled) {
+    const apiLimiter = makeRateLimiter({ windowMs: rl.apiWindowMs, max: rl.apiMax });
+    app.use('/api', apiLimiter, apiRouter);
+  } else {
+    app.use('/api', apiRouter);
+  }
+  // App-level (not inside the router) so express.json parse errors on /api are mapped too.
+  app.use('/api', apiErrorHandler);
+
+  // --- DEV ONLY: static web build + SPA fallback ---
+  if (options?.webStaticDir) {
+    mountWebStatic(app, options.webStaticDir);
   }
 
   // --- Terminal error handler (must be registered LAST, 4-arg signature) ---

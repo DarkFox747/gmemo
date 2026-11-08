@@ -11,6 +11,12 @@ export enum ErrorCode {
   INVALID_REFERENCE = 'INVALID_REFERENCE',
   /** Catch-all for unexpected errors. No internal detail is surfaced. */
   INTERNAL = 'INTERNAL',
+  /** REST: missing or invalid credentials (Gate 1 failure on /api). */
+  UNAUTHENTICATED = 'UNAUTHENTICATED',
+  /** REST: resource absent (or not visible to the caller). */
+  NOT_FOUND = 'NOT_FOUND',
+  /** REST: request failed input validation. */
+  INVALID_REQUEST = 'INVALID_REQUEST',
 }
 
 // Generic, client-safe messages — no resource names, no tenant info, no hints.
@@ -19,6 +25,9 @@ const OPAQUE_MESSAGES: Record<ErrorCode, string> = {
   [ErrorCode.PERMISSION_DENIED]: 'Access denied.',
   [ErrorCode.INVALID_REFERENCE]: 'Invalid or expired reference; please recall again.',
   [ErrorCode.INTERNAL]: 'An internal error occurred.',
+  [ErrorCode.UNAUTHENTICATED]: 'Unauthorized.',
+  [ErrorCode.NOT_FOUND]: 'Not found.',
+  [ErrorCode.INVALID_REQUEST]: 'Invalid request.',
 };
 
 /**

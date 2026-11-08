@@ -27,6 +27,7 @@ import { PgAuthRepository } from './db/authRepository.js';
 import { PgMemoryRepository } from './db/memoryRepository.js';
 import { PgStagingRepository } from './db/stagingRepository.js';
 import { PgPromotionRepository } from './db/promotionRepository.js';
+import { PgReviewQueueRepository } from './db/reviewQueueRepository.js';
 import { CognitoAuthenticator } from './auth/authenticator.js';
 import { DevAuthenticator } from './auth/devAuthenticator.js';
 import { DevOidcAuthenticator } from './auth/devOidcAuthenticator.js';
@@ -44,6 +45,7 @@ import { StubEmbedder } from './embedder/stubEmbedder.js';
 import { BedrockEmbedder } from './embedder/bedrockEmbedder.js';
 import { logNotifier } from './notify/notifier.js';
 import { PromoteService } from './promote/promoteService.js';
+import { ReviewService } from './review/reviewService.js';
 import type { AppServices, Authenticator } from './mcp/context.js';
 import type { Judge } from './judge/judge.js';
 import type { OidcVerifier } from './auth/oidcAuthenticator.js';
@@ -61,7 +63,12 @@ setLogLevel(config.LOG_LEVEL);
 const pool = createPool(config.DATABASE_URL, config.NODE_ENV === 'production');
 
 // --- 4. Gate-1 authenticator: dev stub vs real Cognito (composition root) ---
+// The auth repository is built first: DevAuthenticator resolves X-Dev-User through it.
+const authRepository = new PgAuthRepository(pool);
 let authenticator: Authenticator;
+// X-Dev-User is forwarded on /api only on the dev-bypass branch below (D1 layer 1);
+// apiAuth and DevAuthenticator re-check NODE_ENV independently.
+let devUserHeader = false;
 
 if (config.AUTH_DEV_BYPASS && config.NODE_ENV !== 'production') {
   // Defense in depth: loadConfig() already fails fast on the prod pairing;
@@ -71,7 +78,9 @@ if (config.AUTH_DEV_BYPASS && config.NODE_ENV !== 'production') {
   logger.warn('[boot] DevAuthenticator returns a FIXED principal. DEV ONLY.');
   logger.warn('[boot] Gate 2 (RDS user+membership), RBAC and audit remain REAL.');
   logger.warn('════════════════════════════════════════════════════════════');
-  authenticator = new DevAuthenticator();
+  logger.warn('[boot] /api honours X-Dev-User (<email of a seeded, enabled user>). DEV ONLY.');
+  authenticator = new DevAuthenticator(authRepository);
+  devUserHeader = true;
 } else {
   // Real path. superRefine guarantees these are present here; the explicit
   // guard satisfies the type-checker (COGNITO_* are optional in Config).
@@ -101,8 +110,7 @@ if (config.AUTH_DEV_BYPASS && config.NODE_ENV !== 'production') {
   authenticator = new CognitoAuthenticator(cognitoVerifier);
 }
 
-// --- 5. Auth repository + seam implementations ---
-const authRepository = new PgAuthRepository(pool);
+// --- 5. Auth seam implementations (authRepository is built in step 4) ---
 
 // --- 5b. Memory repository (change B: data-model) ---
 const memoryRepository = new PgMemoryRepository(pool);
@@ -207,6 +215,14 @@ const promoteService = new PromoteService({
   routing,
 });
 
+// --- 5k. Human review queue (HU-07): reads via the queue repository, writes via promotion ---
+const reviewService = new ReviewService({
+  reviewQueueRepository: new PgReviewQueueRepository(pool),
+  promotionRepository,
+  embedder,
+  confidenceThreshold: config.JUDGE_CONFIDENCE_THRESHOLD,
+});
+
 const services: AppServices = {
   authenticator, // ← selected above: DevAuthenticator or CognitoAuthenticator
   tenantResolver: new RdsTenantResolver(authRepository),
@@ -223,10 +239,19 @@ const services: AppServices = {
   semanticFallbackMinResults: config.SEMANTIC_FALLBACK_MIN_RESULTS,
   semanticFallbackK: config.SEMANTIC_FALLBACK_K,
   notifier: logNotifier,
+  reviewService,
 };
 
+// --- 5l. DEV ONLY static web: loadConfig() already rejects WEB_STATIC_DIR in
+// production; this second check keeps it structurally unreachable there. ---
+const webStaticDir =
+  config.WEB_STATIC_DIR && config.NODE_ENV !== 'production' ? config.WEB_STATIC_DIR : undefined;
+if (webStaticDir) {
+  logger.warn('[boot] WEB_STATIC_DIR set — serving the web build from Express. DEV ONLY.');
+}
+
 // --- 6 + 7. Build app and listen ---
-// Pass the 4 rate-limit window/max values from config; enabled is ON in
+// Pass the rate-limit window/max values from config; enabled is ON in
 // production (superRefine already rejected RATE_LIMIT_ENABLED=false there).
 const app = createApp(services, {
   rateLimit: {
@@ -235,7 +260,11 @@ const app = createApp(services, {
     mcpMax: config.RATE_LIMIT_MCP_MAX,
     promoteWindowMs: config.RATE_LIMIT_PROMOTE_WINDOW_MS,
     promoteMax: config.RATE_LIMIT_PROMOTE_MAX,
+    apiWindowMs: config.RATE_LIMIT_API_WINDOW_MS,
+    apiMax: config.RATE_LIMIT_API_MAX,
   },
+  devUserHeader,
+  webStaticDir,
 });
 
 const server = app.listen(config.PORT, config.HOST, () => {

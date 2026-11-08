@@ -2,8 +2,11 @@
  * ⚠️  DEV-ONLY OIDC STUB — NEVER SELECTED IN PRODUCTION.  ⚠️
  *
  * DevOidcAuthenticator bypasses GitHub OIDC verification entirely and returns
- * a FIXED PromotePrincipal regardless of the Authorization header (the arg is
- * intentionally ignored). It is chosen at the composition root ONLY when
+ * a FIXED repository regardless of the Authorization header (the arg is
+ * intentionally ignored). The ref defaults to 'refs/heads/main' and can be
+ * overridden with `opts.devRef` (the /promote handler passes
+ * 'refs/heads/<source_branch>' so the closed_unmerged demo works locally);
+ * headRef is always null. It is chosen at the composition root ONLY when
  * PROMOTE_OIDC_DEV_BYPASS=true AND NODE_ENV !== 'production'. config.loadConfig()
  * fails fast if that pairing is ever attempted in production, so this class can
  * never run there.
@@ -15,7 +18,7 @@
  *
  * // DEV-ONLY
  */
-import type { OidcVerifier, PromotePrincipal } from './oidcAuthenticator.js';
+import type { OidcVerifier, OidcVerifyOptions, PromotePrincipal } from './oidcAuthenticator.js';
 
 /**
  * Fixed identity — kept in lockstep with migrations/seed.dev.sql
@@ -25,11 +28,15 @@ import type { OidcVerifier, PromotePrincipal } from './oidcAuthenticator.js';
 export const DEV_PROMOTE_PRINCIPAL: PromotePrincipal = {
   repository: 'crombie-llc/gmemo-demo', // == machine_credential.principal_name (seed)
   ref: 'refs/heads/main',
+  headRef: null,
 };
 
 export class DevOidcAuthenticator implements OidcVerifier {
-  async verify(_authorization: string | undefined): Promise<PromotePrincipal> {
-    // No token verification. Returns the fixed dev principal unconditionally.
-    return DEV_PROMOTE_PRINCIPAL;
+  async verify(
+    _authorization: string | undefined,
+    opts?: OidcVerifyOptions,
+  ): Promise<PromotePrincipal> {
+    // No token verification. Fixed dev repository; ref overridable via devRef.
+    return { ...DEV_PROMOTE_PRINCIPAL, ref: opts?.devRef ?? DEV_PROMOTE_PRINCIPAL.ref };
   }
 }

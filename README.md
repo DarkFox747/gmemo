@@ -94,6 +94,8 @@ en local no hace falta `Authorization`.
 | `RATE_LIMIT_ENABLED` | `true` | `false` prohibido en producción |
 | `RATE_LIMIT_MCP_WINDOW_MS`, `RATE_LIMIT_MCP_MAX` | `60000`, `120` | límite de `/mcp` |
 | `RATE_LIMIT_PROMOTE_WINDOW_MS`, `RATE_LIMIT_PROMOTE_MAX` | `60000`, `10` | límite de `/promote` |
+| `RATE_LIMIT_API_WINDOW_MS`, `RATE_LIMIT_API_MAX` | `60000`, `120` | límite de la API REST `/api` (aplica también a pedidos sin autenticar) |
+| `WEB_STATIC_DIR` | — | solo dev: Express sirve el build de la web desde esa carpeta (con fallback SPA); prohibida en producción |
 
 ### Sample POST /mcp — recall (JSON-RPC tools/call)
 

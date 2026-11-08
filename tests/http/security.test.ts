@@ -195,3 +195,81 @@ describe('rate limiting disabled by default', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// (e) /api limiter + headers (web-api / http-security deltas)
+// ---------------------------------------------------------------------------
+
+describe('/api rate limiting and headers', () => {
+  function makeApiLimitedApp(apiMax: number) {
+    return createApp(makeStubAuthServices(), {
+      rateLimit: { enabled: true, apiWindowMs: 60_000, apiMax },
+    });
+  }
+
+  it('RATE_LIMIT_API_MAX=2: third request → 429 + RateLimit headers', async () => {
+    const app = makeApiLimitedApp(2);
+    for (let i = 0; i < 2; i++) {
+      const ok = await request(app).get('/api/v1/me').set('X-Forwarded-For', '10.9.0.1');
+      expect(ok.status).toBe(200);
+    }
+    const res = await request(app).get('/api/v1/me').set('X-Forwarded-For', '10.9.0.1');
+    expect(res.status).toBe(429);
+    expect(res.body).toEqual({ error: 'Too Many Requests' });
+    const headers = Object.keys(res.headers).map((h) => h.toLowerCase());
+    expect(headers.some((h) => h.startsWith('ratelimit'))).toBe(true);
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+
+  it('the /api limiter runs before auth (unauthenticated floods are limited too)', async () => {
+    const services = makeStubAuthServices({
+      authenticator: { authenticate: () => Promise.reject(new Error('no token')) },
+    });
+    const app = createApp(services, { rateLimit: { enabled: true, apiWindowMs: 60_000, apiMax: 1 } });
+    const first = await request(app).get('/api/v1/me').set('X-Forwarded-For', '10.9.0.2');
+    expect(first.status).toBe(401);
+    const second = await request(app).get('/api/v1/me').set('X-Forwarded-For', '10.9.0.2');
+    expect(second.status).toBe(429);
+  });
+
+  it('the /api bucket is independent of /mcp', async () => {
+    const app = createApp(makeStubAuthServices(), {
+      rateLimit: { enabled: true, mcpMax: 1, apiWindowMs: 60_000, apiMax: 5 },
+    });
+    await request(app).post('/mcp').set('X-Forwarded-For', '10.9.0.3').send({});
+    const res = await request(app).get('/api/v1/me').set('X-Forwarded-For', '10.9.0.3');
+    expect(res.status).toBe(200);
+  });
+
+  it('/api responses carry helmet headers, no-store, no CSP and no X-Powered-By', async () => {
+    const app = createApp(makeStubAuthServices());
+    const res = await request(app).get('/api/v1/me');
+    expect(res.status).toBe(200);
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['strict-transport-security']).toBeDefined();
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.headers['content-security-policy']).toBeUndefined();
+    expect(res.headers['x-powered-by']).toBeUndefined();
+  });
+
+  it('malformed JSON on /api → 400 JSON (mapped at app level)', async () => {
+    const app = createApp(makeStubAuthServices());
+    const res = await request(app)
+      .post('/api/v1/projects/00000000-0000-0000-0000-000000000010/review-queue/x/reject')
+      .set('Content-Type', 'application/json')
+      .send('{"reason":');
+    expect(res.status).toBe(400);
+    expect(res.text).toBe('{"error":"Invalid request"}');
+  });
+
+  it('/promote errors still use the terminal 500 handler (unchanged)', async () => {
+    const services = makeStubAuthServices({
+      oidcVerifier: { verify: () => Promise.reject(new Error('bad token')) },
+    });
+    const res = await request(createApp(services))
+      .post('/promote')
+      .send({ repo: 'a/b', source_branch: 'main' });
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Internal server error' });
+  });
+});

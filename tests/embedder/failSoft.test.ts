@@ -17,7 +17,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { BedrockEmbedder } from '../../src/embedder/bedrockEmbedder.js';
 import { StubEmbedder } from '../../src/embedder/stubEmbedder.js';
-import { EMBEDDING_DIM, type Embedder } from '../../src/embedder/embedder.js';
+import { EMBEDDING_DIM, embedItemFailSoft, type Embedder } from '../../src/embedder/embedder.js';
+import { logger } from '../../src/observability/logger.js';
 import type { BedrockInvoker } from '../../src/bedrock/client.js';
 
 // ---------------------------------------------------------------------------
@@ -30,7 +31,9 @@ import type { BedrockInvoker } from '../../src/bedrock/client.js';
  */
 function makeThrowingClient(): BedrockInvoker {
   return {
-    send: vi.fn().mockRejectedValue(new Error('BedrockEmbedder.invokeModel not implemented (deferred)')),
+    send: vi
+      .fn()
+      .mockRejectedValue(new Error('BedrockEmbedder.invokeModel not implemented (deferred)')),
   };
 }
 
@@ -138,5 +141,36 @@ describe('embedOrNull — fail-soft contract lives in the caller', () => {
     const result = await embedOrNull(new StubEmbedder(), 'a working embedder');
     expect(result).not.toBeNull();
     expect(result).toHaveLength(EMBEDDING_DIM);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// embedItemFailSoft — the shared caller-side helper (PromoteService, ReviewService)
+// ---------------------------------------------------------------------------
+
+describe('embedItemFailSoft', () => {
+  const item = { id: 'i1', op: 'add' as const, title: 'T', summary: 'S', body: 'B' };
+
+  it('deprecate → null without calling the embedder', async () => {
+    const embed = vi.fn();
+    const r = await embedItemFailSoft({ embed }, { ...item, op: 'deprecate' });
+    expect(r).toBeNull();
+    expect(embed).not.toHaveBeenCalled();
+  });
+
+  it('embeds "title\nsummary\nbody"', async () => {
+    const embed = vi.fn().mockResolvedValue([1, 2]);
+    expect(await embedItemFailSoft({ embed }, item)).toEqual([1, 2]);
+    expect(embed).toHaveBeenCalledWith('T\nS\nB');
+  });
+
+  it('throw → null and warns with the item id and error name only', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const r = await embedItemFailSoft(new ThrowingEmbedder(), item);
+    expect(r).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(warn.mock.calls[0])).not.toContain('always fails');
+    expect(warn.mock.calls[0]![1]).toEqual({ itemId: 'i1', errorName: 'Error' });
+    warn.mockRestore();
   });
 });

@@ -14,6 +14,15 @@
  *  - Stub AuditLogger gains recordPromote.
  *  - makeStubAuthServices() return type is widened to full AppServices including
  *    authRepository, promotionRepository, judge, oidcVerifier, promoteService.
+ *
+ * Web API (C2) additions:
+ *  - FakeUser gains email/displayName; InMemoryAuthRepository gains
+ *    findEnabledUserByEmail (case-insensitive) + listProjectsForUser (non-archived).
+ *  - Stub Authorizer gains authorizeUser + authorizeProjectAdmin.
+ *  - Stub AuditLogger gains recordApi + recordAbandon.
+ *  - makeStubAuthServices(): reviewService stub (empty queue, everything
+ *    not_found), headRef on the stub OIDC principal, and the three review/abandon
+ *    methods on the stub promotion repository.
  */
 
 import type {
@@ -31,6 +40,11 @@ import type {
   Principal,
   TenantContext,
   ActorIdentity,
+  AdminActor,
+  AuthenticatedUser,
+  ProjectContext,
+  ApiAction,
+  ApiAuditDetail,
   RequestContext,
   TenantResolutionInput,
   ToolName,
@@ -47,7 +61,10 @@ import type {
   PersistedDecision,
   QuarantineInput,
   SanitizeFlags,
+  ReviewApproveInput,
+  ReviewRejectInput,
 } from '../../src/db/promotionRepository.js';
+import type { ReviewServiceLike } from '../../src/http/api/types.js';
 import type { Judge, JudgeItem } from '../../src/judge/judge.js';
 import type { OidcVerifier, PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
 import { PromoteService } from '../../src/promote/promoteService.js';
@@ -74,7 +91,19 @@ export interface FakeUser {
   subject: string;
   userId: string;
   globalRole: string | null;
+  /** Defaults to `<subject>@test.local`. */
+  email?: string;
+  displayName?: string | null;
   disabled?: boolean;
+}
+
+/** Seed record for a project row (used by listProjectsForUser). */
+export interface FakeProject {
+  projectId: string;
+  slug: string;
+  name: string;
+  /** Simulates `archived_at IS NOT NULL` — excluded from listProjectsForUser. */
+  archived?: boolean;
 }
 
 /** Seed record for a project_membership row. */
@@ -113,7 +142,12 @@ export class InMemoryAuthRepository implements AuthRepository {
   public readonly accessLogEntries: AccessLogEntry[] = [];
 
   private readonly repoByRemoteUrl = new Map<string, RepoResolution>();
-  private readonly userBySubject = new Map<string, AppUser & { disabled: boolean }>();
+  private readonly userBySubject = new Map<
+    string,
+    AppUser & { subject: string; disabled: boolean }
+  >();
+  private readonly memberships: FakeMembership[];
+  private readonly projectById = new Map<string, FakeProject>();
   /** Key: `${projectId}:${userId}` → role string. */
   private readonly membershipKey = new Map<string, string>();
   /** Key: `${projectId}:${principalName}` → FakeMachineCredential. */
@@ -124,6 +158,7 @@ export class InMemoryAuthRepository implements AuthRepository {
     users: FakeUser[] = [],
     memberships: FakeMembership[] = [],
     machineCredentials: FakeMachineCredential[] = [],
+    projects: FakeProject[] = [],
   ) {
     for (const r of repos) {
       this.repoByRemoteUrl.set(r.remoteUrl, {
@@ -135,10 +170,18 @@ export class InMemoryAuthRepository implements AuthRepository {
 
     for (const u of users) {
       this.userBySubject.set(u.subject, {
+        subject: u.subject,
         userId: u.userId,
         globalRole: u.globalRole,
+        email: u.email ?? `${u.subject}@test.local`,
+        displayName: u.displayName ?? null,
         disabled: u.disabled ?? false,
       });
+    }
+
+    this.memberships = [...memberships];
+    for (const p of projects) {
+      this.projectById.set(p.projectId, p);
     }
 
     for (const m of memberships) {
@@ -164,11 +207,48 @@ export class InMemoryAuthRepository implements AuthRepository {
     const user = this.userBySubject.get(subject);
     // Disabled users are treated identically to absent users (no enumeration).
     if (!user || user.disabled) return null;
-    return { userId: user.userId, globalRole: user.globalRole };
+    return {
+      userId: user.userId,
+      globalRole: user.globalRole,
+      email: user.email,
+      displayName: user.displayName,
+    };
+  }
+
+  async findEnabledUserByEmail(
+    email: string,
+  ): Promise<{ userId: string; idpSubject: string } | null> {
+    const wanted = email.toLowerCase();
+    for (const user of this.userBySubject.values()) {
+      if (!user.disabled && user.email.toLowerCase() === wanted) {
+        return { userId: user.userId, idpSubject: user.subject };
+      }
+    }
+    return null;
+  }
+
+  async listProjectsForUser(
+    userId: string,
+  ): Promise<Array<{ projectId: string; slug: string; name: string; role: string }>> {
+    const result: Array<{ projectId: string; slug: string; name: string; role: string }> = [];
+    for (const m of this.memberships) {
+      const project = this.projectById.get(m.projectId);
+      if (m.userId !== userId || !project || project.archived) continue;
+      result.push({ projectId: project.projectId, slug: project.slug, name: project.name, role: m.role });
+    }
+    // Mirrors ORDER BY p.name, p.id.
+    return result.sort(
+      (a, b) => a.name.localeCompare(b.name) || a.projectId.localeCompare(b.projectId),
+    );
   }
 
   async findMembershipRole(projectId: string, userId: string): Promise<string | null> {
     return this.membershipKey.get(`${projectId}:${userId}`) ?? null;
+  }
+
+  async isProjectActive(projectId: string): Promise<boolean> {
+    const project = this.projectById.get(projectId);
+    return project !== undefined && !project.archived;
   }
 
   async insertAccessLog(entry: AccessLogEntry): Promise<void> {
@@ -210,7 +290,24 @@ const STUB_TENANT: TenantContext = {
 /** Default stub actor returned by the stub authorizer. */
 const STUB_ACTOR: ActorIdentity = {
   actorId: 'stub-sub',
+  userId: 'stub-user-id',
   roles: ['viewer'],
+};
+
+/** Default admin actor returned by the stub authorizeProjectAdmin. */
+const STUB_ADMIN: AdminActor = {
+  actorId: 'stub-sub',
+  userId: 'stub-user-id',
+  roles: ['project_admin'],
+};
+
+/** Default user returned by the stub authorizeUser. */
+const STUB_USER: AuthenticatedUser = {
+  actorId: 'stub-sub',
+  userId: 'stub-user-id',
+  email: 'stub@test.local',
+  displayName: 'Stub User',
+  globalRole: null,
 };
 
 /**
@@ -243,6 +340,12 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     authorizePromote(_principal: PromotePrincipal, _tenant: TenantContext): Promise<ActorIdentity> {
       return Promise.resolve(STUB_ACTOR);
     },
+    authorizeUser(_principal: Principal): Promise<AuthenticatedUser> {
+      return Promise.resolve(STUB_USER);
+    },
+    authorizeProjectAdmin(_principal: Principal, _projectId: string): Promise<AdminActor> {
+      return Promise.resolve(STUB_ADMIN);
+    },
   };
 
   const stubAuditLogger: AuditLogger = {
@@ -270,6 +373,20 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
         prNumber: number | null;
         mergeSha: string | null;
       },
+    ): Promise<void> {
+      return Promise.resolve();
+    },
+    recordApi(
+      _actor: ActorIdentity,
+      _project: ProjectContext | null,
+      _action: ApiAction,
+      _detail?: ApiAuditDetail,
+    ): Promise<void> {
+      return Promise.resolve();
+    },
+    recordAbandon(
+      _ctx: RequestContext,
+      _p: { sessionId: string; discarded: number; prNumber: number },
     ): Promise<void> {
       return Promise.resolve();
     },
@@ -315,6 +432,10 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
       Promise.resolve(),
     finalizeSession: (_sessionId: string, _status: 'promoted' | 'rejected' | 'partially_promoted') =>
       Promise.resolve(),
+    approveReviewItem: (_i: ReviewApproveInput) => Promise.resolve({ status: 'not_found' as const }),
+    rejectReviewItem: (_i: ReviewRejectInput) => Promise.resolve('not_found' as const),
+    abandonOpenSession: (_sessionId: string, _projectId: string) =>
+      Promise.resolve({ abandoned: false, discarded: 0 }),
   };
 
   // Stub judge: always returns an accepted JudgeResult.
@@ -335,7 +456,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
   // Stub OIDC verifier: returns a fixed promote principal.
   const stubOidcVerifier: OidcVerifier = {
     verify: (_authorization: string | undefined) =>
-      Promise.resolve({ repository: 'stub-owner/stub-repo', ref: 'refs/heads/main' }),
+      Promise.resolve({ repository: 'stub-owner/stub-repo', ref: 'refs/heads/main', headRef: null }),
   };
 
   // Stub auth repository (no seed data — tests that need specific data build their own).
@@ -343,7 +464,10 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     findRepoByRemoteUrl: (_remoteUrl: string) => Promise.resolve(null),
     findRepoByGithubSlug: (_ownerRepo: string) => Promise.resolve(null),
     findEnabledUserBySubject: (_subject: string) => Promise.resolve(null),
+    findEnabledUserByEmail: (_email: string) => Promise.resolve(null),
+    listProjectsForUser: (_userId: string) => Promise.resolve([]),
     findMembershipRole: (_projectId: string, _userId: string) => Promise.resolve(null),
+    isProjectActive: (_projectId: string) => Promise.resolve(false),
     insertAccessLog: (_entry: AccessLogEntry) => Promise.resolve(),
     findActiveMachineCredential: (_projectId: string, _principalName: string) =>
       Promise.resolve(null),
@@ -365,6 +489,19 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     routing: { confidenceThreshold: 0.8, mandatoryReviewTypes: new Set() },
   });
 
+  // Stub review service: empty queue; every item lookup/decision is not_found.
+  const stubReviewService: ReviewServiceLike = {
+    list: () =>
+      Promise.resolve({
+        items: [],
+        counters: { pending: 0, uncertain: 0, mandatory: 0, resolvedLast7Days: 0 },
+        truncated: false,
+      }),
+    get: () => Promise.resolve(null),
+    approve: () => Promise.resolve({ kind: 'not_found' as const }),
+    reject: () => Promise.resolve({ kind: 'not_found' as const }),
+  };
+
   return {
     authenticator: stubAuthenticator,
     tenantResolver: stubTenantResolver,
@@ -381,6 +518,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     semanticFallbackMinResults: 0,  // Phase 2 never fires in stub-services tests
     semanticFallbackK: 8,
     notifier: stubNotifier,
+    reviewService: stubReviewService,
     ...overrides,
   };
 }
