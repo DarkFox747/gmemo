@@ -196,16 +196,19 @@ describe('POST /quarantine/:id/restore', () => {
     expect(kit.quarantineRepo.claimCalls).toHaveLength(0);
   });
 
-  it('audit failure after the restore → 500 and logged with the id', async () => {
+  it('C11 audit failure inside the restored write → 500, logged with the ids, no row', async () => {
     const spy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const kit = makeApiTestApp();
     kit.authRepo.insertAccessLog = () => Promise.reject(new Error('db down'));
     const res = await restore(kit).send({});
     expect(res.status).toBe(500);
-    expect(spy).toHaveBeenCalledWith('[api] audit failed after committed quarantine restore', {
+    expect(res.text).toBe('{"error":"Internal server error"}');
+    expect(spy).toHaveBeenCalledWith('[quarantine] restore pipeline failed after claim', {
       quarantineId: ID,
+      itemId: 'item-restore',
       errorName: 'Error',
     });
+    expect(kit.authRepo.accessLogEntries).toHaveLength(0);
   });
 
   it('pipeline failure → 500, not audited', async () => {

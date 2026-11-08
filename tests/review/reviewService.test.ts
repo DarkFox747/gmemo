@@ -8,11 +8,13 @@ import {
   makeItem,
   makeRef,
 } from './fakes.js';
+import { recordingAudit } from '../auth/txnAudit.js';
 
 let queue: FakeQueueRepo;
 let promo: FakePromotionRepo;
 let embedder: FakeEmbedder;
 let svc: ReviewService;
+let rec: ReturnType<typeof recordingAudit>;
 
 const NO_FLAGS = { markRelatedSuperseded: false };
 
@@ -20,6 +22,7 @@ beforeEach(() => {
   queue = new FakeQueueRepo();
   promo = new FakePromotionRepo();
   embedder = new FakeEmbedder();
+  rec = recordingAudit();
   svc = new ReviewService({
     reviewQueueRepository: queue,
     promotionRepository: promo,
@@ -94,7 +97,7 @@ describe('ReviewService.get', () => {
 
 describe('ReviewService.approve', () => {
   it('not_found when the item is not queued; no embedding, no approve call', async () => {
-    const out = await svc.approve(ACTOR, 'p1', 'x', NO_FLAGS);
+    const out = await svc.approve(ACTOR, 'p1', 'x', NO_FLAGS, rec.audit);
     expect(out).toEqual({ kind: 'not_found' });
     expect(embedder.calls).toHaveLength(0);
     expect(promo.approveInputs).toHaveLength(0);
@@ -102,10 +105,16 @@ describe('ReviewService.approve', () => {
 
   it('passes embedding, expected hash and reviewer; maps the approved result and audit', async () => {
     queue.item = makeItem();
-    const out = await svc.approve(ACTOR, 'p1', 'item-1', {
-      markRelatedSuperseded: true,
-      targetRevision: 4,
-    });
+    const out = await svc.approve(
+      ACTOR,
+      'p1',
+      'item-1',
+      {
+        markRelatedSuperseded: true,
+        targetRevision: 4,
+      },
+      rec.audit,
+    );
     expect(promo.approveInputs[0]).toEqual({
       projectId: 'p1',
       itemId: 'item-1',
@@ -125,14 +134,16 @@ describe('ReviewService.approve', () => {
         rebasedFromRevision: null,
         relatedSuperseded: false,
       },
-      audit: {
+    });
+    expect(rec.details).toEqual([
+      {
         itemId: 'item-1',
         memoryId: 'mem-9',
         decision: 'approved',
         deduped: false,
         relatedSuperseded: false,
       },
-    });
+    ]);
   });
 
   it('includes rebase revisions in dto and audit', async () => {
@@ -145,45 +156,54 @@ describe('ReviewService.approve', () => {
       rebasedToRevision: 3,
       relatedSuperseded: true,
     };
-    const out = await svc.approve(ACTOR, 'p1', 'item-1', {
-      markRelatedSuperseded: false,
-      targetRevision: 3,
-    });
+    const out = await svc.approve(
+      ACTOR,
+      'p1',
+      'item-1',
+      {
+        markRelatedSuperseded: false,
+        targetRevision: 3,
+      },
+      rec.audit,
+    );
     expect(out.kind).toBe('approved');
     if (out.kind === 'approved') {
       expect(out.dto.rebasedFromRevision).toBe(2);
-      expect(out.audit).toMatchObject({ rebasedFromRevision: 2, rebasedToRevision: 3 });
     }
+    expect(rec.details[0]).toMatchObject({ rebasedFromRevision: 2, rebasedToRevision: 3 });
   });
 
   it('targetRevision defaults to null when not supplied', async () => {
     queue.item = makeItem();
-    await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS);
+    await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS, rec.audit);
     expect(promo.approveInputs[0]!.targetRevision).toBeNull();
   });
 
   it('maps repository not_found and conflict codes', async () => {
     queue.item = makeItem();
     promo.approveResult = { status: 'not_found' };
-    expect(await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS)).toEqual({ kind: 'not_found' });
+    expect(await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS, rec.audit)).toEqual({
+      kind: 'not_found',
+    });
     promo.approveResult = { status: 'conflict', code: 'target_changed' };
-    expect(await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS)).toEqual({
+    expect(await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS, rec.audit)).toEqual({
       kind: 'conflict',
       code: 'target_changed',
     });
+    expect(rec.details).toEqual([]);
   });
 
   it('embedding failure is fail-soft: approve proceeds with a null embedding', async () => {
     queue.item = makeItem();
     embedder.fail = true;
-    const out = await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS);
+    const out = await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS, rec.audit);
     expect(out.kind).toBe('approved');
     expect(promo.approveInputs[0]!.embedding).toBeNull();
   });
 
   it('deprecate: embedder is never called, embedding is null', async () => {
     queue.item = makeItem({ op: 'deprecate', target_memory_id: 'mem-1', target_revision: 3 });
-    await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS);
+    await svc.approve(ACTOR, 'p1', 'item-1', NO_FLAGS, rec.audit);
     expect(embedder.calls).toHaveLength(0);
     expect(promo.approveInputs[0]!.embedding).toBeNull();
   });
@@ -191,15 +211,27 @@ describe('ReviewService.approve', () => {
 
 describe('ReviewService.reject', () => {
   it('rejects a reason containing a secret as invalid_reason without storing it', async () => {
-    const out = await svc.reject(ACTOR, 'p1', 'item-1', {
-      reason: 'leaked key AKIAIOSFODNN7EXAMPLE in body',
-    });
+    const out = await svc.reject(
+      ACTOR,
+      'p1',
+      'item-1',
+      {
+        reason: 'leaked key AKIAIOSFODNN7EXAMPLE in body',
+      },
+      rec.audit,
+    );
     expect(out).toEqual({ kind: 'invalid_reason' });
     expect(promo.rejectInputs).toHaveLength(0);
   });
 
   it('masks PII before storage', async () => {
-    const out = await svc.reject(ACTOR, 'p1', 'item-1', { reason: 'contact jane.doe@example.com' });
+    const out = await svc.reject(
+      ACTOR,
+      'p1',
+      'item-1',
+      { reason: 'contact jane.doe@example.com' },
+      rec.audit,
+    );
     expect(out).toEqual({ kind: 'rejected', dto: { itemId: 'item-1', decision: 'rejected' } });
     expect(promo.rejectInputs[0]!.reason).not.toContain('jane.doe@example.com');
     expect(promo.rejectInputs[0]).toMatchObject({
@@ -207,11 +239,13 @@ describe('ReviewService.reject', () => {
       itemId: 'item-1',
       reviewerUserId: 'user-1',
     });
+    // The audit detail never carries the reason.
+    expect(rec.details).toEqual([{ itemId: 'item-1', decision: 'rejected' }]);
   });
 
   it('maps repository not_found', async () => {
     promo.rejectResult = 'not_found';
-    expect(await svc.reject(ACTOR, 'p1', 'item-1', { reason: 'not relevant' })).toEqual({
+    expect(await svc.reject(ACTOR, 'p1', 'item-1', { reason: 'not relevant' }, rec.audit)).toEqual({
       kind: 'not_found',
     });
   });

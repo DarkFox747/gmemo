@@ -1,0 +1,83 @@
+# ci.yml — test gate: the same full check developers run locally.
+#
+# Runs on every pull request and on pushes to main: frozen install, lint,
+# server build, web typecheck + build, and the full Vitest suite (unit + DB
+# integration) against a fresh pgvector Postgres service container.
+#
+# tests/globalSetup.ts resets the schema of DATABASE_URL and only accepts a
+# local host and the database "gmemo", which is exactly this service.
+#
+# Security notes:
+#   - permissions: contents: read only (no write scopes, no id-token).
+#   - Third-party actions are pinned by full commit SHA.
+#   - No secrets are used; the database credentials are throwaway values for
+#     the ephemeral service container.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: gmemo
+          POSTGRES_PASSWORD: gmemo
+          POSTGRES_DB: gmemo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gmemo -d gmemo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://gmemo:gmemo@localhost:5432/gmemo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Enable pnpm (corepack, packageManager pnpm@9.15.0)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build server
+        run: pnpm build
+
+      - name: Typecheck web
+        run: pnpm typecheck:web
+
+      - name: Build web
+        run: pnpm build:web
+
+      - name: Test (unit + DB integration)
+        run: pnpm exec vitest run

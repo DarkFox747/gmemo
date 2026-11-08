@@ -27,9 +27,10 @@
  *
  * Committed write, then 500 (CR-M4): once promoteItem has applied the item, the
  * memory row and its revision are COMMITTED. If re-reading the memory for the
- * response fails (throw, or the row vanished) — or the route's audit write fails
- * afterwards — the caller gets a 500 although the write stands (the abandon is a
- * no-op on the finalized session). The client must re-read (GET the list or the
+ * response fails (throw, or the row vanished), the caller gets a 500 although the
+ * write (and its audit row, committed in the same transaction — C11) stands (the
+ * abandon is a no-op on the finalized session). An audit insert failure rolls the
+ * write back instead: nothing is committed and the session is abandoned. The client must re-read (GET the list or the
  * detail) before retrying; a retry of the same add dedups (deduped: true), and a
  * retry of an amend gets 409 target_changed. Both are logged with ids only.
  *
@@ -41,10 +42,14 @@
  *   2. amend target: missing/foreign → not_found; not active → target_inactive;
  *      revision ≠ expectedRevision → target_changed; type change → invalid
  *
- * Routes own the audit. Logging: ids only — never content.
+ * The route binds the audit row (actor, action); writeAudit maps the committed
+ * write to its detail and the repository inserts it before COMMIT. Logging:
+ * ids only — never content.
  */
 
-import type { AdminActor, ApiAuditDetail } from '../mcp/context.js';
+import type { AdminActor, ApiAuditDetail, ApiWriteAudit } from '../mcp/context.js';
+import type { ItemWrite } from '../db/promotionRepository.js';
+import type { TxnAudit } from '../db/authRepository.js';
 import type {
   MemoryDetailDto,
   MemoryListDto,
@@ -168,6 +173,45 @@ function findings(ev: CandidateEvaluation): PreviewResponseDto['pipeline']['find
   return out;
 }
 
+/**
+ * Maps the committed terminal write to the route's audit detail (same detail as
+ * before C11). A dedup onto a non-active memory is not audited: the route
+ * answers 409 duplicate_inactive (nothing in memory changed). A queue decision
+ * is not a direct-write outcome: refusing it rolls the write back and the
+ * caller abandons the session (fail closed).
+ */
+function writeAudit(
+  audit: ApiWriteAudit,
+  itemId: string,
+  target: TargetRef | null,
+): TxnAudit<ItemWrite> {
+  return async (db, w) => {
+    if (w.outcome === 'applied') {
+      if (w.deduped && w.memoryStatus !== 'active') return;
+      const detail: ApiAuditDetail = {
+        memoryId: w.memoryId,
+        itemId,
+        outcome: 'applied',
+        deduped: w.deduped,
+      };
+      await audit(db, detail);
+      return;
+    }
+    if (w.outcome === 'quarantined') {
+      const detail: ApiAuditDetail = {
+        itemId,
+        outcome: 'quarantined',
+        quarantineId: w.quarantineId,
+      };
+      if (target) detail.memoryId = target.memoryId;
+      await audit(db, detail);
+      return;
+    }
+    logger.error('[direct] queue decision refused for a direct write', { itemId });
+    throw new AppError(ErrorCode.INTERNAL);
+  };
+}
+
 function errorName(err: unknown): string {
   return err instanceof Error ? err.name : 'unknown';
 }
@@ -225,8 +269,13 @@ export class DirectMemoryService implements DirectMemoryServiceLike {
     return { kind: 'ok', dto, audit };
   }
 
-  create(actor: AdminActor, projectId: string, input: UnitInput): Promise<WriteOutcome> {
-    return this.write(actor, projectId, input, null);
+  create(
+    actor: AdminActor,
+    projectId: string,
+    input: UnitInput,
+    audit: ApiWriteAudit,
+  ): Promise<WriteOutcome> {
+    return this.write(actor, projectId, input, null, audit);
   }
 
   amend(
@@ -234,11 +283,15 @@ export class DirectMemoryService implements DirectMemoryServiceLike {
     projectId: string,
     memoryId: string,
     input: AmendInput,
+    audit: ApiWriteAudit,
   ): Promise<WriteOutcome> {
-    return this.write(actor, projectId, input, {
-      memoryId,
-      expectedRevision: input.expectedRevision,
-    });
+    return this.write(
+      actor,
+      projectId,
+      input,
+      { memoryId, expectedRevision: input.expectedRevision },
+      audit,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -328,6 +381,7 @@ export class DirectMemoryService implements DirectMemoryServiceLike {
     projectId: string,
     unit: UnitInput,
     target: TargetRef | null,
+    audit: ApiWriteAudit,
   ): Promise<WriteOutcome> {
     const pre = await this.preCheck(projectId, unit, target);
     if (pre.kind !== 'ok') return pre;
@@ -374,7 +428,10 @@ export class DirectMemoryService implements DirectMemoryServiceLike {
         sessionId,
         itemId,
         { tenant: { projectId, repoId: pre.repoId, branch }, originBranch: branch, originPr: null },
-        { humanApproved: { approverUserId: actor.userId } },
+        {
+          humanApproved: { approverUserId: actor.userId },
+          audit: writeAudit(audit, itemId, target),
+        },
       );
     } catch (err) {
       logger.error('[direct] pipeline failed', { sessionId, itemId, errorName: errorName(err) });
@@ -401,13 +458,7 @@ export class DirectMemoryService implements DirectMemoryServiceLike {
           });
           return { kind: 'conflict', code: 'duplicate_inactive' };
         }
-        const audit: ApiAuditDetail = {
-          memoryId: r.memoryId,
-          itemId,
-          outcome: 'applied',
-          deduped: r.deduped,
-        };
-        return { kind: 'done', dto: { outcome: 'applied', deduped: r.deduped, memory }, audit };
+        return { kind: 'done', dto: { outcome: 'applied', deduped: r.deduped, memory } };
       }
       case 'quarantined': {
         if (r.quarantineId === null) break;
@@ -416,12 +467,6 @@ export class DirectMemoryService implements DirectMemoryServiceLike {
           { isAdmin: true, subject: actor.actorId },
           r.quarantineId,
         );
-        const audit: ApiAuditDetail = {
-          itemId,
-          outcome: 'quarantined',
-          quarantineId: r.quarantineId,
-        };
-        if (target) audit.memoryId = target.memoryId;
         return {
           kind: 'done',
           dto: {
@@ -430,7 +475,6 @@ export class DirectMemoryService implements DirectMemoryServiceLike {
             reasonCode: q?.reasonCode ?? null,
             criterion: q?.criterion ?? null,
           },
-          audit,
         };
       }
       case 'conflict':

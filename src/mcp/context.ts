@@ -21,7 +21,7 @@ import type { PromotePrincipal, OidcVerifier } from '../auth/oidcAuthenticator.j
 import type { PromotionRepository } from '../db/promotionRepository.js';
 import type { Judge } from '../judge/judge.js';
 import type { PromoteServiceLike } from '../promote/promoteService.js';
-import type { AuthRepository } from '../db/authRepository.js';
+import type { AuthRepository, TxnAudit } from '../db/authRepository.js';
 import type { Embedder } from '../embedder/embedder.js';
 import type { Notifier } from '../notify/notifier.js';
 import type { ReviewServiceLike } from '../http/api/types.js';
@@ -234,6 +234,9 @@ export interface Authorizer {
   authorizeProjectMember(principal: Principal, projectId: string): Promise<ProjectMember>;
 }
 
+/** Transaction-scoped audit of one REST write; detail is allow-listed as in recordApi. */
+export type ApiWriteAudit = TxnAudit<ApiAuditDetail>;
+
 /** SEAM — write access_log (contract §7); query_hash only, never raw text. */
 export interface AuditLogger {
   recordRead(ctx: RequestContext, tool: ToolName, queryHash?: string): Promise<void>;
@@ -277,6 +280,13 @@ export interface AuditLogger {
     action: ApiAction,
     detail?: ApiAuditDetail,
   ): Promise<void>;
+  /**
+   * Binds actor, project and a REST write action into the hook the write's
+   * repository runs inside its own transaction (C11): the access_log row
+   * (same shape as recordApi) commits with the data change, and an insert
+   * failure rolls the write back.
+   */
+  apiWriteAudit(actor: ActorIdentity, project: ProjectContext, action: ApiAction): ApiWriteAudit;
   /**
    * Records a closed_unmerged session abandon (actor_kind 'ci', action 'delete').
    */

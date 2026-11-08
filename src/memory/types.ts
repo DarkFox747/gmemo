@@ -4,7 +4,7 @@
  */
 
 import type { MemoryType } from '../contracts/memory.js';
-import type { AdminActor, ApiAuditDetail } from '../mcp/context.js';
+import type { AdminActor, ApiAuditDetail, ApiWriteAudit } from '../mcp/context.js';
 import type {
   ConflictCode,
   DirectWriteResponseDto,
@@ -46,7 +46,7 @@ export type PreviewOutcome =
   | { kind: 'invalid' };
 
 export type WriteOutcome =
-  | { kind: 'done'; dto: DirectWriteResponseDto; audit: ApiAuditDetail }
+  | { kind: 'done'; dto: DirectWriteResponseDto }
   | { kind: 'not_found' }
   | { kind: 'conflict'; code: ConflictCode }
   | { kind: 'invalid' }
@@ -57,12 +57,23 @@ export interface DirectMemoryServiceLike {
   list(projectId: string, q: MemoryListQueryInput): Promise<MemoryListDto>;
   get(projectId: string, memoryId: string): Promise<MemoryDetailDto | null>;
   preview(actor: AdminActor, projectId: string, input: PreviewInput): Promise<PreviewOutcome>;
-  create(actor: AdminActor, projectId: string, input: UnitInput): Promise<WriteOutcome>;
+  /**
+   * `audit` (C11) rides on the item's terminal write (apply or quarantine) and
+   * commits with it; it never runs when nothing is written, nor for a dedup
+   * onto a non-active memory (answered 409 duplicate_inactive, as before).
+   */
+  create(
+    actor: AdminActor,
+    projectId: string,
+    input: UnitInput,
+    audit: ApiWriteAudit,
+  ): Promise<WriteOutcome>;
   amend(
     actor: AdminActor,
     projectId: string,
     memoryId: string,
     input: AmendInput,
+    audit: ApiWriteAudit,
   ): Promise<WriteOutcome>;
 }
 

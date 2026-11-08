@@ -8,8 +8,9 @@
  *   POST /review-queue/:itemId/approve   approve                  → review_queue.approve
  *   POST /review-queue/:itemId/reject    reject (reason required) → review_queue.reject
  *
- * Audit runs only after success; an audit failure propagates as a 500 (fail
- * closed). 409 is written directly: it is an expected approve outcome, and the
+ * Reads are audited after success. A decision's audit row is written in the
+ * decision's own transaction (C11): an audit failure rolls the decision back
+ * and propagates as a 500 (fail closed). 409 is written directly: it is an expected approve outcome, and the
  * caller is already proven project_admin of the item's project.
  */
 
@@ -17,7 +18,6 @@ import express from 'express';
 import type { Request } from 'express';
 import { z } from 'zod';
 import { AppError, ErrorCode } from '../../errors/appError.js';
-import { logger } from '../../observability/logger.js';
 import { MEMORY_TYPES } from '../../mcp/tools/schemas.js';
 import type { AdminActor, ProjectContext } from '../../mcp/context.js';
 import type { ApiErrorBody, ApiResponse, ApiRouterDeps } from './types.js';
@@ -82,19 +82,6 @@ export function makeReviewRouter(
   const router = express.Router({ mergeParams: true });
   router.use(requireJsonContentType);
 
-  /** The decision is already committed: log the failure (ids only), then fail closed. */
-  async function auditCommitted(
-    itemId: string,
-    audit: () => Promise<void>,
-  ): Promise<void> {
-    try {
-      await audit();
-    } catch (err) {
-      logger.error('[api] audit failed after committed review decision', { itemId, errorName: err instanceof Error ? err.name : 'unknown' });
-      throw err;
-    }
-  }
-
   router.get('/review-queue', async (req: Request, res: ApiResponse): Promise<void> => {
     const { actor, project } = adminContext(res);
     const q = parseOrInvalid(QueueQuery, req.query);
@@ -130,7 +117,13 @@ export function makeReviewRouter(
       // No body (Express 5 leaves req.body undefined) means "all defaults".
       const body = parseOrInvalid(ApproveBody, req.body ?? {});
 
-      const outcome = await reviewService.approve(actor, project.projectId, itemId, body);
+      const outcome = await reviewService.approve(
+        actor,
+        project.projectId,
+        itemId,
+        body,
+        auditLogger.apiWriteAudit(actor, project, 'review_queue.approve'),
+      );
       if (outcome.kind === 'not_found') throw new AppError(ErrorCode.NOT_FOUND);
       if (outcome.kind === 'conflict') {
         const conflict: ApiErrorBody = { error: 'Conflict', code: outcome.code };
@@ -138,9 +131,6 @@ export function makeReviewRouter(
         return;
       }
 
-      await auditCommitted(itemId, () =>
-        auditLogger.recordApi(actor, project, 'review_queue.approve', outcome.audit),
-      );
       res.status(200).json(outcome.dto);
     },
   );
@@ -152,16 +142,16 @@ export function makeReviewRouter(
       const itemId = parseItemId(req.params.itemId);
       const body = parseOrInvalid(RejectBody, req.body ?? {});
 
-      const outcome = await reviewService.reject(actor, project.projectId, itemId, body);
+      const outcome = await reviewService.reject(
+        actor,
+        project.projectId,
+        itemId,
+        body,
+        auditLogger.apiWriteAudit(actor, project, 'review_queue.reject'),
+      );
       if (outcome.kind === 'invalid_reason') throw new AppError(ErrorCode.INVALID_REQUEST);
       if (outcome.kind === 'not_found') throw new AppError(ErrorCode.NOT_FOUND);
 
-      await auditCommitted(itemId, () =>
-        auditLogger.recordApi(actor, project, 'review_queue.reject', {
-          itemId,
-          decision: 'rejected',
-        }),
-      );
       res.status(200).json(outcome.dto);
     },
   );

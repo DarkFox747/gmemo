@@ -4,12 +4,13 @@
  * approver/author/branch provenance.
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { AdminActor } from '../../src/mcp/context.js';
 import { AppError, ErrorCode } from '../../src/errors/appError.js';
 import { logger } from '../../src/observability/logger.js';
 import { accepted, rejected, uncertain } from '../promote/fakes.js';
 import { DETAIL } from '../quarantine/fakes.js';
+import { recordingAudit } from '../auth/txnAudit.js';
 import {
   P,
   Q,
@@ -33,6 +34,11 @@ const UNIT: UnitInput = {
 };
 
 afterEach(() => vi.restoreAllMocks());
+
+let rec: ReturnType<typeof recordingAudit>;
+beforeEach(() => {
+  rec = recordingAudit();
+});
 
 describe('list / get', () => {
   it('maps list rows and mirrors truncated from nextCursor', async () => {
@@ -116,7 +122,7 @@ describe('pre-checks (preview, create, amend)', () => {
     expect(await kit.service.preview(ACTOR, P, { ...unit, op: 'add' })).toEqual({
       kind: 'not_found',
     });
-    expect(await kit.service.create(ACTOR, P, unit)).toEqual({ kind: 'not_found' });
+    expect(await kit.service.create(ACTOR, P, unit, rec.audit)).toEqual({ kind: 'not_found' });
     expect(kit.judge.evaluateCalls).toHaveLength(0);
     expect(kit.staging.calls).toHaveLength(0);
   });
@@ -128,7 +134,7 @@ describe('pre-checks (preview, create, amend)', () => {
     const foreign = makeAdminMemory({ projectId: Q });
     const kit = makeDirectService({ memories: [active, deprecated, pending, foreign] });
     const amend = (id: string, rev: number, type = UNIT.type) =>
-      kit.service.amend(ACTOR, P, id, { ...UNIT, type, expectedRevision: rev });
+      kit.service.amend(ACTOR, P, id, { ...UNIT, type, expectedRevision: rev }, rec.audit);
 
     expect(await amend(foreign.id, 1)).toEqual({ kind: 'not_found' });
     expect(await amend(deprecated.id, 1)).toEqual({ kind: 'conflict', code: 'target_inactive' });
@@ -143,8 +149,8 @@ describe('pre-checks (preview, create, amend)', () => {
   it('no repoId → the project first repo; a project repo is honoured', async () => {
     const kit = makeDirectService();
     kit.promote.result = { outcome: 'quarantined', itemId: 'item-direct-1', quarantineId: 'q-1' };
-    await kit.service.create(ACTOR, P, UNIT);
-    await kit.service.create(ACTOR, P, { ...UNIT, repoId: REPO_2 });
+    await kit.service.create(ACTOR, P, UNIT, rec.audit);
+    await kit.service.create(ACTOR, P, { ...UNIT, repoId: REPO_2 }, rec.audit);
     expect(kit.staging.calls.map((c) => c.repoId)).toEqual([REPO_1, REPO_2]);
   });
 });
@@ -307,7 +313,7 @@ describe('create / amend', () => {
     const kit = makeDirectService({ memories: [created] });
     kit.promote.result = { outcome: 'applied', memoryId: created.id, deduped: false };
 
-    const out = await kit.service.create(ACTOR, P, UNIT);
+    const out = await kit.service.create(ACTOR, P, UNIT, rec.audit);
 
     const call = kit.staging.calls[0]!;
     expect(call.branch).toBe(`web/${ACTOR.userId}/${call.sessionId}`);
@@ -329,7 +335,7 @@ describe('create / amend', () => {
         originBranch: call.branch,
         originPr: null,
       },
-      opts: { humanApproved: { approverUserId: ACTOR.userId } },
+      opts: { humanApproved: { approverUserId: ACTOR.userId }, audit: expect.any(Function) },
     });
     expect(out.kind).toBe('done');
     if (out.kind !== 'done') return;
@@ -338,12 +344,10 @@ describe('create / amend', () => {
       deduped: false,
       memory: { id: created.id, provenance: 'web_ui' },
     });
-    expect(out.audit).toEqual({
-      memoryId: created.id,
-      itemId: 'item-direct-1',
-      outcome: 'applied',
-      deduped: false,
-    });
+    // Written by the terminal write (opts.audit), not after it.
+    expect(rec.details).toEqual([
+      { memoryId: created.id, itemId: 'item-direct-1', outcome: 'applied', deduped: false },
+    ]);
     expect(kit.promotion.abandonCalls).toHaveLength(0);
   });
 
@@ -351,20 +355,29 @@ describe('create / amend', () => {
     const t = makeAdminMemory({ projectId: P, current_revision: 2 });
     const kit = makeDirectService({ memories: [t] });
     kit.promote.result = { outcome: 'applied', memoryId: t.id, deduped: false };
-    const out = await kit.service.amend(ACTOR, P, t.id, { ...UNIT, expectedRevision: 2 });
+    const out = await kit.service.amend(
+      ACTOR,
+      P,
+      t.id,
+      { ...UNIT, expectedRevision: 2 },
+      rec.audit,
+    );
     expect(out.kind).toBe('done');
     expect(kit.staging.calls[0]!.item).toMatchObject({
       op: 'amend',
       targetMemoryId: t.id,
       targetRevision: 2,
     });
+    expect(rec.details).toEqual([
+      { memoryId: t.id, itemId: 'item-direct-1', outcome: 'applied', deduped: false },
+    ]);
   });
 
   it('quarantined → reason code from the quarantine row (admin viewer)', async () => {
     const kit = makeDirectService();
     kit.promote.result = { outcome: 'quarantined', itemId: 'item-direct-1', quarantineId: 'q-9' };
     kit.quarantine.detail = { ...DETAIL, reasonCode: 'secret_detected', criterion: 'pipeline' };
-    const out = await kit.service.create(ACTOR, P, UNIT);
+    const out = await kit.service.create(ACTOR, P, UNIT, rec.audit);
     expect(out).toMatchObject({
       kind: 'done',
       dto: {
@@ -373,8 +386,10 @@ describe('create / amend', () => {
         reasonCode: 'secret_detected',
         criterion: 'pipeline',
       },
-      audit: { itemId: 'item-direct-1', outcome: 'quarantined', quarantineId: 'q-9' },
     });
+    expect(rec.details).toEqual([
+      { itemId: 'item-direct-1', outcome: 'quarantined', quarantineId: 'q-9' },
+    ]);
     expect(kit.quarantine.findCalls[0]).toEqual({
       projectId: P,
       v: { isAdmin: true, subject: ACTOR.actorId },
@@ -386,7 +401,13 @@ describe('create / amend', () => {
     const t = makeAdminMemory({ projectId: P });
     const kit = makeDirectService({ memories: [t] });
     kit.promote.result = { outcome: 'conflict', itemId: 'item-direct-1', code: 'target_changed' };
-    const out = await kit.service.amend(ACTOR, P, t.id, { ...UNIT, expectedRevision: 1 });
+    const out = await kit.service.amend(
+      ACTOR,
+      P,
+      t.id,
+      { ...UNIT, expectedRevision: 1 },
+      rec.audit,
+    );
     expect(out).toEqual({ kind: 'conflict', code: 'target_changed' });
     expect(kit.promotion.abandonCalls).toEqual([
       { sessionId: kit.staging.calls[0]!.sessionId, projectId: P },
@@ -396,7 +417,7 @@ describe('create / amend', () => {
   it('SEC-M2 pipeline unavailable → session abandoned, unavailable (no write reported)', async () => {
     const kit = makeDirectService();
     kit.promote.result = { outcome: 'unavailable', itemId: 'item-direct-1' };
-    const out = await kit.service.create(ACTOR, P, UNIT);
+    const out = await kit.service.create(ACTOR, P, UNIT, rec.audit);
     expect(out).toEqual({ kind: 'unavailable' });
     expect(kit.promotion.abandonCalls).toEqual([
       { sessionId: kit.staging.calls[0]!.sessionId, projectId: P },
@@ -408,25 +429,53 @@ describe('create / amend', () => {
       const old = makeAdminMemory({ projectId: P, status });
       const kit = makeDirectService({ memories: [old] });
       kit.promote.result = { outcome: 'applied', memoryId: old.id, deduped: true };
-      expect(await kit.service.create(ACTOR, P, UNIT)).toEqual({
+      kit.promote.memoryStatus = status;
+      expect(await kit.service.create(ACTOR, P, UNIT, rec.audit)).toEqual({
         kind: 'conflict',
         code: 'duplicate_inactive',
       });
     }
+    // Nothing in memory changed: no audit row (as before C11).
+    expect(rec.details).toEqual([]);
   });
 
   it('a dedup onto an active memory is still applied (deduped: true)', async () => {
     const live = makeAdminMemory({ projectId: P });
     const kit = makeDirectService({ memories: [live] });
     kit.promote.result = { outcome: 'applied', memoryId: live.id, deduped: true };
-    expect(await kit.service.create(ACTOR, P, UNIT)).toMatchObject({
+    expect(await kit.service.create(ACTOR, P, UNIT, rec.audit)).toMatchObject({
       kind: 'done',
       dto: { outcome: 'applied', deduped: true, memory: { id: live.id } },
     });
+    expect(rec.details).toEqual([
+      { memoryId: live.id, itemId: 'item-direct-1', outcome: 'applied', deduped: true },
+    ]);
+  });
+
+  it('C11 a queue decision is refused inside the write (rolled back), abandoned, INTERNAL', async () => {
+    const errSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const kit = makeDirectService();
+    kit.promote.result = { outcome: 'queued', itemId: 'item-direct-1' };
+    await expect(kit.service.create(ACTOR, P, UNIT, rec.audit)).rejects.toMatchObject({
+      code: ErrorCode.INTERNAL,
+    });
+    expect(kit.promotion.abandonCalls).toHaveLength(1);
+    expect(rec.details).toEqual([]);
+    expect(errSpy).toHaveBeenCalledWith('[direct] queue decision refused for a direct write', {
+      itemId: 'item-direct-1',
+    });
+  });
+
+  it('C11 an audit failure propagates from the write: abandoned, rethrown', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const kit = makeDirectService();
+    kit.promote.result = { outcome: 'quarantined', itemId: 'item-direct-1', quarantineId: 'q-9' };
+    const failing = () => Promise.reject(new Error('audit down'));
+    await expect(kit.service.create(ACTOR, P, UNIT, failing)).rejects.toThrow('audit down');
+    expect(kit.promotion.abandonCalls).toHaveLength(1);
   });
 
   it.each([
-    [{ outcome: 'queued', itemId: 'item-direct-1' }],
     [{ outcome: 'skipped', itemId: 'item-direct-1' }],
     [{ outcome: 'applied', memoryId: null, deduped: false }],
     [{ outcome: 'quarantined', itemId: 'item-direct-1', quarantineId: null }],
@@ -434,7 +483,7 @@ describe('create / amend', () => {
     const errSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const kit = makeDirectService();
     kit.promote.result = result;
-    await expect(kit.service.create(ACTOR, P, UNIT)).rejects.toMatchObject({
+    await expect(kit.service.create(ACTOR, P, UNIT, rec.audit)).rejects.toMatchObject({
       code: ErrorCode.INTERNAL,
     });
     expect(kit.promotion.abandonCalls).toHaveLength(1);
@@ -450,7 +499,7 @@ describe('create / amend', () => {
     const boom = new AppError(ErrorCode.INTERNAL);
     kit.promote.result = boom;
     kit.promotion.abandonError = new Error('db down');
-    await expect(kit.service.create(ACTOR, P, UNIT)).rejects.toBe(boom);
+    await expect(kit.service.create(ACTOR, P, UNIT, rec.audit)).rejects.toBe(boom);
     const sessionId = kit.staging.calls[0]!.sessionId;
     expect(errSpy).toHaveBeenCalledWith(
       '[direct] pipeline failed',

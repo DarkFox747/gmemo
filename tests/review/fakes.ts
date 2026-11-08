@@ -4,10 +4,13 @@ import type {
   ReviewQueueRepository,
 } from '../../src/db/reviewQueueRepository.js';
 import type {
+  ApprovedReview,
   ReviewApproveInput,
   ReviewApproveResult,
   ReviewRejectInput,
 } from '../../src/db/promotionRepository.js';
+import type { TxnAudit } from '../../src/db/authRepository.js';
+import { FAKE_TXN } from '../auth/txnAudit.js';
 import type { AdminActor } from '../../src/mcp/context.js';
 import type { Embedder } from '../../src/embedder/embedder.js';
 
@@ -87,12 +90,16 @@ export class FakePromotionRepo {
     relatedSuperseded: false,
   };
   rejectResult: 'rejected' | 'not_found' = 'rejected';
-  async approveReviewItem(i: ReviewApproveInput) {
+  async approveReviewItem(i: ReviewApproveInput, audit?: TxnAudit<ApprovedReview>) {
     this.approveInputs.push(i);
+    if (audit && this.approveResult.status === 'approved') {
+      await audit(FAKE_TXN, this.approveResult);
+    }
     return this.approveResult;
   }
-  async rejectReviewItem(i: ReviewRejectInput) {
+  async rejectReviewItem(i: ReviewRejectInput, audit?: TxnAudit<'rejected'>) {
     this.rejectInputs.push(i);
+    if (audit && this.rejectResult === 'rejected') await audit(FAKE_TXN, 'rejected');
     return this.rejectResult;
   }
 }

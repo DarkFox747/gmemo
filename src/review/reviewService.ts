@@ -3,13 +3,14 @@
  *
  * Pure orchestration over two repositories (read side: ReviewQueueRepository,
  * write side: PromotionRepository's transactional approve/reject) so it is
- * unit-testable with fakes. Routes own the audit. No notifier events: resolving
+ * unit-testable with fakes. The route binds the audit row; the repository
+ * writes it in the decision's own transaction (C11). No notifier events: resolving
  * an item is the human's own, audited action.
  *
  * Logging: item ids only — never content or reason text.
  */
 
-import type { AdminActor, ApiAuditDetail } from '../mcp/context.js';
+import type { AdminActor, ApiAuditDetail, ApiWriteAudit } from '../mcp/context.js';
 import type { PromotionRepository } from '../db/promotionRepository.js';
 import type {
   MemoryRefRow,
@@ -97,6 +98,7 @@ export class ReviewService implements ReviewServiceLike {
     projectId: string,
     itemId: string,
     b: ApproveInput,
+    audit: ApiWriteAudit,
   ): Promise<ApproveOutcome> {
     const { reviewQueueRepository, promotionRepository, embedder } = this.deps;
 
@@ -105,30 +107,35 @@ export class ReviewService implements ReviewServiceLike {
 
     const embedding = await embedItemFailSoft(embedder, item);
 
-    const r = await promotionRepository.approveReviewItem({
-      projectId,
-      itemId,
-      reviewerUserId: actor.userId,
-      expectedContentHash: item.content_hash,
-      embedding,
-      targetRevision: b.targetRevision ?? null,
-      markRelatedSuperseded: b.markRelatedSuperseded,
-    });
+    const r = await promotionRepository.approveReviewItem(
+      {
+        projectId,
+        itemId,
+        reviewerUserId: actor.userId,
+        expectedContentHash: item.content_hash,
+        embedding,
+        targetRevision: b.targetRevision ?? null,
+        markRelatedSuperseded: b.markRelatedSuperseded,
+      },
+      (db, approved) => {
+        const detail: ApiAuditDetail = {
+          itemId,
+          memoryId: approved.memoryId,
+          decision: 'approved',
+          deduped: approved.deduped,
+          relatedSuperseded: approved.relatedSuperseded,
+        };
+        if (approved.rebasedFromRevision !== null && approved.rebasedToRevision !== null) {
+          detail.rebasedFromRevision = approved.rebasedFromRevision;
+          detail.rebasedToRevision = approved.rebasedToRevision;
+        }
+        return audit(db, detail);
+      },
+    );
 
     if (r.status === 'not_found') return { kind: 'not_found' };
     if (r.status === 'conflict') return { kind: 'conflict', code: r.code };
 
-    const audit: ApiAuditDetail = {
-      itemId,
-      memoryId: r.memoryId,
-      decision: 'approved',
-      deduped: r.deduped,
-      relatedSuperseded: r.relatedSuperseded,
-    };
-    if (r.rebasedFromRevision !== null && r.rebasedToRevision !== null) {
-      audit.rebasedFromRevision = r.rebasedFromRevision;
-      audit.rebasedToRevision = r.rebasedToRevision;
-    }
     return {
       kind: 'approved',
       dto: {
@@ -139,7 +146,6 @@ export class ReviewService implements ReviewServiceLike {
         rebasedFromRevision: r.rebasedFromRevision,
         relatedSuperseded: r.relatedSuperseded,
       },
-      audit,
     };
   }
 
@@ -148,6 +154,7 @@ export class ReviewService implements ReviewServiceLike {
     projectId: string,
     itemId: string,
     b: RejectInput,
+    audit: ApiWriteAudit,
   ): Promise<RejectOutcome> {
     // Never echoed, never stored: a secret in the reason is an invalid request.
     if (scanForSecrets(normalizeForScan(b.reason)).length > 0) {
@@ -167,12 +174,10 @@ export class ReviewService implements ReviewServiceLike {
       return { kind: 'invalid_reason' };
     }
 
-    const res = await this.deps.promotionRepository.rejectReviewItem({
-      projectId,
-      itemId,
-      reviewerUserId: actor.userId,
-      reason,
-    });
+    const res = await this.deps.promotionRepository.rejectReviewItem(
+      { projectId, itemId, reviewerUserId: actor.userId, reason },
+      (db) => audit(db, { itemId, decision: 'rejected' }),
+    );
     if (res === 'not_found') return { kind: 'not_found' };
     return { kind: 'rejected', dto: { itemId, decision: 'rejected' } };
   }

@@ -7,12 +7,15 @@ import type {
   QuarantineViewer,
   RestoreClaim,
   RestoreClaimInput,
+  RestoreClaimRelease,
 } from '../../src/db/quarantineRepository.js';
 import type {
   ItemOrigin,
   ItemResult,
+  PromoteItemOptions,
   PromoteServiceLike,
 } from '../../src/promote/promoteService.js';
+import { runItemAudit } from '../auth/txnAudit.js';
 import type { QuarantineReasonCode } from '../../src/quarantine/reason.js';
 
 export const ROW: QuarantineListRow = {
@@ -84,6 +87,17 @@ export class FakeQuarantineRepository implements QuarantineRepository {
     return Promise.resolve(this.claimResult);
   }
 
+  readonly releaseCalls: RestoreClaimRelease[] = [];
+  /** true = released; an Error makes the release throw. */
+  releaseResult: boolean | Error = true;
+
+  releaseRestoreClaim(r: RestoreClaimRelease): Promise<boolean> {
+    this.releaseCalls.push(r);
+    return this.releaseResult instanceof Error
+      ? Promise.reject(this.releaseResult)
+      : Promise.resolve(this.releaseResult);
+  }
+
   purgeExpired() {
     return Promise.resolve(this.purgeResult);
   }
@@ -96,10 +110,15 @@ export class ScriptedPromoteService implements Pick<PromoteServiceLike, 'promote
     public result: ItemResult | Error = { outcome: 'applied', memoryId: 'mem-1', deduped: false },
   ) {}
 
-  promoteItem(sessionId: string, itemId: string, origin: ItemOrigin): Promise<ItemResult> {
+  async promoteItem(
+    sessionId: string,
+    itemId: string,
+    origin: ItemOrigin,
+    opts?: PromoteItemOptions,
+  ): Promise<ItemResult> {
     this.calls.push({ sessionId, itemId, origin });
-    return this.result instanceof Error
-      ? Promise.reject(this.result)
-      : Promise.resolve(this.result);
+    if (this.result instanceof Error) throw this.result;
+    await runItemAudit(this.result, opts);
+    return this.result;
   }
 }

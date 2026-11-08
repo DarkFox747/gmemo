@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { QuarantineService } from '../../src/quarantine/quarantineService.js';
 import { logger } from '../../src/observability/logger.js';
 import { AppError, ErrorCode } from '../../src/errors/appError.js';
 import type { ProjectMember } from '../../src/mcp/context.js';
 import { DETAIL, FakeQuarantineRepository, ROW, ScriptedPromoteService } from './fakes.js';
+import { recordingAudit } from '../auth/txnAudit.js';
 
 const PROJECT = 'proj-1';
 const ADMIN: ProjectMember = {
@@ -97,9 +98,14 @@ describe('QuarantineService — viewer mapping', () => {
 });
 
 describe('QuarantineService.restore', () => {
+  let rec: ReturnType<typeof recordingAudit>;
+  beforeEach(() => {
+    rec = recordingAudit();
+  });
+
   it('claims with the restorer ids and runs promoteItem on the restore session', async () => {
     const { repo, promote, service } = build();
-    await service.restore(ADMIN, PROJECT, ROW.id);
+    await service.restore(ADMIN, PROJECT, ROW.id, rec.audit);
     expect(repo.claimCalls).toEqual([
       { projectId: PROJECT, quarantineId: ROW.id, restoredByUserId: 'u-tl', openedBy: 'tl-sub' },
     ]);
@@ -118,24 +124,24 @@ describe('QuarantineService.restore', () => {
 
   it('applied → memoryId', async () => {
     const { service } = build({ outcome: 'applied', memoryId: 'mem-9', deduped: false });
-    expect(await service.restore(ADMIN, PROJECT, ROW.id)).toEqual({
+    expect(await service.restore(ADMIN, PROJECT, ROW.id, rec.audit)).toEqual({
       kind: 'restored',
       dto: { outcome: 'applied', memoryId: 'mem-9' },
-      audit: {
-        quarantineId: ROW.id,
-        itemId: 'item-restore',
-        outcome: 'applied',
-        memoryId: 'mem-9',
-      },
     });
+    // Written by the terminal write (opts.audit), as the restorer.
+    expect(rec.details).toEqual([
+      { quarantineId: ROW.id, itemId: 'item-restore', outcome: 'applied', memoryId: 'mem-9' },
+    ]);
   });
 
   it('queued → itemId', async () => {
     const { service } = build({ outcome: 'queued', itemId: 'item-restore' });
-    expect(await service.restore(ADMIN, PROJECT, ROW.id)).toMatchObject({
+    expect(await service.restore(ADMIN, PROJECT, ROW.id, rec.audit)).toMatchObject({
       dto: { outcome: 'queued', itemId: 'item-restore' },
-      audit: { outcome: 'queued' },
     });
+    expect(rec.details).toEqual([
+      { quarantineId: ROW.id, itemId: 'item-restore', outcome: 'queued' },
+    ]);
   });
 
   it('quarantined → the NEW quarantine id', async () => {
@@ -144,23 +150,31 @@ describe('QuarantineService.restore', () => {
       itemId: 'item-restore',
       quarantineId: 'q-new',
     });
-    expect(await service.restore(ADMIN, PROJECT, ROW.id)).toMatchObject({
+    expect(await service.restore(ADMIN, PROJECT, ROW.id, rec.audit)).toMatchObject({
       dto: { outcome: 'quarantined', quarantineId: 'q-new' },
-      audit: { outcome: 'quarantined', newQuarantineId: 'q-new', quarantineId: ROW.id },
     });
+    expect(rec.details).toEqual([
+      {
+        quarantineId: ROW.id,
+        itemId: 'item-restore',
+        outcome: 'quarantined',
+        newQuarantineId: 'q-new',
+      },
+    ]);
   });
 
   it('not_found claim passes through; pipeline never runs', async () => {
     const { repo, promote, service } = build();
     repo.claimResult = { status: 'not_found' };
-    expect(await service.restore(ADMIN, PROJECT, ROW.id)).toEqual({ kind: 'not_found' });
+    expect(await service.restore(ADMIN, PROJECT, ROW.id, rec.audit)).toEqual({ kind: 'not_found' });
     expect(promote.calls).toHaveLength(0);
+    expect(rec.details).toEqual([]);
   });
 
   it('a pipeline throw after the claim is logged with ids and rethrown', async () => {
     const err = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const { service } = build(new Error('db down'));
-    await expect(service.restore(ADMIN, PROJECT, ROW.id)).rejects.toThrow('db down');
+    await expect(service.restore(ADMIN, PROJECT, ROW.id, rec.audit)).rejects.toThrow('db down');
     expect(err).toHaveBeenCalledWith('[quarantine] restore pipeline failed after claim', {
       quarantineId: ROW.id,
       itemId: 'item-restore',
@@ -170,21 +184,98 @@ describe('QuarantineService.restore', () => {
 
   it('conflict (human-approved only, unreachable from restore) → INTERNAL, logged', async () => {
     const err = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
-    const { service } = build({ outcome: 'conflict', itemId: 'item-restore', code: 'target_changed' });
-    await expect(service.restore(ADMIN, PROJECT, ROW.id)).rejects.toMatchObject({
+    const { service } = build({
+      outcome: 'conflict',
+      itemId: 'item-restore',
+      code: 'target_changed',
+    });
+    await expect(service.restore(ADMIN, PROJECT, ROW.id, rec.audit)).rejects.toMatchObject({
       code: ErrorCode.INTERNAL,
     });
-    expect(err).toHaveBeenCalledWith(
-      '[quarantine] restore produced a human-approval conflict',
-      { quarantineId: ROW.id, itemId: 'item-restore' },
-    );
+    expect(err).toHaveBeenCalledWith('[quarantine] restore produced a human-approval conflict', {
+      quarantineId: ROW.id,
+      itemId: 'item-restore',
+    });
   });
 
   it('skipped → INTERNAL', async () => {
     vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const { service } = build({ outcome: 'skipped', itemId: 'item-restore' });
-    const p = service.restore(ADMIN, PROJECT, ROW.id);
+    const p = service.restore(ADMIN, PROJECT, ROW.id, rec.audit);
     await expect(p).rejects.toBeInstanceOf(AppError);
     await expect(p).rejects.toMatchObject({ code: ErrorCode.INTERNAL });
+  });
+});
+
+describe('QuarantineService.restore — un-claim after a failure (backlog E4 #1)', () => {
+  const RELEASE = {
+    projectId: PROJECT,
+    quarantineId: ROW.id,
+    sessionId: 'sess-restore',
+    itemId: 'item-restore',
+  };
+
+  beforeEach(() => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  });
+
+  it('a pipeline failure releases the claim, then rethrows the original error', async () => {
+    const { repo, service } = build(new Error('db down'));
+    await expect(service.restore(ADMIN, PROJECT, ROW.id, recordingAudit().audit)).rejects.toThrow(
+      'db down',
+    );
+    expect(repo.releaseCalls).toEqual([RELEASE]);
+  });
+
+  it('an audit failure (terminal write rolled back) releases the claim', async () => {
+    const { repo, service } = build({ outcome: 'applied', memoryId: 'mem-9', deduped: false });
+    const failingAudit = () => Promise.reject(new Error('audit insert failed'));
+    await expect(service.restore(ADMIN, PROJECT, ROW.id, failingAudit)).rejects.toThrow(
+      'audit insert failed',
+    );
+    expect(repo.releaseCalls).toEqual([RELEASE]);
+  });
+
+  it.each([
+    { outcome: 'conflict', itemId: 'item-restore', code: 'target_changed' } as const,
+    { outcome: 'skipped', itemId: 'item-restore' } as const,
+  ])('an outcome restore cannot produce ($outcome) releases the claim', async (result) => {
+    const { repo, service } = build(result);
+    await expect(
+      service.restore(ADMIN, PROJECT, ROW.id, recordingAudit().audit),
+    ).rejects.toMatchObject({ code: ErrorCode.INTERNAL });
+    expect(repo.releaseCalls).toEqual([RELEASE]);
+  });
+
+  it('success never releases', async () => {
+    const { repo, service } = build();
+    await service.restore(ADMIN, PROJECT, ROW.id, recordingAudit().audit);
+    expect(repo.releaseCalls).toEqual([]);
+  });
+
+  it('a release that finds the item already written is logged, original error kept', async () => {
+    const { repo, service } = build(new Error('db down'));
+    repo.releaseResult = false;
+    await expect(service.restore(ADMIN, PROJECT, ROW.id, recordingAudit().audit)).rejects.toThrow(
+      'db down',
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[quarantine] restore claim not released (item already written)',
+      { quarantineId: ROW.id, itemId: 'item-restore' },
+    );
+  });
+
+  it('a release failure is logged (name only) and never masks the original error', async () => {
+    const { repo, service } = build(new Error('db down'));
+    repo.releaseResult = new TypeError('pool closed');
+    await expect(service.restore(ADMIN, PROJECT, ROW.id, recordingAudit().audit)).rejects.toThrow(
+      'db down',
+    );
+    expect(logger.error).toHaveBeenCalledWith('[quarantine] restore claim release failed', {
+      quarantineId: ROW.id,
+      itemId: 'item-restore',
+      errorName: 'TypeError',
+    });
   });
 });

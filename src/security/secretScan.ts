@@ -18,10 +18,23 @@ interface SecretPattern {
    * the detector where the detector is prefix-only (slack, stripe) or stops
    * before the token end (openai: `_`/`-` tail), matches a
    * header only (PEM, extended to the END line in code) or would also cover the
-   * keyword (assignment: value only, never across a newline).
+   * keyword (assignment, AWS secret: value only). When the range has a capture
+   * group, the span is that group (it ends the match, so no lookbehind is needed).
    */
   readonly range: RegExp;
 }
+
+/** AWS secret key name + separator + exactly 40 base64 chars (group 1 = value). */
+const AWS_SECRET_ASSIGNMENT =
+  /(?:aws[_\- ]?secret(?:(?:[_\- ]?access)?[_\- ]?key)?|secretAccessKey)["']?(?:\s*[=:]\s*|\s+)["']?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])/i;
+
+/**
+ * A bare 40-char base64 token (exactly 40: no base64 char on either side). On its
+ * own it is indistinguishable from a hash; next to an AWS access key id in the
+ * same text it is treated as that key's secret.
+ */
+const AWS_BARE_SECRET = /(?<![A-Za-z0-9/+=])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])/;
+const AWS_BARE_SECRET_RANGE = new RegExp(AWS_BARE_SECRET.source, 'g');
 
 /**
  * Broad but simple regex patterns covering the most common credential forms.
@@ -79,14 +92,48 @@ const SECRET_PATTERNS: ReadonlyArray<SecretPattern> = [
     pattern: /sk-[A-Za-z0-9]{20,}/,
     range: /sk-(?=[A-Za-z0-9]{20})[A-Za-z0-9_-]*/g,
   },
+  // Kind-prefixed `sk-` keys: sk-<2..10 letters>-<token>. Covers OpenAI project /
+  // service-account / admin keys (sk-proj-, sk-svcacct-, sk-admin-, sk-None-) and
+  // other vendors' families (Anthropic sk-ant-, OpenRouter sk-or-). The inner `-`
+  // keeps openai_api_key from matching; `\b` keeps words like "risk-adjusted-…"
+  // out. The token body allows `_`/`-`, so the range runs to the end of the key.
+  {
+    category: 'openai_project_key',
+    pattern: /\bsk-[A-Za-z]{2,10}-[A-Za-z0-9_-]{20,}/,
+    range: /\bsk-[A-Za-z]{2,10}-[A-Za-z0-9_-]{20,}/g,
+  },
+  // GitHub fine-grained PATs: github_pat_ + 22 alnum + `_` + 59 alnum.
+  {
+    category: 'github_fine_grained_pat',
+    pattern: /github_pat_[A-Za-z0-9_]{20,}/,
+    range: /github_pat_[A-Za-z0-9_]{20,}/g,
+  },
+  // AWS secret access keys: a bare 40-char base64 run is indistinguishable from a
+  // hash, so the detector is anchored to an AWS secret key name (aws_secret,
+  // aws_secret_key, AWS secret access key, SDK camelCase, a JSON key) followed by
+  // `=`/`:` or whitespace (optional quotes) and requires exactly 40 characters.
+  // Detector and range share the separators; the range span is the value group.
+  // The AKIA/ASIA pairing (a bare 40-char token next to an access key id) is
+  // handled in scanForSecrets / scanForSecretsWithRanges.
+  {
+    category: 'aws_secret_access_key',
+    pattern: AWS_SECRET_ASSIGNMENT,
+    range: new RegExp(AWS_SECRET_ASSIGNMENT.source, 'gi'),
+  },
   // Generic secret-assignment heuristic: keyword followed by = or : then a long value.
-  // Case-insensitive to catch PASSWORD=, Secret:, TOKEN =, api_key: etc.
+  // Case-insensitive to catch PASSWORD=, Secret:, TOKEN =, api_key: etc. The range
+  // span is the value group, never across a newline.
   {
     category: 'secret_assignment',
     pattern: /(?:password|secret|token|api[_-]?key)\s*[=:]\s*\S{12,}/i,
-    range: /(?<=(?:password|secret|token|api[_-]?key)[ \t]*[=:][ \t]*)\S{12,}/gi,
+    range: /(?:password|secret|token|api[_-]?key)[ \t]*[=:][ \t]*(\S{12,})/gi,
   },
 ];
+
+/** An AWS access key id plus a bare 40-char token in the same text: a key pair. */
+function hasAwsKeyPair(text: string, categories: readonly string[]): boolean {
+  return categories.includes('aws_access_key_id') && AWS_BARE_SECRET.test(text);
+}
 
 /**
  * Scans `text` for credential patterns and returns the matched category names.
@@ -101,6 +148,9 @@ export function scanForSecrets(text: string): string[] {
     if (pattern.test(text)) {
       found.push(category);
     }
+  }
+  if (hasAwsKeyPair(text, found) && !found.includes('aws_secret_access_key')) {
+    found.push('aws_secret_access_key');
   }
   return found;
 }
@@ -143,11 +193,16 @@ export function scanForSecretsWithRanges(text: string): {
   }
   const categories = scanForSecrets(text);
   const found: SecretRange[] = [];
-  for (const { category, range } of SECRET_PATTERNS) {
+  const ranged: Array<{ category: string; range: RegExp }> = [...SECRET_PATTERNS];
+  if (hasAwsKeyPair(text, categories)) {
+    ranged.push({ category: 'aws_secret_access_key', range: AWS_BARE_SECRET_RANGE });
+  }
+  for (const { category, range } of ranged) {
     // matchAll clones the regex, so the module-level lastIndex is never mutated.
     for (const m of text.matchAll(range)) {
-      const start = m.index;
-      let end = start + m[0].length;
+      // A value group ends the match: its span is the tail of m[0].
+      let end = m.index + m[0].length;
+      const start = m[1] !== undefined ? end - m[1].length : m.index;
       if (category === 'pem_private_key') end = findPemEnd(text, end);
       if (end > start) found.push({ start, end });
     }

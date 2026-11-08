@@ -14,7 +14,8 @@
  *
  * 409 and 503 are not produced here: the routes write them directly (expected
  * outcomes — e.g. 503 evaluation_unavailable on a direct memory confirm).
- * Client errors are logged at debug with the code only (never input or cause).
+ * Client errors are logged at debug with the code only (never input or cause);
+ * 500s are logged with the error name and code only (never message or pg detail).
  */
 
 import type { ErrorRequestHandler, Response } from 'express';
@@ -36,6 +37,13 @@ function isClientBodyError(err: unknown): boolean {
   return (
     typeof e.type === 'string' && typeof e.status === 'number' && e.status >= 400 && e.status < 500
   );
+}
+
+/** AppError code or pg SQLSTATE (a short code, never data); null otherwise. */
+function errorCodeOf(err: unknown): string | null {
+  if (typeof err !== 'object' || err === null) return null;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' ? code : null;
 }
 
 function send(res: Response, status: number, body: ApiErrorBody): void {
@@ -72,6 +80,10 @@ export const apiErrorHandler: ErrorRequestHandler = (err, _req, res, next) => {
     return;
   }
 
-  logger.error('[api] Unhandled error', err);
+  // Name and code only: a pg error's message/detail can echo row values.
+  logger.error('[api] Unhandled error', {
+    errorName: err instanceof Error ? err.name : 'unknown',
+    code: errorCodeOf(err),
+  });
   send(res, 500, { error: 'Internal server error' });
 };

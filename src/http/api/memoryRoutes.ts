@@ -20,16 +20,16 @@
  * an add that dedups onto a non-active memory is 409 duplicate_inactive; a
  * confirm whose judge or judge context failed closed is 503
  * evaluation_unavailable (nothing applied, session abandoned).
- * Audit runs only after success and never carries content (a list search is
- * stored as its hash); an audit failure after a committed write is logged (ids
- * only) and is a 500.
+ * Reads are audited after success and audits never carry content (a list
+ * search is stored as its hash). A write's audit row is bound here and written
+ * in the write's own transaction (C11): an audit failure rolls the write back
+ * and is a 500.
  */
 
 import express from 'express';
 import type { Request } from 'express';
 import { z } from 'zod';
 import { AppError, ErrorCode } from '../../errors/appError.js';
-import { logger } from '../../observability/logger.js';
 import { MEMORY_TYPES } from '../../mcp/tools/schemas.js';
 import { assertValidFields } from '../../mcp/fieldsPolicy.js';
 import { sha256Hex } from '../../security/hash.js';
@@ -165,22 +165,6 @@ function failOutcome(
   res.status(409).json(conflict);
 }
 
-/** The write is already committed: log the failure (ids only), then fail closed. */
-async function auditCommitted(
-  ids: Record<string, unknown>,
-  audit: () => Promise<void>,
-): Promise<void> {
-  try {
-    await audit();
-  } catch (err) {
-    logger.error('[api] audit failed after committed memory change', {
-      ...ids,
-      errorName: err instanceof Error ? err.name : 'unknown',
-    });
-    throw err;
-  }
-}
-
 export function makeMemoryRoutes(
   deps: Pick<ApiRouterDeps, 'lifecycleService' | 'directMemoryService' | 'auditLogger'>,
 ): express.Router {
@@ -249,15 +233,9 @@ export function makeMemoryRoutes(
         project.projectId,
         body.originPr,
         body.reason,
+        auditLogger.apiWriteAudit(actor, project, 'memory.retire_by_pr'),
       );
       if (outcome.kind === 'invalid_reason') throw new AppError(ErrorCode.INVALID_REQUEST);
-
-      await auditCommitted({ originPr: body.originPr }, () =>
-        auditLogger.recordApi(actor, project, 'memory.retire_by_pr', {
-          originPr: body.originPr,
-          resultCount: outcome.dto.retired,
-        }),
-      );
       res.status(200).json(outcome.dto);
     },
   );
@@ -283,14 +261,16 @@ export function makeMemoryRoutes(
       const { actor, project } = adminContext(res);
       const body = parseOrInvalid(CreateBody, req.body ?? {});
 
-      const outcome = await directMemoryService.create(actor, project.projectId, toUnit(body));
+      const outcome = await directMemoryService.create(
+        actor,
+        project.projectId,
+        toUnit(body),
+        auditLogger.apiWriteAudit(actor, project, 'memory.create'),
+      );
       if (outcome.kind !== 'done') {
         failOutcome(outcome, res);
         return;
       }
-      await auditCommitted({ itemId: outcome.audit.itemId }, () =>
-        auditLogger.recordApi(actor, project, 'memory.create', outcome.audit),
-      );
       res.status(200).json(outcome.dto);
     },
   );
@@ -303,17 +283,17 @@ export function makeMemoryRoutes(
       const memoryId = parseMemoryId(req.params.memoryId);
       const body = parseOrInvalid(AmendBody, req.body ?? {});
 
-      const outcome = await directMemoryService.amend(actor, project.projectId, memoryId, {
-        ...toUnit(body),
-        expectedRevision: body.expectedRevision,
-      });
+      const outcome = await directMemoryService.amend(
+        actor,
+        project.projectId,
+        memoryId,
+        { ...toUnit(body), expectedRevision: body.expectedRevision },
+        auditLogger.apiWriteAudit(actor, project, 'memory.amend'),
+      );
       if (outcome.kind !== 'done') {
         failOutcome(outcome, res);
         return;
       }
-      await auditCommitted({ memoryId, itemId: outcome.audit.itemId }, () =>
-        auditLogger.recordApi(actor, project, 'memory.amend', { ...outcome.audit, memoryId }),
-      );
       res.status(200).json(outcome.dto);
     },
   );
@@ -327,12 +307,13 @@ export function makeMemoryRoutes(
       // No body (Express 5 leaves req.body undefined) is an empty confirm.
       parseOrInvalid(ConfirmBody, req.body ?? {});
 
-      const outcome = await lifecycleService.confirm(actor, project.projectId, memoryId);
-      if (outcome.kind === 'not_found') throw new AppError(ErrorCode.NOT_FOUND);
-
-      await auditCommitted({ memoryId }, () =>
-        auditLogger.recordApi(actor, project, 'memory.confirm', { memoryId }),
+      const outcome = await lifecycleService.confirm(
+        actor,
+        project.projectId,
+        memoryId,
+        auditLogger.apiWriteAudit(actor, project, 'memory.confirm'),
       );
+      if (outcome.kind === 'not_found') throw new AppError(ErrorCode.NOT_FOUND);
       res.status(200).json(outcome.dto);
     },
   );
@@ -350,13 +331,10 @@ export function makeMemoryRoutes(
         project.projectId,
         memoryId,
         body.reason,
+        auditLogger.apiWriteAudit(actor, project, 'memory.retire'),
       );
       if (outcome.kind === 'invalid_reason') throw new AppError(ErrorCode.INVALID_REQUEST);
       if (outcome.kind === 'not_found') throw new AppError(ErrorCode.NOT_FOUND);
-
-      await auditCommitted({ memoryId }, () =>
-        auditLogger.recordApi(actor, project, 'memory.retire', { memoryId }),
-      );
       res.status(200).json(outcome.dto);
     },
   );

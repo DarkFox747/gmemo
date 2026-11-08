@@ -5,6 +5,11 @@
 
 import { describe, it, expect } from 'vitest';
 import { sanitizeItem, mergeFlags } from '../../src/promote/sanitize.js';
+import {
+  AWS_ACCESS_KEY_ID,
+  AWS_SECRET_VALUE,
+  GITHUB_FINE_GRAINED_PAT,
+} from '../security/secretFixtures.js';
 
 function content(overrides: Partial<Parameters<typeof sanitizeItem>[0]> = {}) {
   return {
@@ -139,6 +144,47 @@ describe('sanitizeItem — S2 secrets', () => {
     });
     expect(r.flags.leak).toBe(true);
     expect(JSON.stringify(r)).not.toContain('MIIEp');
+  });
+
+  it('AWS secret access key in a fields leaf → leak, only the value span redacted', () => {
+    const r = sanitizeItem(
+      content({ fields: { config: `aws_secret_access_key = ${AWS_SECRET_VALUE}` } }),
+    );
+    expect(r.block).toEqual({
+      reason: 'secret_detected',
+      redact: 'spans',
+      leak: true,
+      categories: ['aws_secret_access_key'],
+    });
+    expect(r.masked!.fields).toEqual({ config: 'aws_secret_access_key = [REDACTADO]' });
+    expect(r.masked!.body).toBe(content().body);
+    expect(JSON.stringify(r)).not.toContain(AWS_SECRET_VALUE);
+  });
+
+  it('AWS key pair (id in title, bare secret in body) → whole item, nothing kept', () => {
+    const r = sanitizeItem(
+      content({ title: `Key ${AWS_ACCESS_KEY_ID}`, body: `Secret is ${AWS_SECRET_VALUE} today.` }),
+    );
+    expect(r.block).toEqual({
+      reason: 'secret_detected',
+      redact: 'whole',
+      leak: true,
+      categories: ['aws_access_key_id', 'aws_secret_access_key'],
+    });
+    expect(r.masked).toEqual({
+      title: '[REDACTADO]',
+      summary: '[REDACTADO]',
+      body: '[REDACTADO]',
+      fields: {},
+    });
+    expect(JSON.stringify(r)).not.toContain(AWS_SECRET_VALUE);
+  });
+
+  it('fine-grained PAT in body → leak, token span redacted, context kept', () => {
+    const r = sanitizeItem(content({ body: `CI used ${GITHUB_FINE_GRAINED_PAT} for releases.` }));
+    expect(r.block?.reason).toBe('secret_detected');
+    expect(r.flags).toEqual({ leak: true, secrets: ['github_fine_grained_pat'] });
+    expect(r.masked!.body).toBe('CI used [REDACTADO] for releases.');
   });
 
   it('secret + injection → secret wins (decision order)', () => {

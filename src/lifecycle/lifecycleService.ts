@@ -8,12 +8,13 @@
  *   masking pushed past 500 chars is clamped (the DB CHECK is the backstop).
  * - sweep() turns per-project counts into the shared JobResult shape. A DB
  *   error propagates to the caller (jobs router / script), which logs it.
- * - Audit is the routes' job, as in C2.
+ * - The route binds the audit row (actor, action); the repository writes it in
+ *   the change's own transaction (C11). The service supplies the detail.
  */
 
 import type { LifecycleRepository } from '../db/lifecycleRepository.js';
 import type { JobResult } from '../jobs/jobsRouter.js';
-import type { AdminActor } from '../mcp/context.js';
+import type { AdminActor, ApiWriteAudit } from '../mcp/context.js';
 import { scanForSecrets } from '../security/secretScan.js';
 import { normalizeForScan } from '../security/normalizeForScan.js';
 import { maskPii } from '../security/piiMask.js';
@@ -59,8 +60,15 @@ function sanitizeReason(reason: string, logCtx: Record<string, unknown>): string
 export class LifecycleService implements LifecycleServiceLike {
   constructor(private readonly deps: LifecycleServiceDeps) {}
 
-  async confirm(_actor: AdminActor, projectId: string, memoryId: string): Promise<ConfirmOutcome> {
-    const r = await this.deps.lifecycleRepository.confirm(projectId, memoryId);
+  async confirm(
+    _actor: AdminActor,
+    projectId: string,
+    memoryId: string,
+    audit: ApiWriteAudit,
+  ): Promise<ConfirmOutcome> {
+    const r = await this.deps.lifecycleRepository.confirm(projectId, memoryId, (db, done) =>
+      audit(db, { memoryId: done.memoryId }),
+    );
     if (!r) return { kind: 'not_found' };
     return {
       kind: 'confirmed',
@@ -77,10 +85,17 @@ export class LifecycleService implements LifecycleServiceLike {
     projectId: string,
     memoryId: string,
     reason: string,
+    audit: ApiWriteAudit,
   ): Promise<RetireOutcome> {
     const safe = sanitizeReason(reason, { memoryId });
     if (safe === null) return { kind: 'invalid_reason' };
-    const r = await this.deps.lifecycleRepository.retire(projectId, memoryId, safe, actor.actorId);
+    const r = await this.deps.lifecycleRepository.retire(
+      projectId,
+      memoryId,
+      safe,
+      actor.actorId,
+      (db, done) => audit(db, { memoryId: done.memoryId }),
+    );
     if (!r) return { kind: 'not_found' };
     return {
       kind: 'retired',
@@ -93,6 +108,7 @@ export class LifecycleService implements LifecycleServiceLike {
     projectId: string,
     originPr: number,
     reason: string,
+    audit: ApiWriteAudit,
   ): Promise<RetireByPrOutcome> {
     const safe = sanitizeReason(reason, { originPr });
     if (safe === null) return { kind: 'invalid_reason' };
@@ -101,6 +117,7 @@ export class LifecycleService implements LifecycleServiceLike {
       originPr,
       safe,
       actor.actorId,
+      (db, done) => audit(db, { originPr, resultCount: done.retired }),
     );
     return { kind: 'retired', dto: { retired: r.retired } };
   }

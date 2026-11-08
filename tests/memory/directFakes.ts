@@ -33,6 +33,7 @@ import type {
   PromoteItemOptions,
 } from '../../src/promote/promoteService.js';
 import type { RoutingConfig } from '../../src/promote/routing.js';
+import { runItemAudit } from '../auth/txnAudit.js';
 import { DirectMemoryService } from '../../src/memory/directMemoryService.js';
 import { FakeJudge, accepted } from '../promote/fakes.js';
 import type { JudgeResult } from '../../src/judge/judge.js';
@@ -255,20 +256,23 @@ export class ScriptedDirectPromote {
     opts: PromoteItemOptions | undefined;
   }> = [];
 
+  /** Status of the applied memory handed to opts.audit (a dedup may land on a non-active row). */
+  memoryStatus = 'active';
+
   constructor(
     public result: ItemResult | Error = { outcome: 'applied', memoryId: null, deduped: false },
   ) {}
 
-  promoteItem(
+  async promoteItem(
     sessionId: string,
     itemId: string,
     origin: ItemOrigin,
     opts?: PromoteItemOptions,
   ): Promise<ItemResult> {
     this.calls.push({ sessionId, itemId, origin, opts });
-    return this.result instanceof Error
-      ? Promise.reject(this.result)
-      : Promise.resolve(this.result);
+    if (this.result instanceof Error) throw this.result;
+    await runItemAudit(this.result, opts, this.memoryStatus);
+    return this.result;
   }
 }
 

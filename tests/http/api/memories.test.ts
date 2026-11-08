@@ -261,6 +261,24 @@ describe('POST /memories/:memoryId/retire', () => {
     expect(JSON.stringify(kit.authRepo.accessLogEntries)).not.toContain('obsolete');
   });
 
+  it('C11 audit failure → generic 500 and the memory stays active (write rolled back)', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const kit = makeApiTestApp();
+    const m = makeMemory({ projectId: PROJECT_A });
+    kit.lifecycleRepo.memories.push(m);
+    kit.authRepo.insertAccessLog = () => Promise.reject(new Error('db down'));
+
+    const res = await request(kit.app)
+      .post(`${BASE}/${m.id}/retire`)
+      .set('Authorization', admin)
+      .send({ reason: 'obsolete after migration' });
+    expect(res.status).toBe(500);
+    expect(res.text).toBe('{"error":"Internal server error"}');
+    expect(m.status).toBe('active');
+    expect(kit.lifecycleRepo.revisions).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
   it('pending → 200 as well', async () => {
     const kit = makeApiTestApp();
     const m = makeMemory({ projectId: PROJECT_A, status: 'pending_revalidation' });

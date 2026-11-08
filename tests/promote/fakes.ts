@@ -26,7 +26,10 @@ import type {
   ReviewApproveInput,
   ReviewApproveResult,
   ReviewRejectInput,
+  ItemWrite,
 } from '../../src/db/promotionRepository.js';
+import type { TxnAudit } from '../../src/db/authRepository.js';
+import { FAKE_TXN } from '../auth/txnAudit.js';
 import type {
   Judge,
   JudgeItem,
@@ -38,6 +41,7 @@ import type { Embedder } from '../../src/embedder/embedder.js';
 import type { MemoryType } from '../../src/contracts/memory.js';
 import type { Notifier, NotifyEvent } from '../../src/notify/notifier.js';
 import type {
+  ApiWriteAudit,
   AuditLogger,
   TenantContext,
   RequestContext,
@@ -147,8 +151,14 @@ export class FakePromotionRepository implements PromotionRepository {
     return Promise.resolve('ok');
   }
 
-  recordDecision(itemId: string, d: PersistedDecision, flags: SanitizeFlags): Promise<void> {
+  async recordDecision(
+    itemId: string,
+    d: PersistedDecision,
+    flags: SanitizeFlags,
+    audit?: TxnAudit<ItemWrite>,
+  ): Promise<void> {
     this.decisionCalls.push({ itemId, d, flags });
+    if (audit) await audit(FAKE_TXN, { outcome: 'queued' });
     const row = this.rows.get(itemId);
     if (row) {
       Object.assign(row, {
@@ -161,14 +171,14 @@ export class FakePromotionRepository implements PromotionRepository {
         sanitize_flags: flags,
       });
     }
-    return Promise.resolve();
   }
 
-  applyAccepted(
+  async applyAccepted(
     item: PromotionItemRow,
     ctx: ApplyContext,
     embedding: number[] | null,
     mandatoryTypes: ReadonlySet<MemoryType>,
+    audit?: TxnAudit<ItemWrite>,
   ): Promise<ApplyResult> {
     this.applyAcceptedCalls.push({ item, ctx, embedding, mandatoryTypes });
     const result: ApplyResult = this.applyResults.get(item.id) ?? {
@@ -176,17 +186,32 @@ export class FakePromotionRepository implements PromotionRepository {
       memoryId: `mem-${item.id}`,
       deduped: false,
     };
+    if (audit && result.status === 'applied') {
+      await audit(FAKE_TXN, {
+        outcome: 'applied',
+        memoryId: result.memoryId,
+        deduped: result.deduped,
+        memoryStatus: 'active',
+      });
+    }
     const row = this.rows.get(item.id);
     if (row && (result.status === 'applied' || result.status === 'already')) {
       row.promoted_at = new Date();
       row.promoted_memory_id = result.status === 'applied' ? result.memoryId : null;
     }
-    return Promise.resolve(result);
+    return result;
   }
 
   /** Generated quarantine id per call (`q-<itemId>-<n>`); records the redact mode in quarantineCalls. */
-  quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<string | null> {
+  async quarantineItem(
+    item: PromotionItemRow,
+    ctx: ApplyContext,
+    q: QuarantineInput,
+    audit?: TxnAudit<ItemWrite>,
+  ): Promise<string | null> {
     this.quarantineCalls.push({ item, ctx, q });
+    const quarantineId = `q-${item.id}-${this.quarantineCalls.length}`;
+    if (audit) await audit(FAKE_TXN, { outcome: 'quarantined', quarantineId });
     const row = this.rows.get(item.id);
     if (row) {
       // Mirrors the repository: a non-redacted judge rejection keeps the
@@ -201,7 +226,7 @@ export class FakePromotionRepository implements PromotionRepository {
         sanitize_flags: q.sanitizeFlags,
       });
     }
-    return Promise.resolve(`q-${item.id}-${this.quarantineCalls.length}`);
+    return quarantineId;
   }
 
   finalizeSession(
@@ -385,6 +410,10 @@ export class FakeAuditLogger implements AuditLogger {
 
   recordApi(): Promise<void> {
     return Promise.resolve();
+  }
+
+  apiWriteAudit(): ApiWriteAudit {
+    return () => Promise.resolve();
   }
 
   recordAbandon(): Promise<void> {

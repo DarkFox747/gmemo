@@ -30,8 +30,9 @@
  * Notifications are sent after the state write, at most once (safeNotify).
  *
  * Single item (C3 restore): promoteItem runs the SAME per-item pipeline (processItem)
- * for one item of a session and finalizes that session; it does not audit — the
- * caller audits as its own actor. The actor never enters the pipeline.
+ * for one item of a session and finalizes that session. The caller's audit row
+ * (its own actor) is written by the item's terminal write, in that write's
+ * transaction (opts.audit, C11). The actor never enters the pipeline.
  *
  * Human-approved mode (C5, project_admin direct writes ONLY): promoteItem with
  * opts.humanApproved replaces review queueing (R5–R7) with apply — provenance
@@ -54,7 +55,9 @@ import type {
   PromotionRepository,
   PromotionItemRow,
   ApplyContext,
+  ItemWrite,
 } from '../db/promotionRepository.js';
+import type { TxnAudit } from '../db/authRepository.js';
 import { NO_MANDATORY_TYPES } from '../db/promotionRepository.js';
 import type { Judge } from '../judge/judge.js';
 import { isEvaluationUnavailable } from '../judge/judge.js';
@@ -117,6 +120,12 @@ export interface HumanApproval {
 export interface PromoteItemOptions {
   /** C5 direct management only (never MCP, /promote or restore). */
   humanApproved?: HumanApproval;
+  /**
+   * C11 (restore, direct management): the caller's access_log row, written by
+   * the item's terminal write (apply, quarantine or queue decision) in that
+   * write's own transaction. Outcomes that write nothing never run it.
+   */
+  audit?: TxnAudit<ItemWrite>;
 }
 
 /** Origin metadata for a single-item run (restore): tenant + provenance. */
@@ -149,7 +158,8 @@ export interface PromoteServiceLike {
   promote(sessionId: string, meta: PromoteMeta): Promise<PromoteOutcome>;
   /**
    * Runs sanitize → judge → route → apply for ONE item and finalizes its session
-   * (except on 'conflict', humanApproved only). No audit: the caller audits as its own actor.
+   * (except on 'conflict', humanApproved only). The caller's audit (as its own
+   * actor) rides on the terminal write via opts.audit (C11).
    */
   promoteItem(
     sessionId: string,
@@ -272,7 +282,7 @@ export class PromoteService implements PromoteServiceLike {
       provenance: opts.humanApproved ? 'web_ui' : 'pr_reviewed',
       approvedBy: opts.humanApproved?.approverUserId ?? null,
     };
-    const r = await this.processItem(item, ctx, opts.humanApproved !== undefined);
+    const r = await this.processItem(item, ctx, opts.humanApproved !== undefined, opts.audit);
     // A conflict or an unavailable evaluation leaves the session open: the (only) caller abandons it.
     if (r.outcome === 'conflict' || r.outcome === 'unavailable') return r;
     await promotionRepository.finalizeSession(
@@ -290,6 +300,7 @@ export class PromoteService implements PromoteServiceLike {
     fetched: PromotionItemRow,
     ctx: ApplyContext,
     humanApproved: boolean,
+    audit?: TxnAudit<ItemWrite>,
   ): Promise<ItemResult> {
     const { promotionRepository: repo, notifier } = this.deps;
 
@@ -320,12 +331,17 @@ export class PromoteService implements PromoteServiceLike {
       }
       // S3 snapshot is PII-masked; S1/S2 are redacted by the repository.
       const snapshot = masked ? { ...fetched, ...masked } : fetched;
-      const quarantineId = await repo.quarantineItem(snapshot, ctx, {
-        reason: block.reason,
-        redact: block.redact,
-        decision: null,
-        sanitizeFlags: flags,
-      });
+      const quarantineId = await repo.quarantineItem(
+        snapshot,
+        ctx,
+        {
+          reason: block.reason,
+          redact: block.redact,
+          decision: null,
+          sanitizeFlags: flags,
+        },
+        audit,
+      );
       if (block.leak) {
         await safeNotify(notifier, ctx.projectId, {
           type: 'leak_detected',
@@ -368,12 +384,12 @@ export class PromoteService implements PromoteServiceLike {
       };
       const res = await repo.persistMasked(fetched.id, masked, contentHash, flags);
       if (res === 'hash_conflict') {
-        const quarantineId = await repo.quarantineItem(maskedItem, ctx, {
-          reason: 'duplicate_content',
-          redact: 'none',
-          decision: null,
-          sanitizeFlags: flags,
-        });
+        const quarantineId = await repo.quarantineItem(
+          maskedItem,
+          ctx,
+          { reason: 'duplicate_content', redact: 'none', decision: null, sanitizeFlags: flags },
+          audit,
+        );
         return { outcome: 'quarantined', itemId: fetched.id, quarantineId };
       }
       item = maskedItem;
@@ -396,12 +412,17 @@ export class PromoteService implements PromoteServiceLike {
 
     switch (route.kind) {
       case 'quarantine': {
-        const quarantineId = await repo.quarantineItem(item, ctx, {
-          reason: route.reason,
-          redact: route.redact,
-          decision: route.persist,
-          sanitizeFlags: route.leak ? mergeFlags(flags, { leak: true }) : flags,
-        });
+        const quarantineId = await repo.quarantineItem(
+          item,
+          ctx,
+          {
+            reason: route.reason,
+            redact: route.redact,
+            decision: route.persist,
+            sanitizeFlags: route.leak ? mergeFlags(flags, { leak: true }) : flags,
+          },
+          audit,
+        );
         if (route.leak) {
           await safeNotify(notifier, ctx.projectId, {
             type: 'leak_detected',
@@ -414,7 +435,7 @@ export class PromoteService implements PromoteServiceLike {
 
       case 'queue': {
         if (!wasQueued) {
-          await repo.recordDecision(item.id, route.persist, flags);
+          await repo.recordDecision(item.id, route.persist, flags, audit);
           await safeNotify(notifier, ctx.projectId, {
             type: 'review_enqueued',
             itemId: item.id,
@@ -436,6 +457,7 @@ export class PromoteService implements PromoteServiceLike {
           await embedItemFailSoft(this.deps.embedder, item),
           // A mandatory target type is exactly what the human approval covers.
           humanApproved ? NO_MANDATORY_TYPES : this.deps.routing.mandatoryReviewTypes,
+          audit,
         );
         switch (r.status) {
           case 'applied':
@@ -451,7 +473,12 @@ export class PromoteService implements PromoteServiceLike {
               return { outcome: 'conflict', itemId: item.id, code: 'target_changed' };
             }
             // SEC M-1: the target's type differs or is mandatory → human review.
-            await repo.recordDecision(item.id, { ...route.persist, mandatoryReview: true }, flags);
+            await repo.recordDecision(
+              item.id,
+              { ...route.persist, mandatoryReview: true },
+              flags,
+              audit,
+            );
             await safeNotify(notifier, ctx.projectId, {
               type: 'review_enqueued',
               itemId: item.id,
@@ -469,6 +496,7 @@ export class PromoteService implements PromoteServiceLike {
               item.id,
               { ...STALE_TARGET_DECISION, confidence: route.persist.confidence },
               flags,
+              audit,
             );
             await safeNotify(notifier, ctx.projectId, {
               type: 'review_enqueued',
@@ -478,12 +506,17 @@ export class PromoteService implements PromoteServiceLike {
             });
             return { outcome: 'queued', itemId: item.id };
           case 'duplicate': {
-            const quarantineId = await repo.quarantineItem(item, ctx, {
-              reason: 'duplicate_content',
-              redact: 'none',
-              decision: route.persist,
-              sanitizeFlags: flags,
-            });
+            const quarantineId = await repo.quarantineItem(
+              item,
+              ctx,
+              {
+                reason: 'duplicate_content',
+                redact: 'none',
+                decision: route.persist,
+                sanitizeFlags: flags,
+              },
+              audit,
+            );
             return { outcome: 'quarantined', itemId: item.id, quarantineId };
           }
         }

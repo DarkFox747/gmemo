@@ -230,6 +230,7 @@ describe('POST /memories (confirmed add)', () => {
     expect(call.branch).toMatch(new RegExp(`^web/${USERS.adminA.userId}/[0-9A-Z]{26}$`));
     expect(kit.direct.promote.calls[0]!.opts).toEqual({
       humanApproved: { approverUserId: USERS.adminA.userId },
+      audit: expect.any(Function),
     });
     expect(kit.authRepo.accessLogEntries).toHaveLength(1);
     expect(kit.authRepo.accessLogEntries[0]).toMatchObject({
@@ -312,6 +313,7 @@ describe('POST /memories (confirmed add)', () => {
     const old = makeAdminMemory({ projectId: PROJECT_A, status: 'deprecated' });
     kit.direct.adminRepo.memories.push(old);
     kit.direct.promote.result = { outcome: 'applied', memoryId: old.id, deduped: true };
+    kit.direct.promote.memoryStatus = 'deprecated';
     const res = await request(kit.app)
       .post(BASE)
       .set('Authorization', admin)

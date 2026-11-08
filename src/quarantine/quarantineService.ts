@@ -9,12 +9,18 @@
  * Restore = atomic claim (session `restore/<id>`, pending item with the original
  * author, restored_* label) → the SAME per-item pipeline as a promotion
  * (PromoteService.promoteItem) → applied | queued | quarantined. The restorer
- * never enters the pipeline; the route audits as the restorer.
+ * never enters the pipeline. The route binds the audit row (as the restorer);
+ * the item's terminal write commits it in its own transaction (C11). The claim
+ * is its own earlier transaction: when the pipeline fails after it (a throw,
+ * an audit failure that rolled the terminal write back, or an outcome restore
+ * cannot produce) the claim is released — the `restore/<id>` session is
+ * abandoned and the restored_* label cleared, so the row is back in the list
+ * and a retry can claim it. No audit row is written (nothing was restored).
  *
  * Logging: ids only — never content.
  */
 
-import type { ApiAuditDetail, ProjectMember } from '../mcp/context.js';
+import type { ApiAuditDetail, ApiWriteAudit, ProjectMember } from '../mcp/context.js';
 import type {
   QuarantineDetailDto,
   QuarantineItemDto,
@@ -38,8 +44,7 @@ export interface QuarantineQueryInput {
   limit: number;
 }
 
-export type RestoreOutcome =
-  { kind: 'restored'; dto: RestoreResponseDto; audit: ApiAuditDetail } | { kind: 'not_found' };
+export type RestoreOutcome = { kind: 'restored'; dto: RestoreResponseDto } | { kind: 'not_found' };
 
 /** Surface consumed by the quarantine routes. */
 export interface QuarantineServiceLike {
@@ -49,8 +54,16 @@ export interface QuarantineServiceLike {
     q: QuarantineQueryInput,
   ): Promise<QuarantineListDto>;
   get(member: ProjectMember, projectId: string, id: string): Promise<QuarantineDetailDto | null>;
-  /** Caller must have checked member.projectRole === 'project_admin'. */
-  restore(member: ProjectMember, projectId: string, id: string): Promise<RestoreOutcome>;
+  /**
+   * Caller must have checked member.projectRole === 'project_admin'. `audit`
+   * rides on the restored item's terminal write (C11).
+   */
+  restore(
+    member: ProjectMember,
+    projectId: string,
+    id: string,
+    audit: ApiWriteAudit,
+  ): Promise<RestoreOutcome>;
 }
 
 function viewerOf(member: ProjectMember): QuarantineViewer {
@@ -123,7 +136,12 @@ export class QuarantineService implements QuarantineServiceLike {
     return row ? toDetailDto(row, viewer.isAdmin) : null;
   }
 
-  async restore(member: ProjectMember, projectId: string, id: string): Promise<RestoreOutcome> {
+  async restore(
+    member: ProjectMember,
+    projectId: string,
+    id: string,
+    audit: ApiWriteAudit,
+  ): Promise<RestoreOutcome> {
     const claim = await this.deps.quarantineRepository.claimForRestore({
       projectId,
       quarantineId: id,
@@ -132,52 +150,55 @@ export class QuarantineService implements QuarantineServiceLike {
     });
     if (claim.status === 'not_found') return { kind: 'not_found' };
 
+    const base: ApiAuditDetail = { quarantineId: id, itemId: claim.itemId };
     let result;
     try {
-      result = await this.deps.promoteService.promoteItem(claim.sessionId, claim.itemId, {
-        tenant: { projectId, repoId: claim.repoId, branch: claim.branch },
-        originBranch: claim.branch,
-        originPr: claim.originPr,
-      });
+      result = await this.deps.promoteService.promoteItem(
+        claim.sessionId,
+        claim.itemId,
+        {
+          tenant: { projectId, repoId: claim.repoId, branch: claim.branch },
+          originBranch: claim.branch,
+          originPr: claim.originPr,
+        },
+        {
+          audit: (db, w) => {
+            if (w.outcome === 'applied') {
+              return audit(db, { ...base, outcome: 'applied', memoryId: w.memoryId });
+            }
+            if (w.outcome === 'quarantined') {
+              return audit(db, {
+                ...base,
+                outcome: 'quarantined',
+                newQuarantineId: w.quarantineId,
+              });
+            }
+            return audit(db, { ...base, outcome: 'queued' });
+          },
+        },
+      );
     } catch (err) {
-      // The claim is committed: the item stays pending in its restore session.
       logger.error('[quarantine] restore pipeline failed after claim', {
         quarantineId: id,
         itemId: claim.itemId,
         errorName: err instanceof Error ? err.name : 'unknown',
       });
+      await this.releaseClaim(projectId, id, claim);
       throw err;
     }
 
-    const audit: ApiAuditDetail = { quarantineId: id, itemId: claim.itemId };
     switch (result.outcome) {
       case 'applied': {
         const dto: RestoreResponseDto = { outcome: 'applied' };
         if (result.memoryId) dto.memoryId = result.memoryId;
-        return {
-          kind: 'restored',
-          dto,
-          audit: { ...audit, outcome: 'applied', memoryId: result.memoryId ?? undefined },
-        };
+        return { kind: 'restored', dto };
       }
       case 'queued':
-        return {
-          kind: 'restored',
-          dto: { outcome: 'queued', itemId: result.itemId },
-          audit: { ...audit, outcome: 'queued' },
-        };
+        return { kind: 'restored', dto: { outcome: 'queued', itemId: result.itemId } };
       case 'quarantined': {
         const dto: RestoreResponseDto = { outcome: 'quarantined' };
         if (result.quarantineId) dto.quarantineId = result.quarantineId;
-        return {
-          kind: 'restored',
-          dto,
-          audit: {
-            ...audit,
-            outcome: 'quarantined',
-            newQuarantineId: result.quarantineId ?? undefined,
-          },
-        };
+        return { kind: 'restored', dto };
       }
       case 'conflict':
         // Human-approved mode only (C5): restore never passes the option.
@@ -185,6 +206,7 @@ export class QuarantineService implements QuarantineServiceLike {
           quarantineId: id,
           itemId: claim.itemId,
         });
+        await this.releaseClaim(projectId, id, claim);
         throw new AppError(ErrorCode.INTERNAL);
       default:
         // 'skipped' is impossible for a freshly claimed pending item.
@@ -193,7 +215,40 @@ export class QuarantineService implements QuarantineServiceLike {
           itemId: claim.itemId,
           outcome: result.outcome,
         });
+        await this.releaseClaim(projectId, id, claim);
         throw new AppError(ErrorCode.INTERNAL);
+    }
+  }
+
+  /**
+   * Un-claims a failed restore (backlog E4 #1). The caller rethrows its own
+   * error, so a release failure is logged (name only) rather than masking it;
+   * the row then stays claimed, as before C11.
+   */
+  private async releaseClaim(
+    projectId: string,
+    quarantineId: string,
+    claim: { sessionId: string; itemId: string },
+  ): Promise<void> {
+    try {
+      const released = await this.deps.quarantineRepository.releaseRestoreClaim({
+        projectId,
+        quarantineId,
+        sessionId: claim.sessionId,
+        itemId: claim.itemId,
+      });
+      if (!released) {
+        logger.warn('[quarantine] restore claim not released (item already written)', {
+          quarantineId,
+          itemId: claim.itemId,
+        });
+      }
+    } catch (err) {
+      logger.error('[quarantine] restore claim release failed', {
+        quarantineId,
+        itemId: claim.itemId,
+        errorName: err instanceof Error ? err.name : 'unknown',
+      });
     }
   }
 }

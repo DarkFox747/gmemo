@@ -23,6 +23,7 @@ import type { RequestContext, HandlerDeps } from '../../src/mcp/context.js';
 import type { RememberRequest } from '../../src/contracts/tools.js';
 import { encodeHandle } from '../../src/mcp/handle.js';
 import { ErrorCode } from '../../src/errors/appError.js';
+import { GITHUB_FINE_GRAINED_PAT, OPENAI_PROJECT_KEY } from '../security/secretFixtures.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -373,6 +374,21 @@ describe('rememberHandler — secret scan', () => {
     await assertSecretRejected({
       ...BASE_ADD,
       body: '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----',
+    });
+  });
+
+  it('GitHub fine-grained PAT in body → PERMISSION_DENIED, nothing persisted', async () => {
+    await assertSecretRejected({
+      ...BASE_ADD,
+      body: `The release job authenticates with ${GITHUB_FINE_GRAINED_PAT} today.`,
+    });
+  });
+
+  it('OpenAI project key in fields → PERMISSION_DENIED, nothing persisted', async () => {
+    await assertSecretRejected({
+      ...BASE_ADD,
+      type: 'gotcha',
+      fields: { symptom: `Calls fail when ${OPENAI_PROJECT_KEY} is rotated` },
     });
   });
 

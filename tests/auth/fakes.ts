@@ -30,6 +30,7 @@ import type {
   RepoResolution,
   AppUser,
   AccessLogEntry,
+  SqlExecutor,
 } from '../../src/db/authRepository.js';
 import type {
   AppServices,
@@ -45,6 +46,7 @@ import type {
   ProjectContext,
   ApiAction,
   ApiAuditDetail,
+  ApiWriteAudit,
   JobAuditInput,
   ProjectMember,
   RequestContext,
@@ -262,7 +264,8 @@ export class InMemoryAuthRepository implements AuthRepository {
     return project !== undefined && !project.archived;
   }
 
-  async insertAccessLog(entry: AccessLogEntry): Promise<void> {
+  /** The transaction client (C11) is ignored: the in-memory log has no transactions. */
+  async insertAccessLog(entry: AccessLogEntry, _db?: SqlExecutor): Promise<void> {
     this.accessLogEntries.push(entry);
   }
 
@@ -409,6 +412,9 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
       _detail?: ApiAuditDetail,
     ): Promise<void> {
       return Promise.resolve();
+    },
+    apiWriteAudit(): ApiWriteAudit {
+      return () => Promise.resolve();
     },
     recordAbandon(
       _ctx: RequestContext,

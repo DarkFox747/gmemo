@@ -1,35 +1,62 @@
 /**
  * LifecycleRepository — memory lifecycle writes (C4, HU-12, HU-11.4).
  *
- * Every statement is a single self-contained SQL statement (a guarded UPDATE
- * or a data-modifying CTE that locks, updates and writes the revision), so no
- * multi-statement transaction is needed. Parameterized $N only. The retire
- * reason is stored only in memory.retired_reason, never in the revision.
+ * Every write is a single self-contained SQL statement (a guarded UPDATE or a
+ * data-modifying CTE that locks, updates and writes the revision). When the
+ * caller passes an `audit` hook (C11: the REST routes), the statement and the
+ * hook run in one BEGIN…COMMIT on the same client, so the access_log row
+ * commits with the change and a hook failure rolls it back. Parameterized $N
+ * only. The retire reason is stored only in memory.retired_reason, never in
+ * the revision.
  */
 
 import type pg from 'pg';
+import type { TxnAudit } from './authRepository.js';
+import { logger } from '../observability/logger.js';
+import { AppError, ErrorCode } from '../errors/appError.js';
+
+export interface ConfirmResult {
+  memoryId: string;
+  revalidateAt: Date | null;
+}
+
+export interface RetireResult {
+  memoryId: string;
+  revision: number;
+}
+
+export interface RetireByPrResult {
+  retired: number;
+  memoryIds: string[];
+}
 
 /** Writes only: browsing (list, detail, revisions) lives in MemoryAdminRepository (C5). */
 export interface LifecycleRepository {
-  /** pending_revalidation → active with a fresh deadline; null when no such row (404). */
+  /**
+   * pending_revalidation → active with a fresh deadline; null when no such row
+   * (404, nothing written, `audit` not run).
+   */
   confirm(
     projectId: string,
     memoryId: string,
-  ): Promise<{ memoryId: string; revalidateAt: Date | null } | null>;
-  /** active|pending → deprecated + deprecate revision; null when no such row (404). */
+    audit?: TxnAudit<ConfirmResult>,
+  ): Promise<ConfirmResult | null>;
+  /** active|pending → deprecated + deprecate revision; null when no such row (404, no audit). */
   retire(
     projectId: string,
     memoryId: string,
     reason: string,
     actorIdentity: string,
-  ): Promise<{ memoryId: string; revision: number } | null>;
-  /** Every active|pending row of the project with this origin_pr, in one statement. */
+    audit?: TxnAudit<RetireResult>,
+  ): Promise<RetireResult | null>;
+  /** Every active|pending row of the project with this origin_pr, in one statement (0 is audited). */
   retireByPr(
     projectId: string,
     originPr: number,
     reason: string,
     actorIdentity: string,
-  ): Promise<{ retired: number; memoryIds: string[] }>;
+    audit?: TxnAudit<RetireByPrResult>,
+  ): Promise<RetireByPrResult>;
   /** Platform job: active non-outcome rows past revalidate_at → pending_revalidation. */
   sweepExpired(): Promise<Array<{ projectId: string; count: number }>>;
 }
@@ -132,13 +159,17 @@ export class PgLifecycleRepository implements LifecycleRepository {
   async confirm(
     projectId: string,
     memoryId: string,
-  ): Promise<{ memoryId: string; revalidateAt: Date | null } | null> {
-    const { rows } = await this.pool.query<{ id: string; revalidate_at: Date | null }>(
+    audit?: TxnAudit<ConfirmResult>,
+  ): Promise<ConfirmResult | null> {
+    return this.writeAudited(
       CONFIRM_SQL,
       [projectId, memoryId, this.opts.revalidationDays],
+      (rows: Array<{ id: string; revalidate_at: Date | null }>) => {
+        const r = rows[0];
+        return r ? { memoryId: r.id, revalidateAt: r.revalidate_at } : null;
+      },
+      audit,
     );
-    const r = rows[0];
-    return r ? { memoryId: r.id, revalidateAt: r.revalidate_at } : null;
   }
 
   async retire(
@@ -146,13 +177,17 @@ export class PgLifecycleRepository implements LifecycleRepository {
     memoryId: string,
     reason: string,
     actorIdentity: string,
-  ): Promise<{ memoryId: string; revision: number } | null> {
-    const { rows } = await this.pool.query<{ memory_id: string; revision_no: number }>(
+    audit?: TxnAudit<RetireResult>,
+  ): Promise<RetireResult | null> {
+    return this.writeAudited(
       RETIRE_ONE_SQL,
       [projectId, memoryId, reason, actorIdentity],
+      (rows: Array<{ memory_id: string; revision_no: number }>) => {
+        const r = rows[0];
+        return r ? { memoryId: r.memory_id, revision: r.revision_no } : null;
+      },
+      audit,
     );
-    const r = rows[0];
-    return r ? { memoryId: r.memory_id, revision: r.revision_no } : null;
   }
 
   async retireByPr(
@@ -160,12 +195,60 @@ export class PgLifecycleRepository implements LifecycleRepository {
     originPr: number,
     reason: string,
     actorIdentity: string,
-  ): Promise<{ retired: number; memoryIds: string[] }> {
-    const { rows } = await this.pool.query<{ memory_id: string; revision_no: number }>(
+    audit?: TxnAudit<RetireByPrResult>,
+  ): Promise<RetireByPrResult> {
+    const r = await this.writeAudited(
       RETIRE_BY_PR_SQL,
       [projectId, originPr, reason, actorIdentity],
+      (rows: Array<{ memory_id: string; revision_no: number }>) => ({
+        retired: rows.length,
+        memoryIds: rows.map((row) => row.memory_id),
+      }),
+      audit,
     );
-    return { retired: rows.length, memoryIds: rows.map((r) => r.memory_id) };
+    // The mapper never returns null for a bulk retire; guard the type, not a real path.
+    if (r === null) throw new AppError(ErrorCode.INTERNAL);
+    return r;
+  }
+
+  /**
+   * Runs one write statement; with an `audit` hook, statement + hook share one
+   * transaction (null result → rollback, nothing to audit). Without a hook the
+   * statement runs alone on the pool, as before C11.
+   */
+  private async writeAudited<Row extends pg.QueryResultRow, R>(
+    sql: string,
+    params: unknown[],
+    map: (rows: Row[]) => R | null,
+    audit: TxnAudit<R> | undefined,
+  ): Promise<R | null> {
+    if (!audit) {
+      const { rows } = await this.pool.query<Row>(sql, params);
+      return map(rows);
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query<Row>(sql, params);
+      const result = map(rows);
+      if (result === null) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      await audit(client, result);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK').catch((rollbackErr: unknown) => {
+        // The original error is the one surfaced.
+        logger.warn('[lifecycle] rollback failed', {
+          errorName: rollbackErr instanceof Error ? rollbackErr.name : 'unknown',
+        });
+      });
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async sweepExpired(): Promise<Array<{ projectId: string; count: number }>> {

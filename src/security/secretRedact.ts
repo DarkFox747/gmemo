@@ -145,8 +145,12 @@ export function finalizeRedaction(c: RedactableContent, ranges: number): Redacta
  * True only when no detector fires on any text (each one, and joined), any
  * string leaf or any key of `fields`. Scans normalized copies (like sanitize),
  * so a zero-width split secret is still caught. Any throw counts as false.
- * The joined fields JSON is deliberately not scanned: JSON quoting turns a safe
- * `password: [REDACTADO]` leaf into a 12+ char run that would re-match.
+ * The texts joined with the fields JSON are scanned too, but secret_assignment is
+ * ignored there (each text and leaf was already checked for it): JSON quoting
+ * turns a safe `password: [REDACTADO]` leaf into a 12+ char run that would
+ * re-match, while a context-anchored detector (aws_secret_access_key) whose
+ * context is a fields KEY, or an AWS key id + bare secret pair split across a
+ * text and a field, is only visible in the joined unit.
  */
 export function isSecretFree(c: RedactableContent): boolean {
   try {
@@ -157,7 +161,11 @@ export function isSecretFree(c: RedactableContent): boolean {
       `${c.title}\n${c.summary}\n${c.body}`,
       ...leavesAndKeys(c.fields ?? {}),
     ];
-    return units.every((u) => scanForSecrets(normalizeForScan(u)).length === 0);
+    if (!units.every((u) => scanForSecrets(normalizeForScan(u)).length === 0)) return false;
+    const joined = normalizeForScan(
+      `${c.title}\n${c.summary}\n${c.body}\n${JSON.stringify(c.fields ?? {})}`,
+    );
+    return scanForSecrets(joined).every((category) => category === 'secret_assignment');
   } catch {
     return false;
   }

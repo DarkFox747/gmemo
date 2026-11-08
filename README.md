@@ -36,6 +36,10 @@ Luego abrir **http://localhost:3000/** (web de gobierno; el selector *Usuario de
 - [`openspec/`](openspec/): especificaciones y changes SDD (incluye `backlog.md`).
 - [`packages/web/README.md`](packages/web/README.md): web de gobierno.
 
+## Integración continua
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) corre en cada pull request y en cada push a `main` el mismo chequeo completo que se usa en local: instalación con `--frozen-lockfile`, `pnpm lint`, `pnpm build`, `pnpm typecheck:web`, `pnpm build:web` y la suite completa (`pnpm exec vitest run`, unitarios + integración) contra un Postgres `pgvector/pgvector:pg16` efímero. Acciones fijadas por SHA y permisos de solo lectura.
+
 ## Gestor de paquetes: SOLO pnpm
 
 Este repo usa **pnpm exclusivamente** (versión fijada en `package.json`, campo `packageManager`); npm, yarn y bun están bloqueados.

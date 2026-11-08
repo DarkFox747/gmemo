@@ -79,6 +79,22 @@ describe('apiErrorHandler mapping', () => {
     expect(res.text).toBe('{"error":"Internal server error"}');
     expect(res.text).not.toContain('hunter2');
     expect(spy).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(spy.mock.calls)).not.toContain('hunter2');
+  });
+
+  it('logs only the error name and code of a pg-style error (no message or detail)', async () => {
+    const spy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const pgErr = Object.assign(new Error('duplicate key value (title)=(Leaky note)'), {
+      code: '23505',
+      detail: 'Key (title)=(Leaky note) already exists.',
+    });
+    const res = await request(appThrowing(pgErr)).get('/api/x');
+    expect(res.status).toBe(500);
+    expect(spy).toHaveBeenCalledWith('[api] Unhandled error', {
+      errorName: 'Error',
+      code: '23505',
+    });
+    expect(JSON.stringify(spy.mock.calls)).not.toContain('Leaky note');
   });
 
   it('delegates to the next error handler when headers were already sent', async () => {

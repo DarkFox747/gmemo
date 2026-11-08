@@ -119,12 +119,13 @@ Deferred work items, ordered. Promote to a `/sdd-new <name>` change when ready.
 ✅ Archived: C0 demo-baseline · C1 judge-structured-verdict · C2 web-api-and-review-queue · C3 quarantine-management · C4 memory-lifecycle · C5 direct-memory-management · C6 hybrid-search-rrf · C7 governance-web · C8 demo-kit. Report: `docs/demo/REPORTE-E4.md`.
 
 ### Follow-ups (from verify reports, all LOW/MEDIUM, none blocking)
-1. Compensating un-claim after a post-claim restore failure (C3).
-2. Detector coverage gaps: `sk-proj-`, `github_pat_`, AWS secret access keys (C3).
-3. Audit row inside the write transaction for API writes (C2/C4).
+1. ✅ Compensating un-claim after a post-claim restore failure (C3) — done in change `ci-and-security-followups` (a failed restore abandons its `restore/<id>` session and clears the `restored_*` label in one statement, only while the claimed item is untouched; a retry can claim it again).
+2. ✅ Detector coverage gaps: `sk-proj-`, `github_pat_`, AWS secret access keys (C3) — done in change `ci-and-security-followups` (`openai_project_key` for every kind-prefixed `sk-<kind>-` family incl. Anthropic-style keys, `github_fine_grained_pat`, context-anchored `aws_secret_access_key` plus the access-key-id + bare-secret pair).
+3. ✅ Audit row inside the write transaction for API writes (C2/C4) — done in change `ci-and-security-followups` (the write's own transaction writes the `access_log` row; an audit failure rolls the write back). A restore's claim stays its own earlier transaction; a failure after it is compensated by the un-claim (#1).
 4. Per-user rate limiting for preview/create/amend and behind CloudFront (C2/C5).
 5. `NODE_ENV` required with no default; rate limiters before body parsing (pre-existing).
 6. ✅ Feature-branch session ↔ PR linking for `/promote` — done in change `feature-branch-promotion` (default-branch token + `pr_number`; server-side PR verification against GitHub remains out of scope).
 7. Web: gate the dev-user selector to dev builds; Cognito PKCE login; screen-level component tests (C7).
 8. Dev-user email allowlist (C2); refuse `judge_output_invalid` on human confirm (C5).
 9. ✅ `openspec/project-map.yaml` fully refreshed (sdd-map-refresh, commit anchor set). Wrong node:test/npm tests area removed; web area context installed locally (`packages/web/CLAUDE.md` + `packages/web/.claude/skills/web-area/SKILL.md`, area-lint ok, gitignored).
+10. `secret_assignment` tolerate JSON quoting; JWT detector cost on dot-less input; digest-pin the CI pgvector image (from C11 verify).

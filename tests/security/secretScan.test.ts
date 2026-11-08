@@ -15,6 +15,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { scanForSecrets, assertNoSecrets } from '../../src/security/secretScan.js';
 import { logger } from '../../src/observability/logger.js';
 import { AppError, ErrorCode } from '../../src/errors/appError.js';
+import {
+  ANTHROPIC_STYLE_KEY,
+  AWS_ACCESS_KEY_ID,
+  AWS_SECRET_VALUE,
+  GITHUB_FINE_GRAINED_PAT,
+  OPENAI_PROJECT_KEY,
+  skKindKey,
+} from './secretFixtures.js';
 
 // ---------------------------------------------------------------------------
 // 1. Positive detection per category
@@ -41,8 +49,7 @@ describe('scanForSecrets — positive detection per category', () => {
 
   it('detects jwt (header.payload.signature form)', () => {
     // Valid base64url-encoded header + payload + non-empty signature
-    const jwt =
-      'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.c2lnbmF0dXJl';
+    const jwt = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.c2lnbmF0dXJl';
     expect(scanForSecrets(jwt)).toContain('jwt');
   });
 
@@ -65,9 +72,7 @@ describe('scanForSecrets — positive detection per category', () => {
 
   it('detects google_api_key (AIza prefix + 35 chars)', () => {
     // AIza + exactly 35 [0-9A-Za-z_-] chars
-    expect(
-      scanForSecrets('AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI'),
-    ).toContain('google_api_key');
+    expect(scanForSecrets('AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI')).toContain('google_api_key');
   });
 
   it('detects stripe_secret_key (sk_live_ form)', () => {
@@ -94,6 +99,102 @@ describe('scanForSecrets — positive detection per category', () => {
 
   it('detects secret_assignment generic heuristic (api_key: form)', () => {
     expect(scanForSecrets('api_key: someverylongsecretval')).toContain('secret_assignment');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. Newer credential shapes (C11) — fixtures assembled at runtime
+// ---------------------------------------------------------------------------
+
+describe('scanForSecrets — newer credential shapes', () => {
+  it.each(['proj', 'svcacct', 'admin'])('detects openai_project_key (sk-%s- form)', (kind) => {
+    const key = OPENAI_PROJECT_KEY.replace('sk-proj-', `sk-${kind}-`);
+    expect(scanForSecrets(`key ${key} here`)).toEqual(['openai_project_key']);
+  });
+
+  it('openai_project_key needs a token body (bare prefix is not a key)', () => {
+    expect(scanForSecrets('use an sk-proj-short key name')).toEqual([]);
+  });
+
+  it('detects github_fine_grained_pat (github_pat_ form)', () => {
+    expect(scanForSecrets(`token ${GITHUB_FINE_GRAINED_PAT}`)).toEqual(['github_fine_grained_pat']);
+  });
+
+  it.each([
+    ['env assignment', `aws_secret_access_key = ${AWS_SECRET_VALUE}`],
+    ['upper-case env', `AWS_SECRET_ACCESS_KEY=${AWS_SECRET_VALUE}`],
+    ['short key name', `aws_secret: ${AWS_SECRET_VALUE}`],
+    ['camelCase SDK option', `secretAccessKey: '${AWS_SECRET_VALUE}'`],
+    ['JSON key/value', JSON.stringify({ aws_secret_access_key: AWS_SECRET_VALUE })],
+  ])('detects aws_secret_access_key (%s)', (_label, text) => {
+    expect(scanForSecrets(text)).toContain('aws_secret_access_key');
+  });
+
+  it.each([
+    ['bare 40-char hex hash', `commit ${'a1b2c3d4e5'.repeat(4)} fixed it`],
+    ['40-char hash under another key', `sha = ${AWS_SECRET_VALUE}`],
+    ['AWS secret key name with a 41-char value', `aws_secret_access_key = ${AWS_SECRET_VALUE}x`],
+    [
+      'AWS secret key name with a 39-char value',
+      `aws_secret_access_key = ${AWS_SECRET_VALUE.slice(1)}`,
+    ],
+  ])('does not flag %s', (_label, text) => {
+    expect(scanForSecrets(text)).not.toContain('aws_secret_access_key');
+  });
+
+  it('benign 40-char hashes produce no finding at all', () => {
+    const text = `checksum ${'0123456789'.repeat(4)} and digest ${'f'.repeat(40)}`;
+    expect(scanForSecrets(text)).toEqual([]);
+  });
+
+  // 4.1: wider AWS key names and whitespace separators.
+  it.each([
+    ['aws_secret_key', `aws_secret_key=${AWS_SECRET_VALUE}`],
+    ['AWS-SECRET-KEY', `AWS-SECRET-KEY: ${AWS_SECRET_VALUE}`],
+    ['spaced name + space separator', `AWS secret access key ${AWS_SECRET_VALUE}`],
+    ['aws secret key + quoted value', `aws secret key "${AWS_SECRET_VALUE}"`],
+    ['awssecretaccesskey', `awsSecretAccessKey = '${AWS_SECRET_VALUE}'`],
+    ['SecretAccessKey (CloudFormation / CLI JSON)', `"SecretAccessKey": "${AWS_SECRET_VALUE}"`],
+    ['tab separator', `AWS_SECRET_ACCESS_KEY\t${AWS_SECRET_VALUE}`],
+  ])('detects aws_secret_access_key (%s)', (_label, text) => {
+    expect(scanForSecrets(text)).toContain('aws_secret_access_key');
+  });
+
+  it('an access key id next to a bare 40-char token is a key pair', () => {
+    const text = `creds ${AWS_ACCESS_KEY_ID} / ${AWS_SECRET_VALUE} in the old runbook`;
+    expect(scanForSecrets(text)).toEqual(['aws_access_key_id', 'aws_secret_access_key']);
+  });
+
+  it('a bare 40-char token without an access key id is not flagged', () => {
+    expect(scanForSecrets(`token ${AWS_SECRET_VALUE} rotated`)).toEqual([]);
+  });
+
+  it('an access key id with no bare 40-char token stays a single finding', () => {
+    expect(scanForSecrets(`id ${AWS_ACCESS_KEY_ID} and sha ${'a'.repeat(41)}`)).toEqual([
+      'aws_access_key_id',
+    ]);
+  });
+
+  // 4.2: every kind-prefixed sk- family.
+  it.each(['ant', 'or', 'None', 'proj', 'svcacct', 'admin'])(
+    'detects kind-prefixed sk-%s- keys as openai_project_key',
+    (kind) => {
+      expect(scanForSecrets(`key ${skKindKey(kind)} here`)).toEqual(['openai_project_key']);
+    },
+  );
+
+  it('detects an Anthropic-style key (sk-ant-api03-…)', () => {
+    expect(scanForSecrets(`ANTHROPIC_API_KEY ${ANTHROPIC_STYLE_KEY}`)).toEqual([
+      'openai_project_key',
+    ]);
+  });
+
+  it.each([
+    ['hyphenated prose', 'a risk-adjusted-return-calculation-model for the desk'],
+    ['kind longer than 10 letters', `sk-${'a'.repeat(11)}-${'b'.repeat(24)}`],
+    ['short token body', 'sk-ant-api03short'],
+  ])('kind-prefixed sk- detector ignores %s', (_label, text) => {
+    expect(scanForSecrets(text)).not.toContain('openai_project_key');
   });
 });
 
@@ -147,14 +248,13 @@ describe('assertNoSecrets — throws PERMISSION_DENIED on a finding', () => {
 
   it('throws when a secret is in any one of multiple parts', () => {
     // The secret spans only the second part — all parts are joined before scanning.
-    expect(() =>
-      assertNoSecrets('safe title', 'AKIAIOSFODNN7EXAMPLE', 'safe body'),
-    ).toThrow(AppError);
+    expect(() => assertNoSecrets('safe title', 'AKIAIOSFODNN7EXAMPLE', 'safe body')).toThrow(
+      AppError,
+    );
   });
 
   it('throws for a JWT spread across the concatenated text', () => {
-    const jwt =
-      'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.c2lnbmF0dXJl';
+    const jwt = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.c2lnbmF0dXJl';
     expect(() => assertNoSecrets(jwt)).toThrow(AppError);
   });
 });
@@ -259,8 +359,7 @@ describe('assertNoSecrets — logger.warn logs category names only', () => {
 
   it('logger.warn call arguments never contain the matched JWT text', () => {
     const warnSpy = vi.mocked(logger.warn);
-    const jwt =
-      'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.c2lnbmF0dXJl';
+    const jwt = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.c2lnbmF0dXJl';
     try {
       assertNoSecrets(jwt);
     } catch {

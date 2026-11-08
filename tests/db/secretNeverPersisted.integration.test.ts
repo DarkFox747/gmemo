@@ -161,10 +161,11 @@ for release signing in scripts/release.ts.`,
     const { StubEmbedder } = await import('../../src/embedder/stubEmbedder.js');
 
     const promotionRepository = new PgPromotionRepository(pool, { quarantineRetentionDays: 60, revalidationDays: 60 });
+    const auditLogger = new RdsAuditLogger(new PgAuthRepository(pool));
     const promoteService = new PromoteService({
       promotionRepository,
       judge: new DeterministicJudge({ acceptedConfidence: 0.9 }),
-      auditLogger: new RdsAuditLogger(new PgAuthRepository(pool)),
+      auditLogger,
       embedder: new StubEmbedder(),
       notifier: logNotifier,
       routing: { confidenceThreshold: 0.8, mandatoryReviewTypes: new Set(['decision']) },
@@ -193,7 +194,12 @@ for release signing in scripts/release.ts.`,
       projectId,
     ]);
     for (const r of rows) {
-      const res = await quarantineService.restore(member, projectId, r.id);
+      const res = await quarantineService.restore(
+        member,
+        projectId,
+        r.id,
+        auditLogger.apiWriteAudit(member, { projectId }, 'quarantine.restore'),
+      );
       expect(res.kind).toBe('not_found');
     }
 
@@ -219,7 +225,7 @@ for release signing in scripts/release.ts.`,
       body: `Use ${DIRECT_KEY} for the deploy bucket in src/deploy.ts.`,
       fields: {},
       repoId: null,
-    });
+    }, auditLogger.apiWriteAudit(member, { projectId }, 'memory.create'));
     expect(written).toMatchObject({ kind: 'done', dto: { outcome: 'quarantined', reasonCode: 'secret_detected' } });
   });
 

@@ -4,7 +4,8 @@
  *
  *   S1 bounds (same caps as capture) or any detector error → block sanitize_failed (redact 'whole')
  *   S2 credentials (scanForSecrets)                        → block secret_detected (redact 'spans', leak;
- *                                                            'whole' when a PEM private key is found anywhere)
+ *                                                            'whole' when a PEM private key or an AWS
+ *                                                            access key id + secret pair is found anywhere)
  *   S3 embedded instructions (scanForInjection)            → block embedded_instructions (redact 'none')
  *   S4 personal data (maskPii / maskPiiInFields)           → masked content, item continues
  *
@@ -93,9 +94,14 @@ export function sanitizeItem(item: SanitizeContent): SanitizeResult {
 
     const secrets = scanForSecrets(normalizeForScan(`${head}\n${fieldsJson}`));
     if (secrets.length > 0) {
-      if (secrets.includes('pem_private_key')) {
+      if (
+        secrets.includes('pem_private_key') ||
+        (secrets.includes('aws_access_key_id') && secrets.includes('aws_secret_access_key'))
+      ) {
         // SEC-M1: only the PEM header is detectable; the key body may sit in another
         // field (header in title, body in body) where no span covers it → whole item.
+        // Same for an AWS key pair: a bare 40-char secret only counts next to its
+        // access key id, so in another field (or once the id is redacted) it is invisible.
         return {
           flags: { leak: true, secrets },
           masked: { ...WHOLE_REDACTION, fields: {} },

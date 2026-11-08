@@ -11,11 +11,12 @@
  * query (e.g. get_context) omit the parameter; it is stored as NULL.
  */
 
-import type { AuthRepository } from '../db/authRepository.js';
+import type { AccessLogEntry, AuthRepository } from '../db/authRepository.js';
 import type {
   ActorIdentity,
   ApiAction,
   ApiAuditDetail,
+  ApiWriteAudit,
   AuditLogger,
   JobAuditInput,
   ProjectContext,
@@ -58,6 +59,36 @@ const API_DETAIL_KEYS: ReadonlyArray<keyof ApiAuditDetail> = [
   'originPr',
   'previewOutcome',
 ];
+
+/**
+ * The access_log row of a REST action. action: 'update' for the write actions,
+ * 'read' otherwise. project_id is null for project-less routes (me.read).
+ * detail carries the ApiAction, the app_user.id and allow-listed ids/counters
+ * only — never content. detail.queryHash (already a hash) goes to the
+ * query_hash column, not to detail.
+ */
+function apiAccessLogEntry(
+  actor: ActorIdentity,
+  project: ProjectContext | null,
+  action: ApiAction,
+  detail?: ApiAuditDetail,
+): AccessLogEntry {
+  const safeDetail: Record<string, unknown> = {};
+  for (const key of API_DETAIL_KEYS) {
+    if (detail?.[key] !== undefined) {
+      safeDetail[key] = detail[key];
+    }
+  }
+  return {
+    actorIdentity: actor.actorId,
+    actorKind: 'user',
+    action: API_UPDATE_ACTIONS.has(action) ? 'update' : 'read',
+    projectId: project?.projectId ?? null,
+    memoryId: detail?.memoryId,
+    queryHash: detail?.queryHash,
+    detail: { ...safeDetail, api: action, userId: actor.userId },
+  };
+}
 
 export class RdsAuditLogger implements AuditLogger {
   constructor(private readonly repo: AuthRepository) {}
@@ -168,13 +199,10 @@ export class RdsAuditLogger implements AuditLogger {
   }
 
   /**
-   * Inserts one access_log row for a successful REST read or write.
-   * Called only after the action succeeded; denials and 404s are never audited.
-   *
-   * action: 'update' for approve/reject/restore, 'read' otherwise. project_id is null
-   * for project-less routes (me.read). detail carries the ApiAction, the
-   * app_user.id and allow-listed ids/counters only — never content.
-   * detail.queryHash (already a hash) goes to the query_hash column, not to detail.
+   * Inserts one access_log row for a successful REST read (and the pool-level
+   * form of a write row; REST writes use apiWriteAudit so the row commits with
+   * the write). Called only after the action succeeded; denials and 404s are
+   * never audited.
    */
   async recordApi(
     actor: ActorIdentity,
@@ -182,22 +210,13 @@ export class RdsAuditLogger implements AuditLogger {
     action: ApiAction,
     detail?: ApiAuditDetail,
   ): Promise<void> {
-    const safeDetail: Record<string, unknown> = {};
-    for (const key of API_DETAIL_KEYS) {
-      if (detail?.[key] !== undefined) {
-        safeDetail[key] = detail[key];
-      }
-    }
+    await this.repo.insertAccessLog(apiAccessLogEntry(actor, project, action, detail));
+  }
 
-    await this.repo.insertAccessLog({
-      actorIdentity: actor.actorId,
-      actorKind: 'user',
-      action: API_UPDATE_ACTIONS.has(action) ? 'update' : 'read',
-      projectId: project?.projectId ?? null,
-      memoryId: detail?.memoryId,
-      queryHash: detail?.queryHash,
-      detail: { ...safeDetail, api: action, userId: actor.userId },
-    });
+  /** Same row as recordApi, inserted on the caller's transaction client (C11). */
+  apiWriteAudit(actor: ActorIdentity, project: ProjectContext, action: ApiAction): ApiWriteAudit {
+    return (db, detail) =>
+      this.repo.insertAccessLog(apiAccessLogEntry(actor, project, action, detail), db);
   }
 
   /**

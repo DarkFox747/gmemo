@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { scanForSecrets, scanForSecretsWithRanges } from '../../src/security/secretScan.js';
-import { SECRET_FIXTURES } from './secretFixtures.js';
+import {
+  ANTHROPIC_STYLE_KEY,
+  AWS_ACCESS_KEY_ID,
+  AWS_SECRET_VALUE,
+  GITHUB_FINE_GRAINED_PAT,
+  OPENAI_PROJECT_KEY,
+  SECRET_FIXTURES,
+} from './secretFixtures.js';
 
 const covered = (text: string, secret: string): boolean => {
   const start = text.indexOf(secret);
@@ -37,6 +44,64 @@ describe('scanForSecretsWithRanges', () => {
     expect(r.categories).toContain(category);
     const start = text.indexOf(token);
     expect(r.ranges).toEqual([{ start, end: start + token.length }]);
+  });
+
+  it.each([
+    ['openai_project_key', OPENAI_PROJECT_KEY],
+    ['github_fine_grained_pat', GITHUB_FINE_GRAINED_PAT],
+  ])('%s span covers the whole token (inner _ and - included)', (category, token) => {
+    const text = `before ${token} after`;
+    const r = scanForSecretsWithRanges(text);
+    expect(r.categories).toEqual([category]);
+    const start = text.indexOf(token);
+    expect(r.ranges).toEqual([{ start, end: start + token.length }]);
+  });
+
+  it.each([
+    `aws_secret_access_key = ${AWS_SECRET_VALUE}`,
+    `secretAccessKey: "${AWS_SECRET_VALUE}"`,
+  ])('aws_secret_access_key range covers the value only: %s', (assignment) => {
+    const text = `cfg ${assignment} end`;
+    const start = text.indexOf(AWS_SECRET_VALUE);
+    expect(scanForSecretsWithRanges(text).ranges).toEqual([
+      { start, end: start + AWS_SECRET_VALUE.length },
+    ]);
+  });
+
+  it.each([
+    `AWS secret access key ${AWS_SECRET_VALUE}`,
+    `aws-secret-key:\t'${AWS_SECRET_VALUE}'`,
+    `"SecretAccessKey": "${AWS_SECRET_VALUE}"`,
+  ])('aws_secret_access_key range (capture group) covers the value only: %s', (assignment) => {
+    const text = `cfg ${assignment} end`;
+    const r = scanForSecretsWithRanges(text);
+    expect(r.categories).toContain('aws_secret_access_key');
+    const start = text.indexOf(AWS_SECRET_VALUE);
+    expect(r.ranges).toEqual([{ start, end: start + AWS_SECRET_VALUE.length }]);
+  });
+
+  it('an AWS key pair: both the access key id and the bare secret get a span', () => {
+    const text = `id ${AWS_ACCESS_KEY_ID} secret ${AWS_SECRET_VALUE} done`;
+    const r = scanForSecretsWithRanges(text);
+    expect(r.categories).toEqual(['aws_access_key_id', 'aws_secret_access_key']);
+    const a = text.indexOf(AWS_ACCESS_KEY_ID);
+    const s = text.indexOf(AWS_SECRET_VALUE);
+    expect(r.ranges).toEqual([
+      { start: a, end: a + AWS_ACCESS_KEY_ID.length },
+      { start: s, end: s + AWS_SECRET_VALUE.length },
+    ]);
+  });
+
+  it('a bare 40-char token without an access key id gets no span', () => {
+    expect(scanForSecretsWithRanges(`sha ${AWS_SECRET_VALUE} ok`).ranges).toEqual([]);
+  });
+
+  it('an Anthropic-style key span covers the whole token', () => {
+    const text = `before ${ANTHROPIC_STYLE_KEY} after`;
+    const start = text.indexOf(ANTHROPIC_STYLE_KEY);
+    expect(scanForSecretsWithRanges(text).ranges).toEqual([
+      { start, end: start + ANTHROPIC_STYLE_KEY.length },
+    ]);
   });
 
   it('the openai range only fires where the detector does (no "task-list" over-redaction)', () => {

@@ -7,15 +7,16 @@
  *   POST /:id/restore      restore (project_admin only, else 404)    → quarantine.restore
  *
  * Validation order: projectMember → uuid :id → role (restore) → JSON content
- * type → zod, so a non-admin with a bad body gets 404, not 400. Audit runs only
- * after success; denials are never audited. An audit failure is a 500.
+ * type → zod, so a non-admin with a bad body gets 404, not 400. Reads are
+ * audited after success; denials are never audited. The restore's audit row is
+ * written in the restored item's terminal write transaction (C11): an audit
+ * failure rolls that write back and is a 500.
  */
 
 import express from 'express';
 import type { Request } from 'express';
 import { z } from 'zod';
 import { AppError, ErrorCode } from '../../errors/appError.js';
-import { logger } from '../../observability/logger.js';
 import { QUARANTINE_REASON_CODES } from '../../quarantine/reason.js';
 import type { ProjectContext, ProjectMember } from '../../mcp/context.js';
 import type { ApiResponse, ApiRouterDeps } from './types.js';
@@ -98,19 +99,13 @@ export function makeQuarantineRouter(
     }
     parseOrInvalid(RestoreBody, req.body ?? {});
 
-    const outcome = await quarantineService.restore(member, project.projectId, id);
+    const outcome = await quarantineService.restore(
+      member,
+      project.projectId,
+      id,
+      auditLogger.apiWriteAudit(member, project, 'quarantine.restore'),
+    );
     if (outcome.kind === 'not_found') throw new AppError(ErrorCode.NOT_FOUND);
-
-    try {
-      await auditLogger.recordApi(member, project, 'quarantine.restore', outcome.audit);
-    } catch (err) {
-      // The restore is already committed: log ids, then fail closed.
-      logger.error('[api] audit failed after committed quarantine restore', {
-        quarantineId: id,
-        errorName: err instanceof Error ? err.name : 'unknown',
-      });
-      throw err;
-    }
     res.status(200).json(outcome.dto);
   });
 

@@ -7,7 +7,14 @@
  */
 
 import type { MemoryType } from '../../src/contracts/memory.js';
-import type { LifecycleRepository } from '../../src/db/lifecycleRepository.js';
+import type {
+  ConfirmResult,
+  LifecycleRepository,
+  RetireByPrResult,
+  RetireResult,
+} from '../../src/db/lifecycleRepository.js';
+import type { TxnAudit } from '../../src/db/authRepository.js';
+import { FAKE_TXN } from '../auth/txnAudit.js';
 import type { MemoryStatus } from '../../src/db/memoryAdminRepository.js';
 
 export interface FakeLifecycleMemory {
@@ -72,17 +79,23 @@ export class FakeLifecycleRepository implements LifecycleRepository {
     return this.memories.find((m) => m.id === id);
   }
 
+  // Each write runs its audit hook before mutating (a failing hook leaves the
+  // fake unchanged, like the real ROLLBACK).
   async confirm(
     projectId: string,
     memoryId: string,
-  ): Promise<{ memoryId: string; revalidateAt: Date | null } | null> {
+    audit?: TxnAudit<ConfirmResult>,
+  ): Promise<ConfirmResult | null> {
     this.calls.push({ method: 'confirm', args: [projectId, memoryId] });
     const m = this.find(memoryId);
     if (!m || m.projectId !== projectId || m.status !== 'pending_revalidation') return null;
-    m.status = 'active';
-    m.revalidateAt =
+    const revalidateAt =
       m.type === 'outcome' ? null : new Date(Date.now() + this.revalidationDays * DAY_MS);
-    return { memoryId, revalidateAt: m.revalidateAt };
+    const result = { memoryId, revalidateAt };
+    if (audit) await audit(FAKE_TXN, result);
+    m.status = 'active';
+    m.revalidateAt = revalidateAt;
+    return result;
   }
 
   private retireRow(m: FakeLifecycleMemory, reason: string, actorIdentity: string): number {
@@ -110,10 +123,12 @@ export class FakeLifecycleRepository implements LifecycleRepository {
     memoryId: string,
     reason: string,
     actorIdentity: string,
-  ): Promise<{ memoryId: string; revision: number } | null> {
+    audit?: TxnAudit<RetireResult>,
+  ): Promise<RetireResult | null> {
     this.calls.push({ method: 'retire', args: [projectId, memoryId, reason, actorIdentity] });
     const m = this.find(memoryId);
     if (!m || !this.retirable(m, projectId)) return null;
+    if (audit) await audit(FAKE_TXN, { memoryId, revision: m.currentRevision + 1 });
     return { memoryId, revision: this.retireRow(m, reason, actorIdentity) };
   }
 
@@ -122,13 +137,16 @@ export class FakeLifecycleRepository implements LifecycleRepository {
     originPr: number,
     reason: string,
     actorIdentity: string,
-  ): Promise<{ retired: number; memoryIds: string[] }> {
+    audit?: TxnAudit<RetireByPrResult>,
+  ): Promise<RetireByPrResult> {
     this.calls.push({ method: 'retireByPr', args: [projectId, originPr, reason, actorIdentity] });
     const targets = this.memories
       .filter((m) => this.retirable(m, projectId) && m.originPr === originPr)
       .sort((a, b) => a.id.localeCompare(b.id));
+    const result = { retired: targets.length, memoryIds: targets.map((m) => m.id) };
+    if (audit) await audit(FAKE_TXN, result);
     for (const m of targets) this.retireRow(m, reason, actorIdentity);
-    return { retired: targets.length, memoryIds: targets.map((m) => m.id) };
+    return result;
   }
 
   async sweepExpired(): Promise<Array<{ projectId: string; count: number }>> {

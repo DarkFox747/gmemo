@@ -60,6 +60,16 @@ export interface AccessLogEntry {
   detail: Record<string, unknown>;
 }
 
+/** A pool or a transaction's client: anything that runs a parameterized statement. */
+export type SqlExecutor = Pick<pg.ClientBase, 'query'>;
+
+/**
+ * Hook a repository write runs on its own transaction client after the data
+ * change and before COMMIT (C11: REST write audit rows). A throw rolls the
+ * whole write back.
+ */
+export type TxnAudit<R> = (db: SqlExecutor, result: R) => Promise<void>;
+
 // ---------------------------------------------------------------------------
 // Interface
 // ---------------------------------------------------------------------------
@@ -111,9 +121,11 @@ export interface AuthRepository {
 
   /**
    * Inserts one row into `access_log`. Called only after full authorization
-   * succeeds — unauthorized attempts are never logged.
+   * succeeds — unauthorized attempts are never logged. `db` is a write
+   * transaction's client when the row must commit with that write (C11);
+   * default: the pool.
    */
-  insertAccessLog(entry: AccessLogEntry): Promise<void>;
+  insertAccessLog(entry: AccessLogEntry, db?: SqlExecutor): Promise<void>;
 
   /**
    * Finds an active machine_credential row for (projectId, principalName)
@@ -255,8 +267,8 @@ export class PgAuthRepository implements AuthRepository {
     return rows.length > 0;
   }
 
-  async insertAccessLog(entry: AccessLogEntry): Promise<void> {
-    await this.pool.query(
+  async insertAccessLog(entry: AccessLogEntry, db: SqlExecutor = this.pool): Promise<void> {
+    await db.query(
       `INSERT INTO access_log
          (actor_identity, actor_kind, action, project_id, memory_id, session_id, query_hash, detail)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,

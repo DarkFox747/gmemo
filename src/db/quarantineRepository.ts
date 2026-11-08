@@ -90,6 +90,14 @@ export type RestoreClaim =
       originPr: number | null;
     };
 
+/** The committed claim to undo after a failed restore (ids from RestoreClaim). */
+export interface RestoreClaimRelease {
+  projectId: string;
+  quarantineId: string;
+  sessionId: string;
+  itemId: string;
+}
+
 export interface QuarantineRepository {
   list(
     projectId: string,
@@ -108,6 +116,14 @@ export interface QuarantineRepository {
    * including redacted rows (SEC-L3) and a taken `restore/<id>` slot (SEC-L2).
    */
   claimForRestore(i: RestoreClaimInput): Promise<RestoreClaim>;
+  /**
+   * Un-claim after a restore whose pipeline failed (C11, backlog E4 #1): one
+   * statement abandons the open `restore/<id>` session and clears the
+   * restored_* label, so the row is active again and a retry can claim it.
+   * Only while the claimed item has no terminal write (not applied, quarantined
+   * or queued): a committed restore is never un-claimed. True when released.
+   */
+  releaseRestoreClaim(r: RestoreClaimRelease): Promise<boolean>;
   /** Platform job: deletes rows with expires_at < now(); counts per project. */
   purgeExpired(): Promise<Array<{ projectId: string; count: number }>>;
 }
@@ -188,6 +204,28 @@ RETURNING id
 const CLAIM_LABEL_SQL = `
 UPDATE quarantine SET restored_by = $1, restored_at = now(), restored_item_id = $2
 WHERE id = $3 AND restored_at IS NULL
+`.trim();
+
+// Un-claim (one statement). The session is abandoned only while the claimed item
+// has no terminal write: not applied (promoted_at), not quarantined ('rejected'),
+// not queued ('uncertain' or mandatory_review). 'accepted' is the decision the
+// apply path persists before applying, so a rolled-back apply still un-claims.
+// The label is cleared only when that abandon happened.
+// $1 session_id  $2 project_id  $3 item_id  $4 quarantine_id
+const RELEASE_CLAIM_SQL = `
+WITH s AS (
+  UPDATE staging_session ss SET status = 'abandoned', last_activity_at = now()
+  WHERE ss.id = $1 AND ss.project_id = $2 AND ss.status = 'open'
+    AND EXISTS (SELECT 1 FROM staging_item si
+                 WHERE si.id = $3 AND si.session_id = ss.id
+                   AND si.promoted_at IS NULL AND NOT si.mandatory_review
+                   AND si.judge_state IN ('pending', 'accepted'))
+  RETURNING ss.id
+)
+UPDATE quarantine q
+SET restored_by = NULL, restored_at = NULL, restored_item_id = NULL
+WHERE q.id = $4 AND q.project_id = $2 AND q.restored_item_id = $3
+  AND EXISTS (SELECT 1 FROM s)
 `.trim();
 
 const PURGE_SQL = `
@@ -423,6 +461,16 @@ export class PgQuarantineRepository implements QuarantineRepository {
     } finally {
       client.release();
     }
+  }
+
+  async releaseRestoreClaim(r: RestoreClaimRelease): Promise<boolean> {
+    const res = await this.pool.query(RELEASE_CLAIM_SQL, [
+      r.sessionId,
+      r.projectId,
+      r.itemId,
+      r.quarantineId,
+    ]);
+    return (res.rowCount ?? 0) === 1;
   }
 
   async purgeExpired(): Promise<Array<{ projectId: string; count: number }>> {

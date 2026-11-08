@@ -21,11 +21,13 @@ import type { DecisionCriterion, JudgeContextItem, Verdict } from '../judge/judg
 import { toVectorParam } from './vector.js';
 import { computeContentHash, sha256Hex } from '../security/hash.js';
 import { logger } from '../observability/logger.js';
+import { AppError, ErrorCode } from '../errors/appError.js';
 import { QUEUED_PREDICATE } from './reviewQueueRepository.js';
 import type { ConflictCode } from '../http/api/types.js';
 import { classifyQuarantine, HUMAN_REVIEW_PREFIX } from '../quarantine/reason.js';
 import type { QuarantineRedaction } from '../quarantine/reason.js';
 import { WHOLE_REDACTION, isSecretFree } from '../security/secretRedact.js';
+import type { TxnAudit } from './authRepository.js';
 
 export type { ConflictCode };
 
@@ -153,6 +155,20 @@ export type ReviewApproveResult =
   | { status: 'not_found' }
   | { status: 'conflict'; code: ConflictCode };
 
+/** The committed result of an approval, handed to its audit hook before COMMIT. */
+export type ApprovedReview = Extract<ReviewApproveResult, { status: 'approved' }>;
+
+/**
+ * What a single-item terminal write committed, handed to the caller's audit
+ * hook on the write's own client before COMMIT (C11: restore and direct
+ * management audit as the human actor). memoryStatus is the memory row's
+ * status after the apply (a dedup may land on a non-active row).
+ */
+export type ItemWrite =
+  | { outcome: 'applied'; memoryId: string; deduped: boolean; memoryStatus: string }
+  | { outcome: 'quarantined'; quarantineId: string }
+  | { outcome: 'queued' };
+
 export interface ReviewRejectInput {
   projectId: string;
   itemId: string;
@@ -197,8 +213,17 @@ export interface PromotionRepository {
     flags: SanitizeFlags,
   ): Promise<'ok' | 'hash_conflict'>;
 
-  /** Persists the structured judge decision on the item row (one write). */
-  recordDecision(itemId: string, d: PersistedDecision, flags: SanitizeFlags): Promise<void>;
+  /**
+   * Persists the structured judge decision on the item row (one write). With
+   * `audit` (a terminal queue decision of a single-item run) the write and the
+   * hook share one transaction.
+   */
+  recordDecision(
+    itemId: string,
+    d: PersistedDecision,
+    flags: SanitizeFlags,
+    audit?: TxnAudit<ItemWrite>,
+  ): Promise<void>;
 
   /**
    * Applies one accepted item inside a per-item transaction.
@@ -206,12 +231,14 @@ export interface PromotionRepository {
    * embedding is the pre-computed vector (null when the embed failed or op=deprecate).
    * mandatoryTypes: a target of one of these types (or of a type different from
    * the item's) is never mutated → { status: 'review_required' }.
+   * `audit` runs before COMMIT only on 'applied' (a throw rolls the apply back).
    */
   applyAccepted(
     item: PromotionItemRow,
     ctx: ApplyContext,
     embedding: number[] | null,
     mandatoryTypes: ReadonlySet<MemoryType>,
+    audit?: TxnAudit<ItemWrite>,
   ): Promise<ApplyResult>;
 
   /**
@@ -220,8 +247,14 @@ export interface PromotionRepository {
    * the quarantine row and the staging row; a redacted quarantine row carries
    * the hash of the redacted content. Returns the new quarantine id, or null
    * (nothing written) when the item was applied or human-reviewed meanwhile.
+   * `audit` runs before COMMIT only when the snapshot is written.
    */
-  quarantineItem(item: PromotionItemRow, ctx: ApplyContext, q: QuarantineInput): Promise<string | null>;
+  quarantineItem(
+    item: PromotionItemRow,
+    ctx: ApplyContext,
+    q: QuarantineInput,
+    audit?: TxnAudit<ItemWrite>,
+  ): Promise<string | null>;
 
   /** Sets the session terminal status after all items have been processed. */
   finalizeSession(
@@ -234,10 +267,19 @@ export interface PromotionRepository {
    * promotion apply SQL. First writer wins: a resolved item gives not_found.
    * judge_state is never touched.
    */
-  approveReviewItem(i: ReviewApproveInput): Promise<ReviewApproveResult>;
+  approveReviewItem(
+    i: ReviewApproveInput,
+    audit?: TxnAudit<ApprovedReview>,
+  ): Promise<ReviewApproveResult>;
 
-  /** Human rejection (HU-07.3): quarantine 'human_review: <reason>' + review columns. */
-  rejectReviewItem(i: ReviewRejectInput): Promise<'rejected' | 'not_found'>;
+  /**
+   * Human rejection (HU-07.3): quarantine 'human_review: <reason>' + review
+   * columns. `audit` runs before COMMIT only on 'rejected'.
+   */
+  rejectReviewItem(
+    i: ReviewRejectInput,
+    audit?: TxnAudit<'rejected'>,
+  ): Promise<'rejected' | 'not_found'>;
 
   /**
    * PR closed without merge (HU-04.2): marks the open session abandoned and
@@ -445,6 +487,11 @@ const MARK_APPLIED_SQL = `
 UPDATE staging_item
 SET promoted_at = now(), promoted_memory_id = $1, judge_state = 'accepted'
 WHERE id = $2 AND promoted_at IS NULL
+`.trim();
+
+// Audited single-item apply (C11): the row's status after the apply. $1=id $2=project_id
+const SELECT_MEMORY_STATUS_SQL = `
+SELECT status FROM memory WHERE id = $1 AND project_id = $2
 `.trim();
 
 // Q1: Quarantine snapshot (self-contained; NO FK to staging → sweep-safe).
@@ -728,10 +775,10 @@ export class PgPromotionRepository implements PromotionRepository {
   }
 
   async fetchPromotableItems(sessionId: string, projectId: string): Promise<PromotionItemRow[]> {
-    const { rows } = await this.pool.query<RawPromotionItemRow>(
-      FETCH_PROMOTABLE_ITEMS_SQL,
-      [sessionId, projectId],
-    );
+    const { rows } = await this.pool.query<RawPromotionItemRow>(FETCH_PROMOTABLE_ITEMS_SQL, [
+      sessionId,
+      projectId,
+    ]);
     return rows.map(toItemRow);
   }
 
@@ -742,10 +789,12 @@ export class PgPromotionRepository implements PromotionRepository {
   ): Promise<JudgeContextItem[]> {
     const [query] = toOrQuery(text.title, text.summary);
     if (query === undefined) return [];
-    const { rows } = await this.pool.query<{ id: string; type: string; title: string; summary: string }>(
-      FIND_JUDGE_CONTEXT_SQL,
-      [query, projectId, excludeMemoryId],
-    );
+    const { rows } = await this.pool.query<{
+      id: string;
+      type: string;
+      title: string;
+      summary: string;
+    }>(FIND_JUDGE_CONTEXT_SQL, [query, projectId, excludeMemoryId]);
     return rows.map((r) => ({
       id: r.id,
       type: r.type as MemoryType,
@@ -762,9 +811,13 @@ export class PgPromotionRepository implements PromotionRepository {
   ): Promise<'ok' | 'hash_conflict'> {
     try {
       await this.pool.query(PERSIST_MASKED_SQL, [
-        content.title, content.summary, content.body,
+        content.title,
+        content.summary,
+        content.body,
         JSON.stringify(content.fields),
-        contentHash, JSON.stringify(flags), itemId,
+        contentHash,
+        JSON.stringify(flags),
+        itemId,
       ]);
       return 'ok';
     } catch (err) {
@@ -773,11 +826,38 @@ export class PgPromotionRepository implements PromotionRepository {
     }
   }
 
-  async recordDecision(itemId: string, d: PersistedDecision, flags: SanitizeFlags): Promise<void> {
-    await this.pool.query(RECORD_DECISION_SQL, [
-      d.verdict, d.reason, d.criterion, d.confidence,
-      d.relatedMemoryId, d.mandatoryReview, JSON.stringify(flags), itemId,
-    ]);
+  async recordDecision(
+    itemId: string,
+    d: PersistedDecision,
+    flags: SanitizeFlags,
+    audit?: TxnAudit<ItemWrite>,
+  ): Promise<void> {
+    const params = [
+      d.verdict,
+      d.reason,
+      d.criterion,
+      d.confidence,
+      d.relatedMemoryId,
+      d.mandatoryReview,
+      JSON.stringify(flags),
+      itemId,
+    ];
+    if (!audit) {
+      await this.pool.query(RECORD_DECISION_SQL, params);
+      return;
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(RECORD_DECISION_SQL, params);
+      await audit(client, { outcome: 'queued' });
+      await client.query('COMMIT');
+    } catch (err) {
+      await this.safeRollback(client);
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   /**
@@ -794,6 +874,7 @@ export class PgPromotionRepository implements PromotionRepository {
     ctx: ApplyContext,
     embedding: number[] | null,
     mandatoryTypes: ReadonlySet<MemoryType>,
+    audit?: TxnAudit<ItemWrite>,
   ): Promise<ApplyResult> {
     const client = await this.pool.connect();
     try {
@@ -824,6 +905,22 @@ export class PgPromotionRepository implements PromotionRepository {
         return { status: 'already' };
       }
 
+      if (audit) {
+        const st = await client.query<{ status: string }>(SELECT_MEMORY_STATUS_SQL, [
+          r.memoryId,
+          ctx.projectId,
+        ]);
+        const row = st.rows[0];
+        // The applied row is in this transaction: a missing row is an invariant break.
+        if (!row) throw new AppError(ErrorCode.INTERNAL);
+        await audit(client, {
+          outcome: 'applied',
+          memoryId: r.memoryId,
+          deduped: r.deduped,
+          memoryStatus: row.status,
+        });
+      }
+
       await client.query('COMMIT');
       return r;
     } catch (err) {
@@ -850,21 +947,28 @@ export class PgPromotionRepository implements PromotionRepository {
     if (item.op === 'add') {
       // A1: Insert authoritative memory.
       const memRes = await client.query<{ id: string }>(INSERT_MEMORY_SQL, [
-        ctx.projectId, ctx.repoId, item.type,
-        item.title, item.summary, item.body,
+        ctx.projectId,
+        ctx.repoId,
+        item.type,
+        item.title,
+        item.summary,
+        item.body,
         JSON.stringify(item.fields),
-        item.author_identity, item.content_hash,
-        ctx.originBranch, ctx.originPr,
-        toVectorParam(embedding),   // $12
+        item.author_identity,
+        item.content_hash,
+        ctx.originBranch,
+        ctx.originPr,
+        toVectorParam(embedding), // $12
         this.opts.revalidationDays, // $13
-        ctx.provenance,             // $14
-        ctx.approvedBy,             // $15
+        ctx.provenance, // $14
+        ctx.approvedBy, // $15
       ]);
 
       if (memRes.rows.length === 0) {
         // ON CONFLICT hit — content already in memory; find existing row.
         const dupRes = await client.query<{ id: string }>(SELECT_MEMORY_BY_HASH_SQL, [
-          ctx.projectId, item.content_hash,
+          ctx.projectId,
+          item.content_hash,
         ]);
         // A2 SKIPPED — existing memory already carries revision 1.
         return { status: 'applied', memoryId: dupRes.rows[0]!.id, deduped: true };
@@ -873,10 +977,14 @@ export class PgPromotionRepository implements PromotionRepository {
       // A2: Insert revision only for newly-inserted rows.
       await client.query(INSERT_REVISION_ADD_SQL, [
         memoryId,
-        item.title, item.summary, item.body,
+        item.title,
+        item.summary,
+        item.body,
         JSON.stringify(item.fields),
-        item.type, item.content_hash,
-        item.author_identity, item.id,
+        item.type,
+        item.content_hash,
+        item.author_identity,
+        item.id,
       ]);
       return { status: 'applied', memoryId, deduped: false };
     }
@@ -902,17 +1010,21 @@ export class PgPromotionRepository implements PromotionRepository {
       // M2: Update memory content — may throw 23505 on duplicate content_hash.
       try {
         await client.query(UPDATE_MEMORY_AMEND_SQL, [
-          item.title, item.summary, item.body,
+          item.title,
+          item.summary,
+          item.body,
           JSON.stringify(item.fields),
-          item.type, item.content_hash,
+          item.type,
+          item.content_hash,
           item.author_identity,
-          ctx.originBranch, ctx.originPr,
+          ctx.originBranch,
+          ctx.originPr,
           item.target_memory_id,
-          ctx.projectId,          // $11 — L3 tenant guard
+          ctx.projectId, // $11 — L3 tenant guard
           toVectorParam(embedding), // $12
           this.opts.revalidationDays, // $13
-          ctx.provenance,             // $14
-          ctx.approvedBy,             // $15
+          ctx.provenance, // $14
+          ctx.approvedBy, // $15
         ]);
       } catch (err) {
         if ((err as { code?: string }).code === '23505') return { status: 'duplicate' };
@@ -921,11 +1033,16 @@ export class PgPromotionRepository implements PromotionRepository {
 
       // M3: Insert revision.
       await client.query(INSERT_REVISION_AMEND_SQL, [
-        item.target_memory_id, prevRevision + 1,
-        item.title, item.summary, item.body,
+        item.target_memory_id,
+        prevRevision + 1,
+        item.title,
+        item.summary,
+        item.body,
         JSON.stringify(item.fields),
-        item.type, item.content_hash,
-        item.author_identity, item.id,
+        item.type,
+        item.content_hash,
+        item.author_identity,
+        item.id,
       ]);
 
       return { status: 'applied', memoryId: item.target_memory_id!, deduped: false };
@@ -950,15 +1067,21 @@ export class PgPromotionRepository implements PromotionRepository {
 
       // S2: Insert new memory (same column list as A1).
       const newMemRes = await client.query<{ id: string }>(INSERT_MEMORY_SQL, [
-        ctx.projectId, ctx.repoId, item.type,
-        item.title, item.summary, item.body,
+        ctx.projectId,
+        ctx.repoId,
+        item.type,
+        item.title,
+        item.summary,
+        item.body,
         JSON.stringify(item.fields),
-        item.author_identity, item.content_hash,
-        ctx.originBranch, ctx.originPr,
-        toVectorParam(embedding),   // $12
+        item.author_identity,
+        item.content_hash,
+        ctx.originBranch,
+        ctx.originPr,
+        toVectorParam(embedding), // $12
         this.opts.revalidationDays, // $13
-        ctx.provenance,             // $14
-        ctx.approvedBy,             // $15
+        ctx.provenance, // $14
+        ctx.approvedBy, // $15
       ]);
 
       let newMemoryId: string;
@@ -966,7 +1089,8 @@ export class PgPromotionRepository implements PromotionRepository {
       if (newMemRes.rows.length === 0) {
         // Dedup: new content already exists in memory.
         const dupRes = await client.query<{ id: string }>(SELECT_MEMORY_BY_HASH_SQL, [
-          ctx.projectId, item.content_hash,
+          ctx.projectId,
+          item.content_hash,
         ]);
         newMemoryId = dupRes.rows[0]!.id;
         deduped = true;
@@ -977,10 +1101,14 @@ export class PgPromotionRepository implements PromotionRepository {
         // S3: Insert revision for the new memory row.
         await client.query(INSERT_REVISION_SUPERSEDE_SQL, [
           newMemoryId,
-          item.title, item.summary, item.body,
+          item.title,
+          item.summary,
+          item.body,
           JSON.stringify(item.fields),
-          item.type, item.content_hash,
-          item.author_identity, item.id,
+          item.type,
+          item.content_hash,
+          item.author_identity,
+          item.id,
         ]);
       }
 
@@ -1002,10 +1130,10 @@ export class PgPromotionRepository implements PromotionRepository {
     // op === 'deprecate'
     // D1: Lock target memory row + stale check; also snapshot current content.
     // L3: project_id passed to re-assert tenant ownership.
-    const targetRes = await client.query<RawMemoryDeprecateLockRow>(
-      LOCK_MEMORY_FOR_DEPRECATE_SQL,
-      [item.target_memory_id, ctx.projectId],
-    );
+    const targetRes = await client.query<RawMemoryDeprecateLockRow>(LOCK_MEMORY_FOR_DEPRECATE_SQL, [
+      item.target_memory_id,
+      ctx.projectId,
+    ]);
     if (
       targetRes.rows.length === 0 ||
       targetRes.rows[0]!.current_revision !== item.target_revision ||
@@ -1023,11 +1151,16 @@ export class PgPromotionRepository implements PromotionRepository {
 
     // D3: Insert revision using the snapshotted target content.
     await client.query(INSERT_REVISION_DEPRECATE_SQL, [
-      item.target_memory_id, snap.current_revision + 1,
-      snap.title, snap.summary, snap.body,
+      item.target_memory_id,
+      snap.current_revision + 1,
+      snap.title,
+      snap.summary,
+      snap.body,
       JSON.stringify(snap.fields),
-      snap.type, snap.content_hash,
-      item.author_identity, item.id,
+      snap.type,
+      snap.content_hash,
+      item.author_identity,
+      item.id,
     ]);
 
     return { status: 'applied', memoryId: item.target_memory_id!, deduped: false };
@@ -1043,6 +1176,7 @@ export class PgPromotionRepository implements PromotionRepository {
     item: PromotionItemRow,
     ctx: ApplyContext,
     q: QuarantineInput,
+    audit?: TxnAudit<ItemWrite>,
   ): Promise<string | null> {
     const d = q.decision;
     // Reviewer M1: a non-redacted judge rejection (duplication / specificity)
@@ -1058,19 +1192,29 @@ export class PgPromotionRepository implements PromotionRepository {
 
       // Q2: Mark staging item terminal (promoted_at stays NULL).
       const marked = await client.query(MARK_QUARANTINED_SQL, [
-        stagingReason, d?.criterion ?? null, d?.confidence ?? null,
-        d?.relatedMemoryId ?? null, d?.mandatoryReview ?? false,
+        stagingReason,
+        d?.criterion ?? null,
+        d?.confidence ?? null,
+        d?.relatedMemoryId ?? null,
+        d?.mandatoryReview ?? false,
         JSON.stringify(q.sanitizeFlags),
-        snap.title, snap.summary, snap.body, snap.fieldsJson,
-        item.id, stagingRedactedHash(item.id, q.redact, snap.contentHash),
+        snap.title,
+        snap.summary,
+        snap.body,
+        snap.fieldsJson,
+        item.id,
+        stagingRedactedHash(item.id, q.redact, snap.contentHash),
       ]);
       if ((marked.rowCount ?? 0) === 0) {
         // SEC M-3: applied or human-reviewed meanwhile — drop the Q1 snapshot too.
         await this.safeRollback(client);
-        logger.warn('[promote] quarantine skipped: item resolved concurrently', { itemId: item.id });
+        logger.warn('[promote] quarantine skipped: item resolved concurrently', {
+          itemId: item.id,
+        });
         return null;
       }
 
+      if (audit) await audit(client, { outcome: 'quarantined', quarantineId: snap.id });
       await client.query('COMMIT');
       return snap.id;
     } catch (err) {
@@ -1101,7 +1245,12 @@ export class PgPromotionRepository implements PromotionRepository {
     fieldsJson: string;
     contentHash: string;
   }> {
-    const given = { title: item.title, summary: item.summary, body: item.body, fields: item.fields };
+    const given = {
+      title: item.title,
+      summary: item.summary,
+      body: item.body,
+      fields: item.fields,
+    };
     let stored = given;
     if (q.redact === 'whole') {
       stored = { ...WHOLE_REDACTION, fields: {} };
@@ -1118,8 +1267,12 @@ export class PgPromotionRepository implements PromotionRepository {
       q.redact === 'none'
         ? item.content_hash
         : computeContentHash({
-            op: item.op, type: item.type,
-            title: stored.title, summary: stored.summary, body: stored.body, fields: stored.fields,
+            op: item.op,
+            type: item.type,
+            title: stored.title,
+            summary: stored.summary,
+            body: stored.body,
+            fields: stored.fields,
             target: item.target_memory_id,
           });
 
@@ -1129,14 +1282,24 @@ export class PgPromotionRepository implements PromotionRepository {
     const relatedMemoryId = q.decision ? q.decision.relatedMemoryId : item.related_memory_id;
 
     const { rows } = await client.query<{ id: string }>(INSERT_QUARANTINE_SQL, [
-      ctx.projectId, ctx.repoId,
-      ctx.sessionId, item.id,
-      item.op, item.type,
-      stored.title, stored.summary, stored.body,
+      ctx.projectId,
+      ctx.repoId,
+      ctx.sessionId,
+      item.id,
+      item.op,
+      item.type,
+      stored.title,
+      stored.summary,
+      stored.body,
       fieldsJson,
-      quarantineHash, q.reason, item.author_identity,
-      criterion, reasonCode, relatedMemoryId,
-      item.target_memory_id, item.target_revision,
+      quarantineHash,
+      q.reason,
+      item.author_identity,
+      criterion,
+      reasonCode,
+      relatedMemoryId,
+      item.target_memory_id,
+      item.target_revision,
       this.opts.quarantineRetentionDays,
     ]);
     return {
@@ -1159,7 +1322,10 @@ export class PgPromotionRepository implements PromotionRepository {
     projectId: string,
     approvedBy: string | null,
   ): Promise<{ item: PromotionItemRow; ctx: ApplyContext } | null> {
-    const { rows } = await client.query<RawQueuedItemRow>(LOCK_QUEUED_ITEM_SQL, [itemId, projectId]);
+    const { rows } = await client.query<RawQueuedItemRow>(LOCK_QUEUED_ITEM_SQL, [
+      itemId,
+      projectId,
+    ]);
     const r = rows[0];
     if (!r) return null;
     // target_type is filled from the locked target row (R1) when needed.
@@ -1192,7 +1358,10 @@ export class PgPromotionRepository implements PromotionRepository {
    * (the item can only be rejected; reloading would not help, unlike
    * `target_changed`).
    */
-  async approveReviewItem(i: ReviewApproveInput): Promise<ReviewApproveResult> {
+  async approveReviewItem(
+    i: ReviewApproveInput,
+    audit?: TxnAudit<ApprovedReview>,
+  ): Promise<ReviewApproveResult> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -1210,8 +1379,12 @@ export class PgPromotionRepository implements PromotionRepository {
       if (item.op !== 'add') {
         // R1
         const target = item.target_memory_id
-          ? (await client.query<RawMemoryLockRow>(LOCK_MEMORY_SQL, [item.target_memory_id, i.projectId]))
-              .rows[0]
+          ? (
+              await client.query<RawMemoryLockRow>(LOCK_MEMORY_SQL, [
+                item.target_memory_id,
+                i.projectId,
+              ])
+            ).rows[0]
           : undefined;
         if (!target || target.status !== 'active' || target.type !== item.type) {
           await this.safeRollback(client);
@@ -1222,7 +1395,10 @@ export class PgPromotionRepository implements PromotionRepository {
         // R2: the reviewer must confirm the version they saw.
         const cur = target.current_revision;
         const stale = cur !== item.target_revision;
-        if ((i.targetRevision !== null && i.targetRevision !== cur) || (stale && i.targetRevision !== cur)) {
+        if (
+          (i.targetRevision !== null && i.targetRevision !== cur) ||
+          (stale && i.targetRevision !== cur)
+        ) {
           await this.safeRollback(client);
           return { status: 'conflict', code: 'target_changed' };
         }
@@ -1274,8 +1450,7 @@ export class PgPromotionRepository implements PromotionRepository {
         }
       }
 
-      await client.query('COMMIT');
-      return {
+      const approved: ApprovedReview = {
         status: 'approved',
         memoryId: r.memoryId,
         deduped: r.deduped,
@@ -1283,6 +1458,9 @@ export class PgPromotionRepository implements PromotionRepository {
         rebasedToRevision,
         relatedSuperseded,
       };
+      if (audit) await audit(client, approved);
+      await client.query('COMMIT');
+      return approved;
     } catch (err) {
       await this.safeRollback(client);
       throw err;
@@ -1296,7 +1474,10 @@ export class PgPromotionRepository implements PromotionRepository {
    * 'human_review: <reason>' + review columns, in one transaction. Queued items
    * never carry secrets (sanitize quarantines those first), so no redaction.
    */
-  async rejectReviewItem(i: ReviewRejectInput): Promise<'rejected' | 'not_found'> {
+  async rejectReviewItem(
+    i: ReviewRejectInput,
+    audit?: TxnAudit<'rejected'>,
+  ): Promise<'rejected' | 'not_found'> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -1321,6 +1502,7 @@ export class PgPromotionRepository implements PromotionRepository {
         return 'not_found';
       }
 
+      if (audit) await audit(client, 'rejected');
       await client.query('COMMIT');
       return 'rejected';
     } catch (err) {

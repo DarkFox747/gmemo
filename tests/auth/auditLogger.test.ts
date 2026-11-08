@@ -20,6 +20,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { RdsAuditLogger } from '../../src/auth/auditLogger.js';
 import { InMemoryAuthRepository } from './fakes.js';
+import { FAKE_TXN } from './txnAudit.js';
 import { sha256Hex } from '../../src/security/hash.js';
 import type { ActorIdentity, ApiAction, RequestContext, ToolName } from '../../src/mcp/context.js';
 
@@ -350,6 +351,36 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
     expect(detail.api).toBe('review_queue.reject');
     expect(detail.userId).toBe('u-tl');
     expect(JSON.stringify(detail)).not.toMatch(/secret/);
+  });
+
+  it('C11 apiWriteAudit writes the same row as recordApi on the given transaction client', async () => {
+    const seen: unknown[] = [];
+    const insert = repo.insertAccessLog.bind(repo);
+    repo.insertAccessLog = (entry, db) => {
+      seen.push(db);
+      return insert(entry, db);
+    };
+    const detail = { itemId: 'item-1', memoryId: 'mem-1', decision: 'approved' as const };
+    await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, 'review_queue.approve', detail);
+    const client = FAKE_TXN;
+    await logger.apiWriteAudit(ADMIN, { projectId: PROJECT_ID }, 'review_queue.approve')(
+      client,
+      { ...detail, title: 'secret title' } as unknown as typeof detail,
+    );
+
+    expect(seen).toEqual([undefined, client]);
+    expect(repo.accessLogEntries).toHaveLength(2);
+    expect(repo.accessLogEntries[1]).toEqual(repo.accessLogEntries[0]);
+    expect(JSON.stringify(repo.accessLogEntries[1])).not.toContain('secret');
+  });
+
+  it('C11 apiWriteAudit propagates an insert failure (the caller rolls back)', async () => {
+    repo.insertAccessLog = () => Promise.reject(new Error('db down'));
+    await expect(
+      logger.apiWriteAudit(ADMIN, { projectId: PROJECT_ID }, 'memory.retire')(FAKE_TXN, {
+        memoryId: 'mem-1',
+      }),
+    ).rejects.toThrow('db down');
   });
 });
 

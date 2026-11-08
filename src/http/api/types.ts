@@ -6,7 +6,7 @@
 import type express from 'express';
 import type {
   AdminActor,
-  ApiAuditDetail,
+  ApiWriteAudit,
   AuditLogger,
   Authenticator,
   Authorizer,
@@ -60,14 +60,18 @@ export interface RejectInput {
 }
 
 export type ApproveOutcome =
-  | { kind: 'approved'; dto: ApproveResponseDto; audit: ApiAuditDetail }
+  | { kind: 'approved'; dto: ApproveResponseDto }
   | { kind: 'not_found' }
   | { kind: 'conflict'; code: ConflictCode };
 
 export type RejectOutcome =
   { kind: 'rejected'; dto: RejectResponseDto } | { kind: 'not_found' } | { kind: 'invalid_reason' };
 
-/** Review service surface consumed by the routes; implemented in src/review/reviewService.ts. */
+/**
+ * Review service surface consumed by the routes; implemented in src/review/reviewService.ts.
+ * `audit` (C11) writes the route's access_log row in the decision's own
+ * transaction; it runs only when the decision is written.
+ */
 export interface ReviewServiceLike {
   list(projectId: string, q: QueueQueryInput): Promise<ReviewQueueListDto>;
   get(projectId: string, itemId: string): Promise<ReviewItemDetailDto | null>;
@@ -76,12 +80,14 @@ export interface ReviewServiceLike {
     projectId: string,
     itemId: string,
     b: ApproveInput,
+    audit: ApiWriteAudit,
   ): Promise<ApproveOutcome>;
   reject(
     actor: AdminActor,
     projectId: string,
     itemId: string,
     b: RejectInput,
+    audit: ApiWriteAudit,
   ): Promise<RejectOutcome>;
 }
 

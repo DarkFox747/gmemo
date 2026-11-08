@@ -273,16 +273,9 @@ describe('POST …/reject', () => {
   });
 
   it('audit failure → 500 (fail closed)', async () => {
-    const kit = makeApiTestApp({
-      auditLogger: {
-        recordRead: () => Promise.resolve(),
-        recordWrite: () => Promise.resolve(),
-        recordPromote: () => Promise.resolve(),
-        recordAbandon: () => Promise.resolve(),
-        recordJob: () => Promise.resolve(),
-        recordApi: () => Promise.reject(new Error('db down')),
-      },
-    });
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const kit = makeApiTestApp();
+    kit.authRepo.insertAccessLog = () => Promise.reject(new Error('db down'));
     const res = await request(kit.app)
       .post(`${BASE}/${ITEM_ID}/reject`)
       .set('Authorization', AUTH)
@@ -328,30 +321,26 @@ describe('Content-Type requirement on state-changing POSTs', () => {
   });
 });
 
-describe('audit failure after a committed decision is logged', () => {
-  it('logs the item id (no reason) before failing closed', async () => {
-    const spy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
-    try {
-      const kit = makeApiTestApp({
-        auditLogger: {
-          recordRead: () => Promise.resolve(),
-          recordWrite: () => Promise.resolve(),
-          recordPromote: () => Promise.resolve(),
-          recordAbandon: () => Promise.resolve(),
-          recordJob: () => Promise.resolve(),
-        recordJob: () => Promise.resolve(),
-          recordApi: () => Promise.reject(new Error('db down')),
-        },
-      });
-      const res = await request(kit.app)
-        .post(`${BASE}/${ITEM_ID}/reject`)
-        .set('Authorization', AUTH)
-        .send({ reason: 'secret reason text' });
-      expect(res.status).toBe(500);
-      expect(spy.mock.calls.some((c) => JSON.stringify(c).includes(ITEM_ID))).toBe(true);
-      expect(JSON.stringify(spy.mock.calls)).not.toContain('secret reason text');
-    } finally {
-      spy.mockRestore();
-    }
-  });
+describe('C11 audit failure inside the decision transaction', () => {
+  it.each(['approve', 'reject'])(
+    '%s: the audit runs inside the write; its failure → opaque 500, reason never logged',
+    async (action) => {
+      const spy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      try {
+        const kit = makeApiTestApp();
+        kit.queueRepo.item = makeItem({ id: ITEM_ID });
+        kit.authRepo.insertAccessLog = () => Promise.reject(new Error('db down'));
+        const res = await request(kit.app)
+          .post(`${BASE}/${ITEM_ID}/${action}`)
+          .set('Authorization', AUTH)
+          .send(action === 'reject' ? { reason: 'secret reason text' } : {});
+        expect(res.status).toBe(500);
+        expect(res.text).toBe('{"error":"Internal server error"}');
+        expect(kit.authRepo.accessLogEntries).toHaveLength(0);
+        expect(JSON.stringify(spy.mock.calls)).not.toContain('secret reason text');
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
 });

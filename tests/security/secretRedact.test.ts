@@ -9,7 +9,7 @@ import {
   type RedactableContent,
 } from '../../src/security/secretRedact.js';
 import { scanForSecrets } from '../../src/security/secretScan.js';
-import { SECRET_FIXTURES } from './secretFixtures.js';
+import { AWS_ACCESS_KEY_ID, AWS_SECRET_VALUE, SECRET_FIXTURES } from './secretFixtures.js';
 
 const content = (over: Partial<RedactableContent> = {}): RedactableContent => ({
   title: 'Deploy issue',
@@ -93,6 +93,44 @@ describe('isSecretFree', () => {
 
   it('a throw counts as not free', () => {
     expect(isSecretFree(content({ fields: { a: { b: { c: { d: { e: 'x' } } } } } }))).toBe(false);
+  });
+
+  // The AWS detector is context-anchored: a key/value pair whose KEY is the context
+  // leaves a bare 40-char leaf that per-leaf scans cannot see. The fields JSON is
+  // also scanned so such a leaf never survives a partial span redaction.
+  it('an AWS secret whose context is the fields key is not secret-free', () => {
+    const c = content({ fields: { aws_secret_access_key: AWS_SECRET_VALUE } });
+    expect(isSecretFree(c)).toBe(false);
+    const r = redactSecretSpans({ ...c, body: 'Key AKIAIOSFODNN7EXAMPLE leaked' });
+    const out = finalizeRedaction(r.content, r.ranges);
+    expect(JSON.stringify(out)).not.toContain(AWS_SECRET_VALUE);
+  });
+
+  it('an AWS key pair split across a text and a field is not secret-free', () => {
+    const c = content({ title: `Key ${AWS_ACCESS_KEY_ID}`, fields: { s: AWS_SECRET_VALUE } });
+    expect(isSecretFree(c)).toBe(false);
+  });
+
+  it('a bare 40-char token alone is secret-free (no access key id)', () => {
+    expect(isSecretFree(content({ body: `sha ${AWS_SECRET_VALUE}` }))).toBe(true);
+  });
+
+  // 4.5: invisible characters outside \p{Cf} cannot split a key either.
+  it.each([
+    ['combining grapheme joiner', '\u034F'],
+    ['Hangul choseong filler', '\u115F'],
+    ['Hangul jungseong filler', '\u1160'],
+    ['Hangul filler', '\u3164'],
+    ['halfwidth Hangul filler (NFKC → U+1160)', '\uFFA0'],
+    ['Braille blank', '\u2800'],
+    ['variation selector 16', '\uFE0F'],
+    ['variation selector 1', '\uFE00'],
+  ])('catches a secret split by a %s', (_label, ch) => {
+    expect(isSecretFree(content({ body: `AKIAIOSFOD${ch}NN7EXAMPLE` }))).toBe(false);
+  });
+
+  it('a redacted password leaf still counts as secret-free (JSON quoting)', () => {
+    expect(isSecretFree(content({ fields: { password: REDACTED_TOKEN } }))).toBe(true);
   });
 
   it.each(SECRET_FIXTURES)('every unit of finalize(redact($category)) is secret-free', (f) => {
