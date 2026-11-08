@@ -132,6 +132,6 @@ Ninguno: las dependencias de la web y Playwright ya se agregaron (commit `7b73fb
 | C10 `demo-ux-polish` | `34ae9cc` | PASS (2 rondas) |
 | C11 `ci-and-security-followups` | `a852df3` | PASS (2 rondas) |
 | C12 `governance-insights` | `54fdf6f` | PASS (2 rondas) |
-| C13 `search-explorer-and-history` | (este commit) | PASS (2 rondas) |
+| C13 `search-explorer-and-history` | `5a246f8` | PASS (2 rondas) |
 
 Los reportes completos (propuesta, specs, design, tasks, apply-progress, verify y archive) están en `openspec/changes/archive/`. Las specs vigentes están en `openspec/specs/`.
