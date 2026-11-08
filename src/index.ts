@@ -253,8 +253,10 @@ const lifecycleService = new LifecycleService({
 
 // --- 5l''. Direct memory management (C5, HU-13): browse, preview, confirm add/amend.
 // Same judge, routing object and PromoteService as promotion (human-approved mode). ---
+// One instance shared with AppServices (search explorer repo check, C13).
+const memoryAdminRepository = new PgMemoryAdminRepository(pool);
 const directMemoryService = new DirectMemoryService({
-  memoryAdminRepository: new PgMemoryAdminRepository(pool),
+  memoryAdminRepository,
   stagingRepository,
   promotionRepository,
   promoteService,
@@ -284,6 +286,7 @@ const services: AppServices = {
   directMemoryService,
   adminSummaryRepository: new PgAdminSummaryRepository(pool), // C7 read-only admin view
   insightsRepository: new PgInsightsRepository(pool), // C12 read-only governance insights
+  memoryAdminRepository, // C13 search explorer repo boost check
 };
 
 // --- 5m. Internal jobs (/internal/jobs): enabled anywhere a JOBS_TOKEN is

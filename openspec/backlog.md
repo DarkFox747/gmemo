@@ -130,3 +130,4 @@ Deferred work items, ordered. Promote to a `/sdd-new <name>` change when ready.
 9. ✅ `openspec/project-map.yaml` fully refreshed (sdd-map-refresh, commit anchor set). Wrong node:test/npm tests area removed; web area context installed locally (`packages/web/CLAUDE.md` + `packages/web/.claude/skills/web-area/SKILL.md`, area-lint ok, gitignored).
 10. `secret_assignment` tolerate JSON quoting; JWT detector cost on dot-less input; digest-pin the CI pgvector image (from C11 verify).
 11. Mask quarantine titles in the quarantine API; explicit pg pool `max` + `statement_timeout`; tab a11y (`aria-controls`) in Memory/Staging screens (from C12 verify).
+12. Per-actor rate limit or query-embedding cache for `/api/v1/.../search` with a paid embedder (from C13 verify).

@@ -31,6 +31,7 @@ import type { LifecycleServiceLike } from '../lifecycle/types.js';
 import type { DirectMemoryServiceLike } from '../memory/types.js';
 import type { AdminSummaryRepository } from '../db/adminSummaryRepository.js';
 import type { InsightsRepository } from '../db/insightsRepository.js';
+import type { MemoryAdminRepository } from '../db/memoryAdminRepository.js';
 
 // ---------------------------------------------------------------------------
 // Core identity / context types
@@ -134,7 +135,9 @@ export type ApiAction =
   /** C12 read-only governance insights. */
   | 'dashboard.read'
   | 'activity.list'
-  | 'staging.list';
+  | 'staging.list'
+  /** C13 read-only search explorer ("Buscar como agente"); query stored as its hash. */
+  | 'memories.search';
 
 /** Audit detail for REST actions - ids and counters only, never titles, bodies or reasons. */
 export interface ApiAuditDetail {
@@ -372,6 +375,8 @@ export interface AppServices extends AuthServices {
   adminSummaryRepository: AdminSummaryRepository;
   /** Read-only governance insights (C12) — consumed by the /api insights routes. */
   insightsRepository: InsightsRepository;
+  /** Project repo lookup (C13): validates the search explorer's optional repo boost. */
+  memoryAdminRepository: Pick<MemoryAdminRepository, 'findProjectRepoId'>;
 }
 
 /**

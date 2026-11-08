@@ -69,6 +69,49 @@ describe('fuseRrf', () => {
   });
 });
 
+describe('fuseRrf rank provenance', () => {
+  it('spec scenario: A lex 1st + sem 3rd, B lex 2nd only — ranks recorded, order and scores unchanged', () => {
+    const A = row('a');
+    const B = row('b');
+    const C = row('c');
+    const F = row('f');
+
+    const fused = fuseRrf([A, B], [C, F, A]);
+
+    expect(fused.map((f) => f.row.id)).toEqual(['a', 'c', 'b', 'f']);
+    const byId = new Map(fused.map((f) => [f.row.id, f]));
+    expect(byId.get('a')).toMatchObject({ lexicalRank: 1, semanticRank: 3 });
+    expect(byId.get('b')).toMatchObject({ lexicalRank: 2, semanticRank: null });
+    expect(byId.get('c')).toMatchObject({ lexicalRank: null, semanticRank: 1 });
+    expect(byId.get('f')).toMatchObject({ lexicalRank: null, semanticRank: 2 });
+    expect(byId.get('a')!.score).toBeCloseTo(1 / 61 + 1 / 63, 12);
+  });
+
+  it('a row in both lists gets both 1-based ranks', () => {
+    const fused = fuseRrf([row('a'), row('b')], [row('b'), row('a')]);
+    const byId = new Map(fused.map((f) => [f.row.id, f]));
+    expect(byId.get('a')).toMatchObject({ lexicalRank: 1, semanticRank: 2 });
+    expect(byId.get('b')).toMatchObject({ lexicalRank: 2, semanticRank: 1 });
+  });
+
+  it('semantic ranks are null when the semantic list is empty', () => {
+    const fused = fuseRrf([row('a'), row('b')], []);
+    expect(fused.map((f) => [f.lexicalRank, f.semanticRank])).toEqual([
+      [1, null],
+      [2, null],
+    ]);
+  });
+
+  it('prioritizeRepo preserves the recorded ranks', () => {
+    const fused = fuseRrf([row('a', 'other'), row('b', 'mine')], [row('b', 'mine')]);
+    const out = prioritizeRepo(fused, 'mine');
+    expect(out.map((f) => [f.row.id, f.lexicalRank, f.semanticRank])).toEqual([
+      ['b', 2, 1],
+      ['a', 1, null],
+    ]);
+  });
+});
+
 describe('prioritizeRepo', () => {
   it('moves query-repo rows first, keeping relative order inside each group (stable)', () => {
     const fused = fuseRrf(

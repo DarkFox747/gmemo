@@ -7,6 +7,11 @@
  *   - fused with score = Σ 1/(60 + rank), ties broken by memory id (src/search/rrf.ts);
  *   - with scope=project the query's repo comes first (HU-08.3), then the rest.
  *
+ * Ranking (both candidate lists, fusion, repo priority, fail-soft semantic side)
+ * lives in rankActiveMemories (src/search/hybridSearch.ts) — the one search path
+ * shared with the web search explorer. This handler ignores its `semantic` flag
+ * and the rank-provenance fields.
+ *
  * Fail-soft: if embedding or the semantic query fails, the lexical list alone is
  * used and a warning is logged (error name only — never the query text).
  *
@@ -26,16 +31,9 @@
 import type { MemoryRecord } from '../../contracts/memory.js';
 import type { RecallRequest, RecallResponse } from '../../contracts/tools.js';
 import type { RequestContext, HandlerDeps } from '../context.js';
-import type { MemoryRow } from '../../db/memoryRepository.js';
 import { toMemoryRecord, toStagedRecord } from '../memoryMapper.js';
-import {
-  fuseRrf,
-  prioritizeRepo,
-  encodeOffsetCursor,
-  decodeOffsetCursor,
-  RRF_CANDIDATES,
-} from '../../search/rrf.js';
-import { logger } from '../../observability/logger.js';
+import { encodeOffsetCursor, decodeOffsetCursor } from '../../search/rrf.js';
+import { rankActiveMemories } from '../../search/hybridSearch.js';
 
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 8;
@@ -54,17 +52,11 @@ export async function recallHandler(
   // (an empty [] would match zero rows in SQL: m.type = ANY([])).
   const types = input.types && input.types.length ? input.types : undefined;
 
-  const [lexical, semantic] = await Promise.all([
-    deps.memoryRepository.recallLexicalCandidates(
-      ctx.tenant,
-      { query: input.query, scope, types },
-      RRF_CANDIDATES,
-    ),
-    recallSemanticFailSoft(input.query, scope, types, ctx, deps),
-  ]);
-
-  const fused = fuseRrf(lexical, semantic);
-  const ranked = scope === 'project' ? prioritizeRepo(fused, ctx.tenant.repoId) : fused;
+  const { ranked } = await rankActiveMemories(deps, ctx.tenant, {
+    query: input.query,
+    scope,
+    types,
+  });
 
   const page = ranked.slice(offset, offset + limit);
   const nextOffset = offset + limit;
@@ -83,28 +75,4 @@ export async function recallHandler(
     total_matches: ranked.length,
     cursor: nextOffset < ranked.length ? encodeOffsetCursor(nextOffset) : null,
   };
-}
-
-/** Semantic candidate list; any failure degrades to an empty list plus a warning. */
-async function recallSemanticFailSoft(
-  query: string,
-  scope: 'repo' | 'project',
-  types: RecallRequest['types'],
-  ctx: RequestContext,
-  deps: HandlerDeps,
-): Promise<MemoryRow[]> {
-  try {
-    const queryEmbedding = await deps.embedder.embed(query);
-    return await deps.memoryRepository.recallSemantic(
-      ctx.tenant,
-      queryEmbedding,
-      { scope, types },
-      [],
-      RRF_CANDIDATES,
-    );
-  } catch (err) {
-    const errorName = err instanceof Error ? err.name : 'UnknownError';
-    logger.warn(`[recall] semantic side failed (${errorName}) — returning lexical-only`);
-    return [];
-  }
 }

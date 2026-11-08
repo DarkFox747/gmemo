@@ -1,33 +1,11 @@
 import type { MemoryRefDto } from '../api/types';
 import { addedSide, removedSide, wordDiff } from '../lib/wordDiff';
 import type { DiffSegment } from '../lib/wordDiff';
+import { DiffSegments } from './DiffSegments';
 
 interface Proposal {
   title: string;
   summary: string;
-}
-
-/** Segments as text nodes; changed words get a class, never markup from the server. */
-function Segments({ segs }: { segs: DiffSegment[] }) {
-  return (
-    <>
-      {segs.map((s, i) => (
-        <span key={i}>
-          {i > 0 && ' '}
-          {s.kind === 'same' ? (
-            s.text
-          ) : (
-            <mark className={`diff--${s.kind}`}>
-              {s.text}
-              <span className="visually-hidden">
-                {s.kind === 'added' ? ' (añadido)' : ' (eliminado)'}
-              </span>
-            </mark>
-          )}
-        </span>
-      ))}
-    </>
-  );
 }
 
 function Field({ label, segs }: { label: string; segs: DiffSegment[] }) {
@@ -35,7 +13,7 @@ function Field({ label, segs }: { label: string; segs: DiffSegment[] }) {
     <>
       <h4 className="section__label">{label}</h4>
       <p className="compare__text">
-        <Segments segs={segs} />
+        <DiffSegments segs={segs} />
       </p>
     </>
   );

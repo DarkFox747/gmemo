@@ -27,17 +27,18 @@
 | HU-05 Validación (formato, credenciales, instrucciones, datos personales) | Completa | `src/promote/sanitize.ts`, `src/security/{secretScan,injectionScan,piiMask,secretRedact}.ts` | `tests/promote/sanitize.test.ts`, `tests/security/*` |
 | HU-06 Juez (1–6, Tabla 3) | Completa | `src/judge/*`, `src/promote/routing.ts` | `tests/promote/promoteVerdict.test.ts`, `tests/judge/*` |
 | HU-07 Revisión humana (1–5) | Completa | `/api/v1/projects/:id/review-queue[/:itemId[/approve\|/reject]]` · pantallas Cola y Detalle | `tests/http/api/reviewQueue.test.ts`, `tests/db/review*.integration.test.ts` |
-| HU-08 Búsqueda híbrida (1–5) | Completa | tool `recall` · `src/search/rrf.ts` | `tests/mcp/recallRrf.test.ts`, `tests/search/rrf.test.ts` |
+| HU-08 Búsqueda híbrida (1–5) | Completa | tool `recall` · `src/search/{hybridSearch,rrf}.ts` · `GET /api/v1/projects/:id/search` · pantalla Buscar como agente (rango léxico, semántico y puntaje RRF) | `tests/mcp/recallRrf.test.ts`, `tests/search/*`, `tests/http/api/searchRoutes.test.ts`, `tests/db/searchExplorer.integration.test.ts` (paridad con `recall`) |
 | HU-09 Contexto inicial | Completa | tool `get_context` (solo activas) | `tests/memory/*`, `tests/db/statusExclusion.integration.test.ts` |
 | HU-10 Cuarentena (1–4) | Completa | `/api/v1/projects/:id/quarantine[/:id[/restore]]` · `/internal/jobs/quarantine-purge` · pantalla Cuarentena | `tests/db/{restore,secretNeverPersisted,quarantineRepository}.integration.test.ts` |
-| HU-11.1/.2 Corrección y reemplazo | Completa | aplicación de las 4 operaciones · `applyOpInTxn` | `tests/db/promotion.integration.test.ts` |
+| HU-11.1/.2 Corrección y reemplazo | Completa | aplicación de las 4 operaciones · `applyOpInTxn` · Comparar versiones (diff entre revisiones) en el detalle de memoria | `tests/db/promotion.integration.test.ts`, `packages/web/src/lib/revisionDiff.test.ts` |
 | HU-11.3 Revisión desactualizada → revisión humana | Completa | `stale_target` + `mandatory_review` | `tests/promote/promoteVerdict.test.ts`, `tests/staging/remember.test.ts` |
 | HU-11.4 Retiro en bloque por PR | Completa | `POST /api/v1/projects/:id/memories/retire-by-pr` · pantalla Memoria | `tests/db/lifecycle.integration.test.ts` |
 | HU-12 Revalidación (1–4) | Completa | `/internal/jobs/revalidation-sweep`, `confirm`, `retire` · pestaña Pendientes | `tests/db/lifecycle*.test.ts`, `tests/jobs/revalidationJob.test.ts` |
 | HU-13 Gestión directa (1–5) | Completa | `/api/v1/projects/:id/memories` (list, detail, preview, POST, PUT) · pantalla Memoria del proyecto | `tests/db/directMemory.integration.test.ts`, `tests/http/api/directMemory.test.ts` |
 | Permisos (Tabla 44) | Completa | `authorizeProjectAdmin` / `authorizeProjectMember`, 404 uniforme | `tests/http/api/*permissions*.test.ts`, `tests/auth/*` |
-| TT-06 Métricas | Completa (sintéticas) | `pnpm eval` → `docs/demo/metricas.md` | `tests/eval/metrics.test.ts` |
-| TT-08 Web de gobierno | Completa | `packages/web` (5 pantallas, Figuras 12–16) | `packages/web/src/**/*.test.ts` + recorridos Playwright |
+| TT-06 Métricas | Completa (sintéticas + en vivo) | `pnpm eval` → `docs/demo/metricas.md`; panel Inicio con falsos positivos y negativos del juez calculados con las etiquetas humanas guardadas (`GET /api/v1/projects/:id/dashboard`) | `tests/eval/metrics.test.ts`, `tests/db/insights*.test.ts` |
+| TT-08 Web de gobierno | Completa | `packages/web`: las 5 pantallas de las Figuras 12–16 más Inicio, Actividad (auditoría), Área de preparación y Buscar como agente; actualización en vivo, atajos con confirmación y comparación con la unidad relacionada | `packages/web/src/**/*.test.ts` + capturas Playwright |
+| Auditoría (Tabla 44, trazabilidad) | Completa | toda escritura REST registra su fila de `access_log` en la misma transacción (C11); pantalla Actividad | `tests/db/apiAuditAtomic.integration.test.ts`, `tests/http/api/insights.test.ts` |
 
 ## 3. Divergencias con el documento
 
@@ -71,14 +72,15 @@
 
 | Métrica | Valor |
 |---|---|
-| Tests totales (suite con DB) | **1973** (0 fallas) |
-| Tests unitarios (sin DB) | 1684 |
-| Tests de integración con DB | 289 |
-| Migraciones SQL | 10 (`0001`–`0010`) |
+| Tests totales (suite con DB) | **2297** (0 fallas) |
+| Tests unitarios (sin DB) | 1963 |
+| Tests de integración con DB | 334 |
+| Migraciones SQL | 11 (`0001`–`0011`) |
 | Tools MCP | 6 (`recall`, `get_memory`, `get_context`, `remember`, `list_staged`, `discard_staged`) |
-| Endpoints REST `/api/v1` | 17 |
+| Endpoints REST `/api/v1` | 21 |
 | Otros endpoints | `POST /promote`, `GET /health`, `POST /internal/jobs/:job` (3 jobs) |
-| Pantallas web | 5 (Cola de revisión, Detalle, Cuarentena, Memoria del proyecto, Administración) + vistas de detalle y formulario |
+| Pantallas web | 9 (Inicio, Cola de revisión, Detalle, Área de preparación, Memoria del proyecto, Buscar como agente, Cuarentena, Actividad, Administración) + vistas de detalle y formulario |
+| CI | `.github/workflows/ci.yml`: lint, build, web y suite completa con Postgres + pgvector |
 | Smoke (`pnpm smoke`) | 20 pasos |
 | Guion E2E (`pnpm demo`) | 35 verificaciones |
 
@@ -97,8 +99,8 @@ Juez determinista: tasa de falsos positivos 0,300 (3/10) y de falsos negativos 0
 
 Ver **[`docs/demo/INSTRUCTIVO.md`](INSTRUCTIVO.md)**. El resumen:
 1. `docker compose up --build`.
-2. Abrir http://localhost:3000/, elegir el usuario "Líder técnico" y recorrer las 5 pantallas. Las capturas están en [`docs/demo/capturas/`](capturas/).
-3. `pnpm demo` (requiere Node 22 y pnpm 9) para el ciclo E2E guiado.
+2. Abrir http://localhost:3000/ (entra en Inicio), elegir el usuario "Líder técnico" y recorrer las pantallas. Las capturas están en [`docs/demo/capturas/`](capturas/).
+3. `pnpm demo` (requiere Node 22 y pnpm 9) para el ciclo E2E guiado; `pnpm demo:promote -- --branch <rama> --pr <n>` para promover lo que dejó un agente y `pnpm demo:reset` para volver a cero.
 4. Opcional: conectar un agente real con [`docs/demo/mcp-local.example.json`](mcp-local.example.json).
 
 ## 7. Comandos `pnpm add` pendientes
@@ -110,7 +112,6 @@ Ninguno: las dependencias de la web y Playwright ya se agregaron (commit `7b73fb
 - `.env.example`: tiene una edición local accidental; revertir con `git checkout -- .env.example`.
 - Revisar a mano los PNG de `docs/artefactos/` por si tienen identificadores embebidos.
 - Antes de cualquier deploy: renombrar en GitHub las variables `LPMS_*` a `GMEMO_*` y apuntar `AWS_ROLE_ARN` al rol renombrado.
-- Opcional: contexto de área para `packages/web`. El contenido está preparado; escribirlo bajo `.claude/` fue rechazado por el sistema de permisos como auto-modificación.
 
 ## 8. Changes archivados
 
@@ -128,5 +129,9 @@ Ninguno: las dependencias de la web y Playwright ya se agregaron (commit `7b73fb
 | C8 `demo-kit` | `85f65c4`, `aae5ba4` | PASS (2 rondas) |
 | C7 `governance-web` | `bbd5417` | PASS |
 | C9 `feature-branch-promotion` | `5769291` | PASS (2 rondas) |
+| C10 `demo-ux-polish` | `34ae9cc` | PASS (2 rondas) |
+| C11 `ci-and-security-followups` | `a852df3` | PASS (2 rondas) |
+| C12 `governance-insights` | `54fdf6f` | PASS (2 rondas) |
+| C13 `search-explorer-and-history` | (este commit) | PASS (2 rondas) |
 
 Los reportes completos (propuesta, specs, design, tasks, apply-progress, verify y archive) están en `openspec/changes/archive/`. Las specs vigentes están en `openspec/specs/`.

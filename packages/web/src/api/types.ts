@@ -529,3 +529,31 @@ export interface StagingOverviewDto {
   sessions: StagingSessionDto[];
   truncated: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Search explorer (C13, read-only): "Buscar como agente"
+// ---------------------------------------------------------------------------
+
+export interface SearchResultDto {
+  /** 1-based position in the returned order (after repo priority). */
+  position: number;
+  id: string;
+  type: MemoryType;
+  title: string;
+  summary: string;
+  repoId: string | null;
+  version: number;
+  updatedAt: string;
+  /** RRF fused score Σ 1/(60 + rank). */
+  score: number;
+  lexicalRank: number | null;
+  semanticRank: number | null;
+}
+
+export interface SearchResponseDto {
+  items: SearchResultDto[];
+  totalCandidates: number;
+  semantic: 'ok' | 'unavailable';
+  /** Repo whose memories were prioritized; null = no boost. */
+  repoId: string | null;
+}

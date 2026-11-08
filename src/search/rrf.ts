@@ -17,11 +17,17 @@ export const RRF_CANDIDATES = 50;
 export interface FusedCandidate<T> {
   row: T;
   score: number;
+  /** 1-based position in the lexical list; null when absent. */
+  lexicalRank: number | null;
+  /** 1-based position in the semantic list; null when absent (or semantic side unavailable). */
+  semanticRank: number | null;
 }
 
 /**
  * Fuses two ranked lists. A row present in both lists accumulates both terms.
  * Equal scores are ordered by memory id (ascending) so the result is deterministic.
+ * Each candidate also records its 1-based rank in each list (rank provenance);
+ * recording it does not affect the score or the order.
  */
 export function fuseRrf<T extends { id: string }>(
   lexical: readonly T[],
@@ -31,14 +37,28 @@ export function fuseRrf<T extends { id: string }>(
   const k = opts.k ?? RRF_K;
   const byId = new Map<string, FusedCandidate<T>>();
 
-  for (const list of [lexical, semantic]) {
+  const passes = [
+    { list: lexical, rankKey: 'lexicalRank' },
+    { list: semantic, rankKey: 'semanticRank' },
+  ] as const;
+
+  for (const { list, rankKey } of passes) {
     list.forEach((row, index) => {
-      const term = 1 / (k + index + 1); // index + 1 = 1-based rank
+      const rank = index + 1; // 1-based rank
+      const term = 1 / (k + index + 1);
       const existing = byId.get(row.id);
       if (existing) {
         existing.score += term;
+        existing[rankKey] ??= rank; // first (best) position in this list
       } else {
-        byId.set(row.id, { row, score: term });
+        const created: FusedCandidate<T> = {
+          row,
+          score: term,
+          lexicalRank: null,
+          semanticRank: null,
+        };
+        created[rankKey] = rank;
+        byId.set(row.id, created);
       }
     });
   }

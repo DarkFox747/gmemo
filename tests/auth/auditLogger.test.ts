@@ -298,6 +298,7 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
     ['memory.preview', 'read'],
     ['memory.create', 'update'],
     ['memory.amend', 'update'],
+    ['memories.search', 'read'],
   ])('maps %s to access_log action "%s"', async (action, expected) => {
     await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, action);
 
@@ -305,6 +306,19 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
     expect(repo.accessLogEntries[0].action).toBe(expected);
     expect(repo.accessLogEntries[0].actorKind).toBe('user');
     expect(repo.accessLogEntries[0].actorIdentity).toBe('tl-sub');
+  });
+
+  it('memories.search stores queryHash in query_hash, not in detail', async () => {
+    const queryHash = sha256Hex('retry policy');
+    await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, 'memories.search', {
+      resultCount: 3,
+      queryHash,
+    });
+
+    const entry = repo.accessLogEntries[0];
+    expect(entry.action).toBe('read');
+    expect(entry.queryHash).toBe(queryHash);
+    expect(entry.detail).toEqual({ api: 'memories.search', userId: 'u-tl', resultCount: 3 });
   });
 
   it('stores project_id null for me.read (no project)', async () => {
@@ -363,10 +377,11 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
     const detail = { itemId: 'item-1', memoryId: 'mem-1', decision: 'approved' as const };
     await logger.recordApi(ADMIN, { projectId: PROJECT_ID }, 'review_queue.approve', detail);
     const client = FAKE_TXN;
-    await logger.apiWriteAudit(ADMIN, { projectId: PROJECT_ID }, 'review_queue.approve')(
-      client,
-      { ...detail, title: 'secret title' } as unknown as typeof detail,
-    );
+    await logger.apiWriteAudit(
+      ADMIN,
+      { projectId: PROJECT_ID },
+      'review_queue.approve',
+    )(client, { ...detail, title: 'secret title' } as unknown as typeof detail);
 
     expect(seen).toEqual([undefined, client]);
     expect(repo.accessLogEntries).toHaveLength(2);
@@ -377,7 +392,11 @@ describe('RdsAuditLogger — recordApi (REST)', () => {
   it('C11 apiWriteAudit propagates an insert failure (the caller rolls back)', async () => {
     repo.insertAccessLog = () => Promise.reject(new Error('db down'));
     await expect(
-      logger.apiWriteAudit(ADMIN, { projectId: PROJECT_ID }, 'memory.retire')(FAKE_TXN, {
+      logger.apiWriteAudit(
+        ADMIN,
+        { projectId: PROJECT_ID },
+        'memory.retire',
+      )(FAKE_TXN, {
         memoryId: 'mem-1',
       }),
     ).rejects.toThrow('db down');
@@ -448,7 +467,12 @@ describe('RdsAuditLogger — recordApi C5 detail (direct memory management)', ()
     });
     const entry = repo.accessLogEntries[0];
     expect(entry.queryHash).toBe('a'.repeat(64));
-    expect(entry.detail).toEqual({ api: 'memories.list', userId: 'u-tl', status: 'active', resultCount: 1 });
+    expect(entry.detail).toEqual({
+      api: 'memories.list',
+      userId: 'u-tl',
+      status: 'active',
+      resultCount: 1,
+    });
   });
 
   it('keeps previewOutcome/ids/counters; never titles, bodies or judge text', async () => {
@@ -477,7 +501,13 @@ describe('RdsAuditLogger — recordApi C5 detail (direct memory management)', ()
     expect(repo.accessLogEntries[1]).toMatchObject({
       action: 'update',
       memoryId: 'm-1',
-      detail: { api: 'memory.create', memoryId: 'm-1', itemId: 'i-1', outcome: 'applied', deduped: false },
+      detail: {
+        api: 'memory.create',
+        memoryId: 'm-1',
+        itemId: 'i-1',
+        outcome: 'applied',
+        deduped: false,
+      },
     });
   });
 });
@@ -486,7 +516,12 @@ describe('RdsAuditLogger — recordJob', () => {
   it('writes one system/admin row with a null project and counts only', async () => {
     const repo = new InMemoryAuthRepository();
     const logger = new RdsAuditLogger(repo);
-    await logger.recordJob({ job: 'quarantine-purge', count: 3, detail: { p1: 2, p2: 1 }, trigger: 'http' });
+    await logger.recordJob({
+      job: 'quarantine-purge',
+      count: 3,
+      detail: { p1: 2, p2: 1 },
+      trigger: 'http',
+    });
     expect(repo.accessLogEntries).toEqual([
       {
         actorIdentity: 'jobs:http',
@@ -500,7 +535,11 @@ describe('RdsAuditLogger — recordJob', () => {
 
   it('omits detail when absent (script trigger)', async () => {
     const repo = new InMemoryAuthRepository();
-    await new RdsAuditLogger(repo).recordJob({ job: 'quarantine-purge', count: 0, trigger: 'script' });
+    await new RdsAuditLogger(repo).recordJob({
+      job: 'quarantine-purge',
+      count: 0,
+      trigger: 'script',
+    });
     expect(repo.accessLogEntries[0]).toMatchObject({
       actorIdentity: 'jobs:script',
       detail: { job: 'quarantine-purge', count: 0, trigger: 'script' },

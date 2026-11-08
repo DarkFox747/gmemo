@@ -6,7 +6,7 @@ generated: 2026-11-08T16:00:00Z
 generated_commit: 5769291bedc6522ab3266366722d741d6a54a844
 
 project: gmemo
-stage: demo-e4-complete   # C0–C9 archived on demo/e4; full governed loop runs locally (docker compose)
+stage: demo-e4-complete   # C0–C13 archived on demo/e4; full governed loop runs locally (docker compose)
 summary: >-
   Shared, governed memory for software-development agents, exposed through one MCP
   facade (POST /mcp). Agents READ (recall, get_memory, get_context) and PROPOSE
@@ -49,9 +49,9 @@ modules:
     test_paths: [tests/http/]
   - name: http-api
     path: src/http/api/
-    description: REST /api/v1 for the governance web — noStore → apiAuth → me → projectMember (quarantine) → projectAdmin (review, memories, admin); uniform opaque 404; apiErrorHandler.
+    description: REST /api/v1 for the governance web — noStore → apiAuth → me → projectMember (quarantine) → projectAdmin (review, memories, admin, insights dashboard/activity/staging, search explorer); uniform opaque 404; apiErrorHandler; REST writes audited inside the write txn (TxnAudit hook).
     language: TypeScript
-    entry_points: [src/http/api/router.ts, src/http/api/apiAuth.ts, src/http/api/types.ts, src/http/api/memoryRoutes.ts, src/http/api/errorHandler.ts]
+    entry_points: [src/http/api/router.ts, src/http/api/apiAuth.ts, src/http/api/types.ts, src/http/api/memoryRoutes.ts, src/http/api/insightsRoutes.ts, src/http/api/searchRoutes.ts, src/http/api/errorHandler.ts]
     test_paths: [tests/http/api/]
   - name: mcp
     path: src/mcp/
@@ -85,9 +85,9 @@ modules:
     test_paths: [tests/embedder/]
   - name: search
     path: src/search/
-    description: Reciprocal Rank Fusion (k=60) of BM25 (time-decay) and pgvector candidates; offset cursor.
+    description: Single ranking path rankActiveMemories (hybridSearch.ts) shared by MCP recall and the web explorer — Reciprocal Rank Fusion (k=60) of BM25 (time-decay) and pgvector candidates with lexical/semantic rank provenance; fail-soft semantic side.
     language: TypeScript
-    entry_points: [src/search/rrf.ts]
+    entry_points: [src/search/hybridSearch.ts, src/search/rrf.ts]
     test_paths: [tests/search/]
   - name: security
     path: src/security/
@@ -133,7 +133,7 @@ modules:
     test_paths: [tests/config/, tests/notify/]
   - name: web
     path: packages/web/
-    description: Governance web (@gmemo/web) — React 19 + Vite 8 + TS, hash routes, typed fetch client, plain CSS tokens, Spanish labels; 5 screens (review queue/detail, quarantine, project memory, admin).
+    description: Governance web (@gmemo/web) — React 19 + Vite 8 + TS, hash routes, typed fetch client, plain CSS tokens, Spanish labels; 9 screens (Inicio default, review queue/detail, staging, project memory + revision diff, search explorer, quarantine, activity, admin); 5 s polling of queue/quarantine/badges; arm-and-confirm review shortcuts.
     language: TypeScript (React)
     entry_points: [packages/web/src/main.tsx, packages/web/src/App.tsx, packages/web/src/api/client.ts, packages/web/src/lib/labels.ts]
     test_paths: [packages/web/src/]
@@ -145,7 +145,7 @@ modules:
       skill: packages/web/.claude/skills/web-area/SKILL.md   # + packages/web/CLAUDE.md (both local, gitignored)
   - name: migrations
     path: migrations/
-    description: Ordered idempotent SQL 0001–0010 (+ seed.dev.sql, dev only) applied by src/db/migrate.ts.
+    description: Ordered idempotent SQL 0001–0011 (+ seed.dev.sql, dev only) applied by src/db/migrate.ts; 0011 = partial access_log indexes for the activity feed.
     language: SQL
     entry_points: [migrations/0001_auth_tenancy.sql, migrations/seed.dev.sql]
     test_paths: [tests/db/]
@@ -163,9 +163,9 @@ modules:
     test_paths: []
   - name: ci
     path: .github/workflows/
-    description: deploy.yml (ECR build + ECS roll on push to main, no test gate); promote.yml (OIDC; push → resolves merged PR → POST /promote; PR closed unmerged → discard).
+    description: ci.yml (PR + push to main — lint, build, web typecheck/build, full suite with pgvector service; pinned actions); deploy.yml (ECR build + ECS roll on push to main, not gated on ci); promote.yml (OIDC; push → resolves merged PR → POST /promote; PR closed unmerged → discard).
     language: YAML
-    entry_points: [.github/workflows/promote.yml, .github/workflows/deploy.yml]
+    entry_points: [.github/workflows/ci.yml, .github/workflows/promote.yml, .github/workflows/deploy.yml]
     test_paths: []
   - name: docs
     path: docs/
@@ -214,9 +214,9 @@ testing:
     tests/globalSetup.ts DROPS schema public of the DATABASE_URL db (guarded: local host + db 'gmemo')
     → after a DB run, rebuild the demo: docker compose down -v && docker compose up --build -d --wait.
   e2e: "pnpm smoke (20 steps) and pnpm demo (E2E script) against the running compose stack; pnpm eval writes docs/demo/metricas.md"
-  counts_at_generated_commit: {total: 1973, unit: 1684, db: 289}
+  counts_at_generated_commit: {total: 2297, unit: 1963, db: 334}
   coverage: {tool: null, threshold: null}
-  ci: none (no workflow runs tests)
+  ci: .github/workflows/ci.yml runs `pnpm exec vitest run` with a pgvector service
   area_context: null   # wrong node:test/npm tests area removed 2026-11-08; conventions above are authoritative
 
 # --- Conventions ---
@@ -253,7 +253,7 @@ api_surface:
       GET /me; GET /projects/:id/quarantine[/:qid] (member: admin all, others own); POST …/quarantine/:qid/restore;
       GET …/review-queue[/:itemId]; POST …/review-queue/:itemId/approve|reject; GET|POST …/memories;
       POST …/memories/preview; POST …/memories/retire-by-pr; GET|PUT …/memories/:mid; POST …/memories/:mid/confirm|retire;
-      GET …/admin-summary. 17 endpoints; 400/401/404/409/503 vocabulary.
+      GET …/admin-summary; GET …/dashboard, …/activity, …/staging (insights); GET …/search (explorer). 21 endpoints; 400/401/404/409/503 vocabulary.
     auth: "Gate 1 (dev: X-Dev-User only under AUTH_DEV_BYPASS, non-prod) + projectMember / projectAdmin"
   - name: Promotion
     type: REST
@@ -297,5 +297,5 @@ open_decisions:
     - Cognito PKCE login for the web (demo uses X-Dev-User); SES notifications (logNotifier); SQS/EventBridge (in-process + /internal/jobs).
     - Layer 2 code graph (graph tools advertised in the contract, not implemented); cross-link Layer1↔Layer2.
     - "Facade contract v1 RBAC table omits project_admin for write tools (code admits it); contract does not cover /api/v1, /promote, jobs."
-    - No CI test gate before deploy.yml; Dockerfile RDS CA bundle fetched without hash pin.
+    - deploy.yml not gated on ci.yml; Dockerfile RDS CA bundle fetched without hash pin.
   follow_ups: openspec/backlog.md (Entrega 4 section)

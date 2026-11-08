@@ -2,13 +2,14 @@ import { useId, useState } from 'react';
 import { ApiError, errorMessage } from '../api/client';
 import type { MemoryDetailDto } from '../api/types';
 import { RetireDialog } from '../components/RetireDialog';
+import { RevisionDiff } from '../components/RevisionDiff';
 import { StatusChip, TypeChip } from '../components/Chip';
 import { FieldsView } from '../components/FieldsView';
 import { ErrorMessage, Loading, NoAccess } from '../components/StateViews';
 import { useToast } from '../components/Toast';
 import { formatDate, formatDateTime, formatOrigin } from '../lib/format';
 import { buildHash } from '../lib/hashRoute';
-import { opLabel, provenanceLabel } from '../lib/labels';
+import { REVISION_DIFF, opLabel, provenanceLabel } from '../lib/labels';
 import { useAsync } from '../lib/useAsync';
 import type { ScreenProps } from './types';
 
@@ -224,6 +225,15 @@ function Detail({
           </section>
         </div>
       </div>
+      {m.revisions.length >= 2 && (
+        <section className="card revision-diff__card" aria-labelledby={`${id}-diff`}>
+          <h2 id={`${id}-diff`} className="card__title">
+            {REVISION_DIFF.title}
+          </h2>
+          {/* Remount after a reload so the default pair follows the new current version. */}
+          <RevisionDiff key={m.version} revisions={m.revisions} />
+        </section>
+      )}
       <RetireDialog
         open={retireOpen}
         title={`Retirar «${m.title}»`}

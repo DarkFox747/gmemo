@@ -1,11 +1,13 @@
 /**
- * Screenshots of the web screens (C8, demo-kit §5; insight views C12). Run: pnpm screenshots
+ * Screenshots of the web screens (C8, demo-kit §5; insight views C12; search
+ * explorer and revision diff C13). Run: pnpm screenshots
  *
  * Optional tooling: if Playwright (`@playwright/test`) is not installed or the
  * web build (packages/web/dist, change C7) is missing, it prints why and exits 0.
  * Otherwise it opens WEB_URL (default http://localhost:3000, the compose stack
  * serving the web) as the seeded tech lead and writes 1440x900 PNGs at
- * deviceScaleFactor 2 into docs/demo/capturas/.
+ * deviceScaleFactor 2 into docs/demo/capturas/. Each capture waits until the
+ * screen heading is rendered and no loading view (aria-busy) remains.
  */
 
 import fs from 'node:fs/promises';
@@ -20,6 +22,15 @@ const PROJECT_ID = '00000000-0000-0000-0000-000000000010';
 const TL = 'tl@demo.local';
 /** Seeded uncertain queue item (migrations/seed.dev.sql §10.6), used if the queue is empty. */
 const FALLBACK_ITEM = '00000000-0000-0000-0000-000000000301';
+/** Seeded constraint with three revisions (migrations/seed.dev.sql §10.5): shows the history diff. */
+const HISTORY_MEMORY = '00000000-0000-0000-0000-000000000103';
+/** Query typed into "Buscar como agente"; matches several seeded memories. */
+const SEARCH_QUERY = 'customer notifications';
+/** Browser-side readiness check: heading rendered, no loading view left. */
+const LOADED = `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null`;
+/** An error view on screen means the capture would document a failure, not the feature. */
+const HAS_ALERT = `document.querySelector('main [role="alert"]') !== null`;
+const WAIT_MS = 15_000;
 
 interface Browser {
   newContext(o: {
@@ -34,7 +45,35 @@ interface Context {
 }
 interface Page {
   goto(url: string, o: { waitUntil: 'networkidle' }): Promise<unknown>;
-  screenshot(o: { path: string }): Promise<unknown>;
+  waitForFunction(expression: string, arg?: unknown, o?: { timeout: number }): Promise<unknown>;
+  evaluate(expression: string): Promise<unknown>;
+  waitForSelector(selector: string, o?: { timeout: number }): Promise<unknown>;
+  fill(selector: string, value: string): Promise<void>;
+  click(selector: string): Promise<void>;
+  screenshot(o: { path: string; fullPage?: boolean }): Promise<unknown>;
+}
+
+interface Screen {
+  file: string;
+  hash: string;
+  /** Interaction after the screen loaded (e.g. submit a search). */
+  act?: (page: Page) => Promise<void>;
+  fullPage?: boolean;
+}
+
+/** Types a query into the explorer, submits it and waits for the results region to settle. */
+async function runSearch(page: Page): Promise<void> {
+  // The repo selector is enabled once the admin summary has loaded.
+  await page.waitForSelector('main form[role="search"] select:not([disabled]) >> nth=1', {
+    timeout: WAIT_MS,
+  });
+  await page.fill('main form[role="search"] input[type="search"]', SEARCH_QUERY);
+  await page.click('main form[role="search"] button[type="submit"]');
+  // data-state is set on the results region; the pre-search Empty view is "idle".
+  await page.waitForSelector('main [data-state="ready"], main [data-state="error"]', {
+    timeout: WAIT_MS,
+  });
+  await page.waitForFunction(LOADED, undefined, { timeout: WAIT_MS });
 }
 
 function skip(reason: string): never {
@@ -77,7 +116,7 @@ async function main(): Promise<void> {
   }
 
   const itemId = await firstQueueItem();
-  const screens = [
+  const screens: Screen[] = [
     { file: '1-cola-de-revision.png', hash: '#/review' },
     { file: '2-detalle-de-revision.png', hash: `#/review/${itemId}` },
     { file: '3-cuarentena.png', hash: '#/quarantine' },
@@ -86,6 +125,8 @@ async function main(): Promise<void> {
     { file: '6-inicio.png', hash: '#/home' },
     { file: '7-actividad.png', hash: '#/activity' },
     { file: '8-area-de-preparacion.png', hash: '#/staging' },
+    { file: '9-buscar-como-agente.png', hash: '#/search', act: runSearch },
+    { file: '10-historial-de-versiones.png', hash: `#/memory/${HISTORY_MEMORY}`, fullPage: true },
   ];
 
   await fs.mkdir(OUT_DIR, { recursive: true });
@@ -100,10 +141,30 @@ async function main(): Promise<void> {
       `localStorage.setItem('gmemo.devUser', '${TL}'); localStorage.setItem('gmemo.projectId', '${PROJECT_ID}');`,
     );
     const page = await context.newPage();
+    const failed: string[] = [];
     for (const s of screens) {
-      await page.goto(`${WEB_URL}/${s.hash}`, { waitUntil: 'networkidle' });
-      await page.screenshot({ path: path.join(OUT_DIR, s.file) });
-      console.log(`[screenshots] ${s.file}`);
+      try {
+        // A full load per screen: a hash-only navigation could let the readiness
+        // check pass on the previous screen's heading.
+        await page.goto('about:blank', { waitUntil: 'networkidle' });
+        await page.goto(`${WEB_URL}/${s.hash}`, { waitUntil: 'networkidle' });
+        await page.waitForFunction(LOADED, undefined, { timeout: WAIT_MS });
+        if (s.act) await s.act(page);
+        if (await page.evaluate(HAS_ALERT))
+          throw new Error('an error view (role="alert") is shown');
+        await page.screenshot({ path: path.join(OUT_DIR, s.file), fullPage: s.fullPage ?? false });
+        console.log(`[screenshots] ${s.file}`);
+      } catch (err) {
+        failed.push(s.file);
+        console.error(
+          `[screenshots] FAILED ${s.file}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (failed.length > 0) {
+      process.exitCode = 1;
+      console.error(`[screenshots] ${failed.length} capture(s) failed: ${failed.join(', ')}`);
+      return;
     }
   } finally {
     await browser.close();

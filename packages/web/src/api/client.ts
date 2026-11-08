@@ -40,6 +40,7 @@ import {
   type RetireResponseDto,
   type ReviewItemDetailDto,
   type ReviewQueueListDto,
+  type SearchResponseDto,
   type StagingOverviewDto,
 } from './types';
 
@@ -109,6 +110,10 @@ export interface ApiClient {
     p: string,
     q: { status: 'open' | 'closed'; limit?: number },
   ): Promise<StagingOverviewDto>;
+  search(
+    p: string,
+    q: { q: string; types?: MemoryType[]; limit?: number; repoId?: string },
+  ): Promise<SearchResponseDto>;
 }
 
 type Query = Record<string, string | number | undefined>;
@@ -241,6 +246,16 @@ export function createApiClient(deps: ApiClientDeps): ApiClient {
       ),
     listStaging: (p, q) =>
       request('GET', `${project(p)}/staging${buildQuery({ status: q.status, limit: q.limit })}`),
+    search: (p, q) =>
+      request(
+        'GET',
+        `${project(p)}/search${buildQuery({
+          q: q.q.trim(),
+          types: q.types?.join(','),
+          limit: q.limit,
+          repoId: q.repoId,
+        })}`,
+      ),
   };
 }
 

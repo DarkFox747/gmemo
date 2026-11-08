@@ -202,6 +202,66 @@ export const METRICS = {
   noData: 'sin datos',
 } as const;
 
+/** "Buscar como agente" (search explorer): same search path as the agents' recall. */
+export const SEARCH = {
+  title: 'Buscar como agente',
+  subtitle:
+    'Lo que un agente obtendría de recall para una consulta, y por qué: posición léxica, posición semántica y puntuación combinada.',
+  explanation:
+    'Mismo camino que recall: solo se buscan memorias activas; se excluyen las reemplazadas, las retiradas, las pendientes de revalidación y los borradores en preparación de cada agente.',
+  scoreFormula: 'Puntuación = Σ 1/(60 + rango) sobre la lista léxica y la semántica.',
+  repoHint:
+    'Elige el repositorio del agente para reproducir su orden exacto: sus memorias aparecen primero.',
+  query: 'Consulta',
+  types: 'Tipos',
+  limit: 'Resultados',
+  repo: 'Repositorio del agente',
+  repoNone: 'Ninguno (sin prioridad de repositorio)',
+  repoUnavailable:
+    'No se pudo cargar la lista de repositorios; la búsqueda funciona sin prioridad de repositorio.',
+  submit: 'Buscar',
+  searching: 'Buscando…',
+  prompt: 'Escribe una consulta y pulsa Buscar.',
+  blankQuery: 'Escribe al menos un carácter que no sea un espacio.',
+  empty: 'Sin resultados',
+  semanticUnavailable:
+    'El servicio de embeddings no respondió: los resultados son solo léxicos (sin rango semántico).',
+  caption: 'Resultados de la búsqueda',
+  total: (shown: number, total: number) =>
+    `Se muestran ${shown} de ${total} candidatos combinados.`,
+  cols: {
+    position: '#',
+    title: 'Título',
+    type: 'Tipo',
+    repo: 'Repositorio',
+    score: 'Puntuación',
+    lexical: 'Rango léxico',
+    semantic: 'Rango semántico',
+  },
+  none: '—',
+} as const;
+
+/** Revision history diff in the memory detail. */
+export const REVISION_DIFF = {
+  title: 'Comparar versiones',
+  from: 'Desde la versión',
+  to: 'Hasta la versión',
+  option: (n: number, date: string) => `Versión ${n} · ${date}`,
+  sameVersion: 'Selecciona dos versiones distintas.',
+  version: (n: number) => `Versión ${n}`,
+  titleField: 'Título',
+  summary: 'Resumen',
+  body: 'Desarrollo',
+  type: 'Tipo',
+  fields: 'Campos',
+  noFieldChanges: 'Sin cambios en campos',
+  fieldKind: { added: 'añadido', removed: 'eliminado', changed: 'modificado' },
+  srAdded: '(añadido) ',
+  srRemoved: '(eliminado) ',
+  whitespaceNote:
+    'Comparación palabra a palabra; los saltos de línea no se muestran. El contenido completo está en cada versión.',
+} as const;
+
 export const typeLabel = (t: MemoryType): string => TYPE_LABELS[t];
 export const statusLabel = (s: MemoryStatus): string => STATUS_LABELS[s];
 export const criterionShort = (c: DecisionCriterion): string => CRITERION_SHORT[c];

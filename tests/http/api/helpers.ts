@@ -34,6 +34,7 @@ import {
   ScriptedDirectPromote,
 } from '../../memory/directFakes.js';
 import { FakeJudge } from '../../promote/fakes.js';
+import { InMemoryMemoryRepository } from '../../memory/fakes.js';
 import type { AdminSummaryRepository } from '../../../src/db/adminSummaryRepository.js';
 import type {
   ActivityListDto,
@@ -301,6 +302,10 @@ export function makeApiTestApp(
     }),
     adminSummaryRepository: adminSummaryRepo,
     insightsRepository: insightsRepo,
+    // Search explorer (C13): an empty project by default; search tests override these.
+    memoryRepository: new InMemoryMemoryRepository(),
+    embedder,
+    memoryAdminRepository: direct.adminRepo,
     ...overrides,
   };
 

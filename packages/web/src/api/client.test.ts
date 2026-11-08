@@ -207,6 +207,20 @@ describe('requests', () => {
     ]);
     for (const c of calls) expect(c.init.method).toBe('GET');
   });
+
+  it('search: q trimmed, types joined with ",", empty values omitted', async () => {
+    const { api, calls } = fakeClient({ body: {} });
+    const R = '00000000-0000-0000-0000-000000000501';
+    await api.search(P, { q: '  retry policy ' });
+    await api.search(P, { q: 'retry', types: [], limit: 5 });
+    await api.search(P, { q: 'retry', types: ['decision', 'gotcha'], limit: 8, repoId: R });
+    expect(calls.map((c) => c.url)).toEqual([
+      `/api/v1/projects/${P}/search?q=retry+policy`,
+      `/api/v1/projects/${P}/search?q=retry&limit=5`,
+      `/api/v1/projects/${P}/search?q=retry&types=decision%2Cgotcha&limit=8&repoId=${R}`,
+    ]);
+    for (const c of calls) expect(c.init.method).toBe('GET');
+  });
 });
 
 describe('errors', () => {

@@ -20,7 +20,7 @@ import { adminContext, parseOrInvalid } from './reviewRoutes.js';
 import type { ApiResponse, ApiRouterDeps } from './types.js';
 
 /** Digits only: rejects 1e1, 0x10, ' 5', '-1' and '' that z.coerce.number would accept. */
-const limitParam = (max: number, fallback: number) =>
+export const limitParam = (max: number, fallback: number) =>
   z
     .string()
     .regex(/^[0-9]{1,3}$/)

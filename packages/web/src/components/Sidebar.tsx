@@ -1,12 +1,14 @@
 import type { Route } from '../lib/hashRoute';
 import { buildHash } from '../lib/hashRoute';
+import { SEARCH } from '../lib/labels';
 
 export interface Badges {
   review: number | null;
   quarantine: string | null;
 }
 
-type Section = 'home' | 'review' | 'staging' | 'memory' | 'quarantine' | 'activity' | 'admin';
+type Section =
+  'home' | 'review' | 'staging' | 'memory' | 'search' | 'quarantine' | 'activity' | 'admin';
 
 function sectionOf(r: Route): Section {
   switch (r.name) {
@@ -29,6 +31,8 @@ function sectionOf(r: Route): Section {
       return 'quarantine';
     case 'admin':
       return 'admin';
+    case 'search':
+      return 'search';
   }
 }
 
@@ -37,6 +41,7 @@ const NAV: Array<{ section: Section; label: string; route: Route }> = [
   { section: 'review', label: 'Cola de revisión', route: { name: 'review' } },
   { section: 'staging', label: 'Área de preparación', route: { name: 'staging' } },
   { section: 'memory', label: 'Memoria del proyecto', route: { name: 'memory' } },
+  { section: 'search', label: SEARCH.title, route: { name: 'search' } },
   { section: 'quarantine', label: 'Cuarentena', route: { name: 'quarantine' } },
   { section: 'activity', label: 'Actividad', route: { name: 'activity' } },
   { section: 'admin', label: 'Administración', route: { name: 'admin' } },

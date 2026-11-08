@@ -44,7 +44,7 @@ Compose aplica las migraciones y el seed de desarrollo (servicio `migrate`) y ar
 | API REST de la web | `http://localhost:3000/api/v1` (por ejemplo `/api/v1/me`) |
 | Promoción por merge | `POST http://localhost:3000/promote` |
 | Jobs programados (modo abierto solo en desarrollo) | `POST http://localhost:3000/internal/jobs/revalidation-sweep`, `/quarantine-purge`, `/web-session-reaper` |
-| Web de gobierno (C7) | `http://localhost:3000/` (rutas por hash: `#/home`, `#/review`, `#/staging`, `#/memory`, `#/quarantine`, `#/activity`, `#/admin`; sin ruta abre Inicio) |
+| Web de gobierno (C7) | `http://localhost:3000/` (rutas por hash: `#/home`, `#/review`, `#/staging`, `#/memory`, `#/search`, `#/quarantine`, `#/activity`, `#/admin`; sin ruta abre Inicio) |
 | Postgres (depuración) | `localhost:5433`, base `gmemo` (credenciales de desarrollo en `docker-compose.yml`) |
 
 ## 5. Usuarios de desarrollo y cambio de rol
@@ -113,6 +113,8 @@ las insignias de pendientes (cola) y de entradas en cuarentena. Sin ruta (o con 
 | Administración (Fig. 15) | `#/admin` | [`capturas/5-administracion.png`](capturas/5-administracion.png) |
 | Actividad | `#/activity` | [`capturas/7-actividad.png`](capturas/7-actividad.png) |
 | Área de preparación | `#/staging` | [`capturas/8-area-de-preparacion.png`](capturas/8-area-de-preparacion.png) |
+| Buscar como agente | `#/search` | [`capturas/9-buscar-como-agente.png`](capturas/9-buscar-como-agente.png) |
+| Comparar versiones (detalle de memoria) | `#/memory/<id>` | [`capturas/10-historial-de-versiones.png`](capturas/10-historial-de-versiones.png) |
 
 Recorrido sugerido (antes de `pnpm demo`, con los datos del seed):
 
@@ -154,6 +156,7 @@ Recorrido sugerido (antes de `pnpm demo`, con los datos del seed):
    bajas se gestionan por ticket.
 
 7. **Inicio / Actividad / Área de preparación** (solo lectura, solo líder técnico): ver la sección 6.4.
+8. **Buscar como agente y Comparar versiones** (solo lectura, solo líder técnico): ver la sección 6.5.
 
 Después de `pnpm demo`, la decisión nueva ya no está en la cola (fue aprobada), la anterior figura como reemplazada
 y las 2 memorias vencidas del seed aparecen en *Pendientes de revalidación*.
@@ -196,6 +199,28 @@ a la API). Se actualizan con el botón *Actualizar*; no hay refresco automático
   (En preparación, En cola de revisión, Incorporada, En cuarentena, Rechazada en revisión). Las sesiones internas
   `restore/` y `web/` no se listan.
 
+### 6.5 Buscar como agente y Comparar versiones
+
+- **Buscar como agente** (`#/search`, `GET /api/v1/projects/:id/search?q=&types=&limit=&repoId=`): muestra lo que
+  un agente obtendría de `recall` para una consulta y por qué. Usa **la misma función de ranking** que la
+  herramienta MCP `recall` (un solo camino de código): solo memorias activas (se excluyen las reemplazadas, las
+  retiradas, las pendientes de revalidación y los borradores en preparación de cada agente), las 50 mejores de la
+  lista léxica (BM25 con decaimiento temporal) y de la semántica (pgvector), fusionadas con RRF:
+  puntuación = Σ 1/(60 + rango). Formulario: *Consulta* (hasta 200 caracteres), *Tipos* (pastillas), *Resultados*
+  (1 a 8, por defecto 5) y *Repositorio del agente* (por defecto "Ninguno"; la lista sale de la Administración).
+  Elegir el repositorio del agente reproduce su orden exacto: sus memorias aparecen primero. La tabla muestra
+  posición, título (enlace al detalle), tipo, repositorio, puntuación (4 decimales), rango léxico y rango
+  semántico ("—" si no aparece en esa lista). Si el servicio de embeddings no responde, un aviso indica que los
+  resultados son solo léxicos. La búsqueda solo se ejecuta al pulsar *Buscar* y se audita como lectura
+  `memories.search` con el hash de la consulta (misma normalización que `recall`), nunca el texto. Con el embedder
+  stub de la demo el rango semántico no tiene significado real (es determinista, no semántico).
+- **Comparar versiones** (detalle de una memoria con dos o más versiones, por ejemplo la restricción "Customer PII
+  never leaves the eu-west-1 region", con 3 versiones en el seed): dos selectores *Desde la versión* y *Hasta la
+  versión* (por defecto la anterior y la actual). Título, resumen y desarrollo se comparan palabra a palabra, lado a
+  lado (palabras eliminadas en la versión anterior, añadidas en la nueva); un cambio de tipo se muestra en una
+  fila; los campos se comparan clave a clave (añadido, eliminado o modificado) o "Sin cambios en campos". Elegir la
+  misma versión dos veces muestra un aviso. Se calcula en la web con el historial que ya devuelve el detalle.
+
 ## 7. Conectar un agente real (opcional)
 
 1. Copiar `docs/demo/mcp-local.example.json` como `.mcp.json` en la raíz de un proyecto de prueba (o añadir el servidor con `claude mcp add --transport http gmemo http://localhost:3000/mcp --header "X-Git-Remote: https://github.com/crombie-llc/gmemo-demo.git" --header "X-Git-Branch: feature/notif-async"`). No lleva secretos: en local el *bypass* de desarrollo sustituye al token.
@@ -216,7 +241,7 @@ El borrador queda en la sesión de `feature/notif-async`. Esa sesión se promuev
 | `pnpm smoke` | Prueba de humo contra el stack levantado |
 | `pnpm demo` | El guion de extremo a extremo (sección 6) |
 | `pnpm eval` | Métricas sintéticas (TT-06): recall@5, MRR y nDCG@5 del `recall` híbrido (RRF) y tasas de falsos positivos/negativos del juez. Escribe [`metricas.md`](metricas.md). Usa **datos sintéticos** y los **stubs** del juez y del embedder; es determinista |
-| `pnpm screenshots` | Capturas de las 8 pantallas en `docs/demo/capturas/` (1440×900, escala 2) contra `http://localhost:3000` como `tl@demo.local`. Necesita `pnpm build:web` (para detectar el build) y el stack levantado; si faltan Playwright o el build, avisa y termina sin error |
+| `pnpm screenshots` | Capturas de las 10 vistas en `docs/demo/capturas/` (1440×900, escala 2) contra `http://localhost:3000` como `tl@demo.local`. Necesita `pnpm build:web` (para detectar el build) y el stack levantado; si faltan Playwright o el build, avisa y termina sin error |
 | `pnpm package:demo` | Genera `dist-demo/gmemo-demo.zip` y lo verifica (sección 12) |
 
 Tras ejecutar la suite con base de datos, el esquema queda reiniciado: volver a `docker compose down -v && docker compose up --build -d --wait` antes de `pnpm smoke` o `pnpm demo`.
@@ -231,11 +256,12 @@ Tras ejecutar la suite con base de datos, el esquema queda reiniciado: volver a 
 | HU-05 | Sanitización: credenciales, instrucciones embebidas, datos personales enmascarados | Pipeline de `POST /promote` | Cuarentena (`#/quarantine`) |
 | HU-06.1–6.6 | Juez: aceptar, duplicado, contradicción/confianza, revisión obligatoria, segunda capa de seguridad | Pipeline de `POST /promote` (`DeterministicJudge` en local) | Cola de revisión (`#/review`) |
 | HU-07 | Cola de revisión humana: listar, detalle, aprobar (con reemplazo) o rechazar | `GET /api/v1/projects/:id/review-queue`, `GET …/review-queue/:itemId`, `POST …/approve`, `POST …/reject` | Cola de revisión (`#/review`), Detalle de revisión (`#/review/<itemId>`) |
-| HU-08.1 | Recall híbrido (BM25 + vectores, RRF) | MCP `recall` | — |
+| HU-08.1 | Recall híbrido (BM25 + vectores, RRF) | MCP `recall`; explorador `GET /api/v1/projects/:id/search` (misma función de ranking, con rango léxico/semántico y puntuación) | Buscar como agente (`#/search`) |
 | HU-08.2, HU-09 | Solo se sirven memorias activas | MCP `recall`, `get_memory`, `get_context` | — |
-| HU-08.3 | Prioridad del repositorio de la consulta | MCP `recall` (`scope`) | — |
+| HU-08.3 | Prioridad del repositorio de la consulta | MCP `recall` (`scope`); explorador con `repoId` | Buscar como agente (`#/search`, selector *Repositorio del agente*) |
 | HU-08.4 | Borradores propios en el recall | MCP `recall` (`source: "staged"`), `list_staged`, `discard_staged` | — |
 | HU-10 | Cuarentena: listar, detalle, restaurar por el pipeline, purga por retención | `GET /api/v1/projects/:id/quarantine`, `GET …/:qid`, `POST …/:qid/restore`, `POST /internal/jobs/quarantine-purge` | Cuarentena (`#/quarantine`) |
+| HU-11 | Las correcciones conservan el historial | `GET /api/v1/projects/:id/memories/:mid` (`revisions[]`) | Detalle de memoria (`#/memory/<id>`, Comparar versiones) |
 | HU-11.3 | Destino obsoleto → revisión obligatoria | MCP `remember` / `POST /promote` (`stale_target`) | Detalle de revisión (`#/review/<itemId>`) |
 | HU-11.4 | Retiro masivo por PR revertido | `POST /api/v1/projects/:id/memories/retire-by-pr` | Memoria del proyecto (`#/memory`) |
 | HU-12 | Revalidación: vencimiento, confirmar o retirar | `POST /internal/jobs/revalidation-sweep`, `GET …/memories?status=pending_revalidation`, `POST …/memories/:mid/confirm`, `POST …/memories/:mid/retire` | Memoria del proyecto (`#/memory`, pestaña Pendientes de revalidación) |

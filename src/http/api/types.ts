@@ -25,6 +25,9 @@ import type { MemoryStatus } from '../../db/memoryAdminRepository.js';
 import type { DirectMemoryServiceLike } from '../../memory/types.js';
 import type { AdminSummaryRepository } from '../../db/adminSummaryRepository.js';
 import type { InsightsRepository } from '../../db/insightsRepository.js';
+import type { MemoryRepository } from '../../db/memoryRepository.js';
+import type { MemoryAdminRepository } from '../../db/memoryAdminRepository.js';
+import type { Embedder } from '../../embedder/embedder.js';
 
 /**
  * Approve outcomes the caller can fix by reloading the item.
@@ -109,6 +112,11 @@ export interface ApiRouterDeps {
   adminSummaryRepository: AdminSummaryRepository;
   /** Read-only governance insights: dashboard, activity, staging (C12). */
   insightsRepository: InsightsRepository;
+  /** Search explorer (C13): the same candidate queries and embedder as MCP recall. */
+  memoryRepository: Pick<MemoryRepository, 'recallLexicalCandidates' | 'recallSemantic'>;
+  embedder: Embedder;
+  /** Search explorer repo boost check (C13): a foreign or unknown repo → null. */
+  memoryAdminRepository: Pick<MemoryAdminRepository, 'findProjectRepoId'>;
 }
 
 export interface ApiRouterOptions {
@@ -547,4 +555,36 @@ export interface StagingSessionDto {
 export interface StagingOverviewDto {
   sessions: StagingSessionDto[];
   truncated: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Search explorer (C13, read-only): "Buscar como agente"
+// ---------------------------------------------------------------------------
+
+export interface SearchResultDto {
+  /** 1-based position in the returned order (after repo priority). */
+  position: number;
+  id: string;
+  type: MemoryType;
+  title: string;
+  summary: string;
+  repoId: string | null;
+  /** current_revision. */
+  version: number;
+  updatedAt: string;
+  /** RRF fused score Σ 1/(60 + rank). */
+  score: number;
+  /** 1-based rank in the lexical list (1..50); null when absent. */
+  lexicalRank: number | null;
+  /** 1-based rank in the semantic list (1..50); null when absent. */
+  semanticRank: number | null;
+}
+
+export interface SearchResponseDto {
+  items: SearchResultDto[];
+  /** Size of the fused candidate list (recall's total_matches without staged drafts). */
+  totalCandidates: number;
+  semantic: 'ok' | 'unavailable';
+  /** Repo whose memories were prioritized; null = no boost. */
+  repoId: string | null;
 }

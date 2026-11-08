@@ -96,7 +96,10 @@ export interface MemoryAdminRepository {
     projectId: string,
     memoryId: string,
   ): Promise<{ rows: MemoryRevisionRow[]; truncated: boolean }>;
-  /** The given repo when it belongs to the project, else the project's first repo; null = none. */
+  /**
+   * A given repoId resolves to itself when it belongs to the project, else null.
+   * A null repoId resolves to the project's first repo (null when it has none).
+   */
   findProjectRepoId(projectId: string, repoId: string | null): Promise<string | null>;
 }
 

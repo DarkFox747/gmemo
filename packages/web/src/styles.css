@@ -1113,3 +1113,57 @@ td:has(> .cell--title) {
 .session-card__meta {
   margin-bottom: 10px;
 }
+
+/* ---- Search explorer ("Buscar como agente") ---- */
+.search__intro p {
+  margin: 0 0 6px;
+}
+
+.search__intro,
+.search__form {
+  margin-bottom: 18px;
+}
+
+.search__types {
+  margin-bottom: 0;
+}
+
+.search__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+}
+
+.search__row .btn {
+  margin-bottom: 12px;
+}
+
+.search__table th.num,
+.search__table td.num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ---- Revision history diff ---- */
+.revision-diff__card {
+  margin-top: 18px;
+}
+
+.revision-diff__pickers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.revision-diff__fields {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+
+.revision-diff__fields li {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}

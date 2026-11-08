@@ -25,6 +25,7 @@ import { QuarantineDetailScreen } from './screens/QuarantineDetailScreen';
 import { QuarantineScreen } from './screens/QuarantineScreen';
 import { ReviewDetailScreen } from './screens/ReviewDetailScreen';
 import { ReviewQueueScreen } from './screens/ReviewQueueScreen';
+import { SearchScreen } from './screens/SearchScreen';
 import { StagingScreen } from './screens/StagingScreen';
 import type { ScreenProps } from './screens/types';
 
@@ -57,6 +58,8 @@ function Screen({ route, props }: { route: Route; props: ScreenProps }) {
       return <QuarantineDetailScreen {...props} id={route.id} />;
     case 'admin':
       return <AdminScreen {...props} />;
+    case 'search':
+      return <SearchScreen {...props} />;
   }
 }
 

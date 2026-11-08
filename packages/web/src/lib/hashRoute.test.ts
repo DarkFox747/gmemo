@@ -17,6 +17,7 @@ describe('parseHash', () => {
     ['#/home', { name: 'home' }],
     ['#/activity', { name: 'activity' }],
     ['#/staging', { name: 'staging' }],
+    ['#/search', { name: 'search' }],
   ])('%s', (hash, route) => {
     expect(parseHash(hash)).toEqual(route);
   });
@@ -35,6 +36,7 @@ describe('parseHash', () => {
       '#/home',
       '#/activity',
       '#/staging',
+      '#/search',
     ]) {
       expect(buildHash(parseHash(h))).toBe(h);
     }
@@ -50,6 +52,7 @@ describe('parseHash', () => {
     expect(parseHash(`#/activity/${ID}`)).toEqual({ name: 'activity' });
     expect(parseHash('#/staging/x/y')).toEqual({ name: 'staging' });
     expect(parseHash('#/home/extra')).toEqual({ name: 'home' });
+    expect(parseHash('#/search/extra')).toEqual({ name: 'search' });
   });
 
   it('a non-UUID id falls back to the list route', () => {

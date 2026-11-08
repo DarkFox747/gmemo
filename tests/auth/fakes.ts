@@ -586,6 +586,11 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     listStaging: () => Promise.reject(new Error('stub insightsRepository')),
   };
 
+  // Stub project repo lookup (C13): no repo belongs to any project.
+  const stubMemoryAdminRepository: AppServices['memoryAdminRepository'] = {
+    findProjectRepoId: () => Promise.resolve(null),
+  };
+
   return {
     authenticator: stubAuthenticator,
     tenantResolver: stubTenantResolver,
@@ -606,6 +611,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     directMemoryService: stubDirectMemoryService,
     adminSummaryRepository: stubAdminSummaryRepository,
     insightsRepository: stubInsightsRepository,
+    memoryAdminRepository: stubMemoryAdminRepository,
     ...overrides,
   };
 }

@@ -18,7 +18,8 @@ export type Route =
   | { name: 'quarantineDetail'; id: string }
   | { name: 'admin' }
   | { name: 'activity' }
-  | { name: 'staging' };
+  | { name: 'staging' }
+  | { name: 'search' };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -53,6 +54,8 @@ export function parseHash(hash: string): Route {
       return { name: 'activity' };
     case 'staging':
       return { name: 'staging' };
+    case 'search':
+      return { name: 'search' };
     default:
       return { name: 'home' };
   }
@@ -84,6 +87,8 @@ export function buildHash(r: Route): string {
       return '#/activity';
     case 'staging':
       return '#/staging';
+    case 'search':
+      return '#/search';
   }
 }
 

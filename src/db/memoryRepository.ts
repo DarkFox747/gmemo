@@ -38,6 +38,16 @@ export interface MemoryRow {
   stale?: boolean;
 }
 
+/**
+ * Tenant of a candidate query. MCP recall passes its TenantContext; the web
+ * search explorer is project-level and passes repoId null (no repo, no branch).
+ * repoId reaches SQL only when scope === 'repo'.
+ */
+export interface SearchTenant {
+  projectId: string;
+  repoId: string | null;
+}
+
 /** Filters shared by both candidate queries (scope → repo_id derivation lives in the repo). */
 export interface RecallCandidateFilters {
   scope: 'repo' | 'project';
@@ -80,7 +90,7 @@ export interface MemoryRepository {
    * handler fuses this list with the semantic one and paginates by offset.
    */
   recallLexicalCandidates(
-    tenant: TenantContext,
+    tenant: SearchTenant,
     params: LexicalCandidateParams,
     limit: number,
   ): Promise<MemoryRow[]>;
@@ -94,7 +104,7 @@ export interface MemoryRepository {
    * successful embed.
    */
   recallSemantic(
-    tenant: TenantContext,
+    tenant: SearchTenant,
     queryEmbedding: number[],
     filters: RecallCandidateFilters,
     excludeIds: string[],
@@ -272,7 +282,7 @@ export class PgMemoryRepository implements MemoryRepository {
   constructor(private readonly pool: pg.Pool) {}
 
   async recallLexicalCandidates(
-    tenant: TenantContext,
+    tenant: SearchTenant,
     params: LexicalCandidateParams,
     limit: number,
   ): Promise<MemoryRow[]> {
@@ -290,7 +300,7 @@ export class PgMemoryRepository implements MemoryRepository {
   }
 
   async recallSemantic(
-    tenant: TenantContext,
+    tenant: SearchTenant,
     queryEmbedding: number[],
     filters: RecallCandidateFilters,
     excludeIds: string[],
