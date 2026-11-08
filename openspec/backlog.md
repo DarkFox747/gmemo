@@ -124,7 +124,7 @@ Deferred work items, ordered. Promote to a `/sdd-new <name>` change when ready.
 3. Audit row inside the write transaction for API writes (C2/C4).
 4. Per-user rate limiting for preview/create/amend and behind CloudFront (C2/C5).
 5. `NODE_ENV` required with no default; rate limiters before body parsing (pre-existing).
-6. Feature-branch session ↔ PR linking for `/promote` (pilot limitation).
+6. ✅ Feature-branch session ↔ PR linking for `/promote` — done in change `feature-branch-promotion` (default-branch token + `pr_number`; server-side PR verification against GitHub remains out of scope).
 7. Web: gate the dev-user selector to dev builds; Cognito PKCE login; screen-level component tests (C7).
 8. Dev-user email allowlist (C2); refuse `judge_output_invalid` on human confirm (C5).
 9. Re-run `/sdd-init` to refresh `openspec/project-map.yaml` (area context, staleness anchor).

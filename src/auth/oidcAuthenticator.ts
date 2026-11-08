@@ -3,7 +3,8 @@
  *
  * GithubOidcAuthenticator verifies a GitHub Actions OIDC JWT against
  * token.actions.githubusercontent.com's JWKS, validating aud, iss, exp, nbf,
- * and RSA signature, then extracts the repository + ref claims into a
+ * and RSA signature, then extracts the repository, ref, head_ref, event_name and
+ * job_workflow_ref claims into a
  * PromotePrincipal.
  *
  * The underlying JWKS verifier is injected at construction time (one instance
@@ -41,6 +42,17 @@ export interface PromotePrincipal {
    * workflows). null when absent or empty.
    */
   headRef: string | null;
+  /**
+   * Event that triggered the workflow (GitHub `event_name` claim, e.g. 'push',
+   * 'pull_request_target', 'workflow_dispatch'). null when absent or empty.
+   */
+  eventName: string | null;
+  /**
+   * Workflow file + ref of the job that minted the token (GitHub
+   * `job_workflow_ref` claim, e.g. 'org/repo/.github/workflows/promote.yml@refs/heads/main').
+   * null when absent or empty.
+   */
+  jobWorkflowRef: string | null;
 }
 
 /** Options for OidcVerifier.verify. */
@@ -79,7 +91,8 @@ export interface OidcJwtVerifier {
  *
  * The injected `verifier` (built at the composition root via
  * `JwtRsaVerifier.create`) validates iss, aud, exp, nbf, and signature
- * automatically.  We extract `repository`, `ref` and the optional `head_ref` from the returned claims
+ * automatically.  We extract `repository`, `ref` and the optional `head_ref`, `event_name` and
+ * `job_workflow_ref` from the returned claims
  * and map any error to an opaque PERMISSION_DENIED.
  */
 export class GithubOidcAuthenticator implements OidcVerifier {
@@ -100,7 +113,7 @@ export class GithubOidcAuthenticator implements OidcVerifier {
    * `_opts` (dev-only ref override) is intentionally ignored here.
    *
    * @param authorization - Raw value of the HTTP Authorization header.
-   * @returns Verified PromotePrincipal { repository, ref, headRef }.
+   * @returns Verified PromotePrincipal { repository, ref, headRef, eventName, jobWorkflowRef }.
    * @throws AppError(PERMISSION_DENIED) on ANY verification failure (opaque).
    */
   async verify(
@@ -135,7 +148,18 @@ export class GithubOidcAuthenticator implements OidcVerifier {
           ? claims['head_ref']
           : null;
 
-      return { repository, ref, headRef };
+      // Optional: bind the event and workflow file that minted the token; the
+      // /promote merged path requires push + promote.yml on the default branch.
+      const eventName =
+        typeof claims['event_name'] === 'string' && claims['event_name'] !== ''
+          ? claims['event_name']
+          : null;
+      const jobWorkflowRef =
+        typeof claims['job_workflow_ref'] === 'string' && claims['job_workflow_ref'] !== ''
+          ? claims['job_workflow_ref']
+          : null;
+
+      return { repository, ref, headRef, eventName, jobWorkflowRef };
     } catch (err) {
       // Re-throw our own AppError as-is; map everything else opaquely.
       if (err instanceof AppError) throw err;

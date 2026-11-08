@@ -22,7 +22,7 @@
 | HU / TT | Estado | Implementación (archivo · endpoint · tool · pantalla) | Tests principales |
 |---|---|---|---|
 | HU-03 Captura (1–5) | Completa | tool MCP `remember`/`list_staged`/`discard_staged` · `src/mcp/tools/*` | `tests/staging/*` |
-| HU-04.1/.3 Promoción e idempotencia | Completa | `POST /promote` · `src/promote/promoteService.ts` | `tests/promote/*`, `tests/db/promotion.integration.test.ts` |
+| HU-04.1/.3 Promoción e idempotencia | Completa | `POST /promote` (sesión de la rama del PR mergeado, con `pr_number`; o de la rama por defecto) · `.github/workflows/promote.yml` · `src/promote/promoteService.ts` | `tests/promote/*`, `tests/http/promote.test.ts`, `tests/db/promotion.integration.test.ts` |
 | HU-04.2 PR cerrado sin integrar | Completa | `POST /promote` `event: closed_unmerged` · `.github/workflows/promote.yml` | `tests/http/promote.test.ts` |
 | HU-05 Validación (formato, credenciales, instrucciones, datos personales) | Completa | `src/promote/sanitize.ts`, `src/security/{secretScan,injectionScan,piiMask,secretRedact}.ts` | `tests/promote/sanitize.test.ts`, `tests/security/*` |
 | HU-06 Juez (1–6, Tabla 3) | Completa | `src/judge/*`, `src/promote/routing.ts` | `tests/promote/promoteVerdict.test.ts`, `tests/judge/*` |
@@ -48,9 +48,9 @@
 4. Modificación concurrente: va a revisión humana, no a cuarentena (C1).
 5. Cuarentena: redacción por tramos, criterio y motivo, restauración y vencimiento a 60 días (C3).
 6. Nombre: el producto pasa de LPMS a gmemo (C0). Se conserva "LPMS" solo como predecesor local o herramienta del orquestador.
+7. Promoción de la rama del PR (HU-04.1, change `feature-branch-promotion`): el merge promueve la sesión de la rama de feature y registra rama y PR de origen. El workflow `promote.yml` resuelve el PR a partir del commit del merge y envía `source_branch` + `pr_number`; `/promote` exige un token emitido por el push de `promote.yml` en la rama por defecto (se validan `ref`, `event_name` y `job_workflow_ref`) y `pr_number` cuando la rama no es la por defecto. El servidor no vuelve a verificar el PR contra la API de GitHub (fuera de alcance): el límite de confianza es el workflow de la rama por defecto, que solo ejecuta código revisado.
 
 **Que quedan, con su justificación:**
-- **Promoción solo desde la rama por defecto.** El merge de una rama de feature se refleja promoviendo la sesión de la rama por defecto (como hace `promote.yml` al hacer push a `main`); el guion lo muestra y lo documenta. Vincular una sesión de feature con su PR queda fuera del piloto.
 - **La web usa el login de desarrollo** (`X-Dev-User`). El login real con Cognito y PKCE está fuera de alcance.
 - **Notificaciones como log estructurado** (`review_enqueued`, `leak_detected`), sin SES.
 - **El juez determinista de la demo es heurístico.** La calidad semántica real requiere Bedrock (el cliente existe y está protegido).
@@ -71,9 +71,9 @@
 
 | Métrica | Valor |
 |---|---|
-| Tests totales (suite con DB) | **1935** (0 fallas) |
-| Tests unitarios (sin DB) | 1647 |
-| Tests de integración con DB | 288 |
+| Tests totales (suite con DB) | **1973** (0 fallas) |
+| Tests unitarios (sin DB) | 1684 |
+| Tests de integración con DB | 289 |
 | Migraciones SQL | 10 (`0001`–`0010`) |
 | Tools MCP | 6 (`recall`, `get_memory`, `get_context`, `remember`, `list_staged`, `discard_staged`) |
 | Endpoints REST `/api/v1` | 17 |
@@ -127,5 +127,6 @@ Ninguno: las dependencias de la web y Playwright ya se agregaron (commit `7b73fb
 | Dependencias web aprobadas | `7b73fb8` | — |
 | C8 `demo-kit` | `85f65c4`, `aae5ba4` | PASS (2 rondas) |
 | C7 `governance-web` | `bbd5417` | PASS |
+| C9 `feature-branch-promotion` | (este commit) | PASS (2 rondas) |
 
 Los reportes completos (propuesta, specs, design, tasks, apply-progress, verify y archive) están en `openspec/changes/archive/`. Las specs vigentes están en `openspec/specs/`.

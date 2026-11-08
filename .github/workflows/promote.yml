@@ -5,12 +5,23 @@
 # merged PR), this workflow:
 #   1. Mints a short-lived GitHub Actions OIDC token scoped to the configured
 #      gmemo audience (vars.GMEMO_OIDC_AUDIENCE).
-#   2. POSTs to the gmemo /promote endpoint with the OIDC token as a Bearer
-#      credential plus a JSON body matching the PromoteBody schema exactly.
+#   2. Looks up the PR associated with the pushed commit (GitHub API, GITHUB_TOKEN,
+#      pull-requests: read). If exactly one merged, same-repository PR targets the
+#      default branch, its head branch is the session to promote (HU-04.1).
+#   3. POSTs to the gmemo /promote endpoint with the OIDC token as a Bearer
+#      credential plus a JSON body matching the PromoteBody schema exactly:
+#      {repo, source_branch: <PR head branch>, pr_number, merge_sha} when the PR
+#      was found, otherwise {repo, source_branch: <default branch>, merge_sha}.
 #
-# Trigger: push to main. The branch filter replaces the old pull_request.merged
-# guard — only pushes to the default branch can mint a token with
-# ref: refs/heads/main, which the handler's refs/heads/ strip will match.
+# Trigger: push to main. Only pushes to the default branch mint a token with
+# ref: refs/heads/<default branch>, which is what the handler requires for the
+# merged event — the trust boundary is this post-merge workflow (reviewed code).
+# The server additionally binds the token's event_name == push and
+# job_workflow_ref == <owner/repo>/.github/workflows/promote.yml@refs/heads/<default>,
+# so other default-branch workflows (workflow_dispatch, schedule,
+# pull_request_target, other files) cannot promote. Renaming or moving this file
+# requires updating that server check (src/http/promote.ts).
+# The server does not re-verify the PR against GitHub.
 #
 # No long-lived cloud secrets are needed: authentication is purely OIDC.
 # Endpoint URL and audience are repository/org variables (not secrets).
@@ -29,8 +40,12 @@
 #   - The token is marked as a secret (core.setSecret) so it never appears in
 #     plain-text in workflow logs.
 #   - The endpoint enforces: iss, aud, exp/nbf, signature, repo claim,
-#     ref == source_branch, source_branch == default_branch, active machine_credential.
-#   - Only one branch (the default branch) can ever trigger a successful promote.
+#     ref == refs/heads/<default_branch>, event_name == push, job_workflow_ref ==
+#     this file on the default branch, pr_number present when source_branch is
+#     not the default branch, active machine_credential.
+#   - Only tokens minted on the default branch can ever trigger a successful
+#     promote; PR workflows (refs/pull/<n>/merge) and feature-branch pushes cannot.
+#   - The PR head branch name is untrusted: it is passed via env and jq --arg only.
 #
 # discard job (HU-04.2): on pull_request closed with merged == false, POSTs
 # {event: "closed_unmerged", source_branch: <head branch>, pr_number} so the
@@ -53,8 +68,9 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write   # required to mint the OIDC token
-      contents: read    # required to check out (not needed here, but least-privilege standard)
+      id-token: write       # required to mint the OIDC token
+      contents: read        # required to check out (not needed here, but least-privilege standard)
+      pull-requests: read   # required to find the PR associated with the pushed commit
 
     steps:
       - name: Mint OIDC token
@@ -73,20 +89,65 @@ jobs:
             core.setSecret(token);
             core.setOutput('token', token);
 
+      - name: Find the merged PR for this commit
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          # Exactly one merged, same-repository PR into the default branch whose merge
+          # commit is the pushed commit → promote its head branch session. Anything
+          # else (direct push, zero or several matches, API error) → fall back to the
+          # default-branch session.
+          if ! pulls="$(gh api "repos/${GH_REPOSITORY}/commits/${GH_SHA}/pulls")"; then
+            echo "::warning::PR lookup failed; promoting the default-branch session"
+            exit 0
+          fi
+          matches="$(jq -c \
+            --arg base "${DEFAULT_BRANCH}" \
+            --arg repo "${GH_REPOSITORY}" \
+            --arg sha "${GH_SHA}" \
+            '[.[] | select(.merged_at != null and .base.ref == $base and .head.repo.full_name == $repo and .merge_commit_sha == $sha)]' \
+            <<<"${pulls}")"
+          if [ "$(jq 'length' <<<"${matches}")" != "1" ]; then
+            echo "::warning::No single merged PR for this commit; promoting the default-branch session"
+            exit 0
+          fi
+          # Git ref names cannot contain newlines, so a single-line output is safe.
+          echo "head_ref=$(jq -r '.[0].head.ref' <<<"${matches}")" >> "${GITHUB_OUTPUT}"
+          echo "number=$(jq -r '.[0].number' <<<"${matches}")" >> "${GITHUB_OUTPUT}"
+
       - name: POST /promote
         env:
           OIDC_TOKEN: ${{ steps.tok.outputs.token }}
           PROMOTE_URL: ${{ vars.GMEMO_PROMOTE_URL }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REF_NAME: ${{ github.ref_name }}
           GH_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_HEAD_REF: ${{ steps.pr.outputs.head_ref }}   # untrusted → env + jq --arg only
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
           # Body fields match the PromoteBody .strict() Zod schema exactly:
           #   repo            — OIDC repository claim (owner/repo)
-          #   source_branch   — the pushed branch (== default branch, enforced by trigger)
+          #   source_branch   — the merged PR's head branch, or the default branch
+          #   pr_number       — the merged PR number (only when the PR was found)
           #   merge_sha       — the pushed commit SHA
-          # pr_number is optional in the schema and not reliably derivable from a
-          # push event, so it is omitted.
+          if [ -n "${PR_HEAD_REF}" ] && [ -n "${PR_NUMBER}" ]; then
+            body="$(jq --null-input \
+              --arg repo "${GH_REPOSITORY}" \
+              --arg source_branch "${PR_HEAD_REF}" \
+              --argjson pr_number "${PR_NUMBER}" \
+              --arg merge_sha "${GH_SHA}" \
+              '{repo: $repo, source_branch: $source_branch, pr_number: $pr_number, merge_sha: $merge_sha}')"
+          else
+            body="$(jq --null-input \
+              --arg repo "${GH_REPOSITORY}" \
+              --arg source_branch "${DEFAULT_BRANCH}" \
+              --arg merge_sha "${GH_SHA}" \
+              '{repo: $repo, source_branch: $source_branch, merge_sha: $merge_sha}')"
+          fi
           curl \
             --silent \
             --show-error \
@@ -95,11 +156,7 @@ jobs:
             --url "${PROMOTE_URL}" \
             --header "Authorization: Bearer ${OIDC_TOKEN}" \
             --header "Content-Type: application/json" \
-            --data "$(jq --null-input \
-              --arg repo "${GH_REPOSITORY}" \
-              --arg source_branch "${GH_REF_NAME}" \
-              --arg merge_sha "${GH_SHA}" \
-              '{repo: $repo, source_branch: $source_branch, merge_sha: $merge_sha}')"
+            --data "${body}"
 
   discard:
     if: >-

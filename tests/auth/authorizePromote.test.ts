@@ -35,7 +35,13 @@ const OWNER_REPO = 'acme/billing';
 const tenant: TenantContext = { projectId: PROJECT_ID, repoId: REPO_ID, branch: 'main' };
 
 function makePrincipal(repository: string = OWNER_REPO): PromotePrincipal {
-  return { repository, ref: 'refs/heads/main' };
+  return {
+    repository,
+    ref: 'refs/heads/main',
+    headRef: null,
+    eventName: 'push',
+    jobWorkflowRef: `${repository}/.github/workflows/promote.yml@refs/heads/main`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -113,9 +119,7 @@ describe('RdsAuthorizer.authorizePromote — denial paths', () => {
     const repo = new InMemoryAuthRepository(); // no machine credentials seeded
     const authorizer = new RdsAuthorizer(repo);
 
-    await expect(
-      authorizer.authorizePromote(makePrincipal(), tenant),
-    ).rejects.toSatisfy(
+    await expect(authorizer.authorizePromote(makePrincipal(), tenant)).rejects.toSatisfy(
       (err: unknown) => err instanceof AppError && err.code === ErrorCode.PERMISSION_DENIED,
     );
   });
@@ -129,9 +133,7 @@ describe('RdsAuthorizer.authorizePromote — denial paths', () => {
     );
     const authorizer = new RdsAuthorizer(repo);
 
-    await expect(
-      authorizer.authorizePromote(makePrincipal(), tenant),
-    ).rejects.toSatisfy(
+    await expect(authorizer.authorizePromote(makePrincipal(), tenant)).rejects.toSatisfy(
       (err: unknown) => err instanceof AppError && err.code === ErrorCode.PERMISSION_DENIED,
     );
   });
@@ -148,9 +150,7 @@ describe('RdsAuthorizer.authorizePromote — denial paths', () => {
     );
     const authorizer = new RdsAuthorizer(repo);
 
-    await expect(
-      authorizer.authorizePromote(makePrincipal(), tenant),
-    ).rejects.toSatisfy(
+    await expect(authorizer.authorizePromote(makePrincipal(), tenant)).rejects.toSatisfy(
       (err: unknown) => err instanceof AppError && err.code === ErrorCode.PERMISSION_DENIED,
     );
   });
@@ -165,9 +165,7 @@ describe('RdsAuthorizer.authorizePromote — denial paths', () => {
     );
     const authorizer = new RdsAuthorizer(repo);
 
-    await expect(
-      authorizer.authorizePromote(makePrincipal(), tenant),
-    ).rejects.toSatisfy(
+    await expect(authorizer.authorizePromote(makePrincipal(), tenant)).rejects.toSatisfy(
       (err: unknown) => err instanceof AppError && err.code === ErrorCode.PERMISSION_DENIED,
     );
   });
@@ -178,7 +176,14 @@ describe('RdsAuthorizer.authorizePromote — denial paths', () => {
       [],
       [],
       [],
-      [{ projectId: 'other-project', principalName: OWNER_REPO, role: 'service_agent', active: true }],
+      [
+        {
+          projectId: 'other-project',
+          principalName: OWNER_REPO,
+          role: 'service_agent',
+          active: true,
+        },
+      ],
     );
     const authorizer = new RdsAuthorizer(repo);
 
@@ -213,7 +218,14 @@ describe('RdsAuthorizer.authorizePromote — opacity', () => {
       [],
       [],
       [],
-      [{ projectId: 'different-project', principalName: OWNER_REPO, role: 'service_agent', active: true }],
+      [
+        {
+          projectId: 'different-project',
+          principalName: OWNER_REPO,
+          role: 'service_agent',
+          active: true,
+        },
+      ],
     );
 
     const denials = [

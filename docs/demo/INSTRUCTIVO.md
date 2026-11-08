@@ -63,7 +63,7 @@ Cada paso imprime sus comprobaciones (`OK`) y el script termina con código 0 so
 | 1 | Prepara la sesión MCP y limpia borradores viejos de `feature/notif-async` | `initialize` |
 | 2 | Como dev, en `feature/notif-async`, `remember` de: un gotcha válido, una decisión que contradice la decisión activa sobre notificaciones, una unidad con instrucciones embebidas, un duplicado de una nota activa y una unidad con una credencial (valor de relleno) | 4 borradores `pending`; la credencial se **rechaza en la captura** (HU-03.4) y no se guarda |
 | 3 | `list_staged` y `recall` | Los 4 borradores aparecen; `recall` los antepone con `source: "staged"` |
-| 4 | Merge simulado con el *bypass* OIDC de desarrollo | Ver 6.2. Resumen de `/promote`: gotcha **aplicado**, decisión **a la cola humana**, inyección y duplicado **a cuarentena** |
+| 4 | Merge simulado con el *bypass* OIDC de desarrollo: se promueve directamente `feature/notif-async` con el número de su PR | Ver 6.2. Sin `pr_number` se rechaza; con `pr_number`, resumen de `/promote`: gotcha **aplicado**, decisión **a la cola humana**, inyección y duplicado **a cuarentena**, y la sesión de la rama queda cerrada |
 | 5 | Como líder técnico: cola de revisión y aprobación | La decisión está como dudosa (`contradiction`) con la decisión anterior como relacionada; se aprueba marcando la anterior como **reemplazada** |
 | 6 | Cuarentena y restauración | La inyección y el duplicado están en cuarentena; restaurar el duplicado **vuelve a pasar todo el pipeline** y, como sigue duplicando una memoria activa, vuelve a cuarentena como entrada nueva (restaurar nunca salta la validación) |
 | 7 | Job de revalidación | Las 2 memorias vencidas del seed pasan a `pending_revalidation` |
@@ -71,13 +71,16 @@ Cada paso imprime sus comprobaciones (`OK`) y el script termina con código 0 so
 
 ### 6.2 Cómo se simula el merge (decisión honesta)
 
-En el diseño (docs/04) la sesión de staging es por rama y el merge del PR promueve la sesión de la rama de origen. En el piloto implementado, `POST /promote` exige `source_branch == rama por defecto` y el workflow `promote.yml` se dispara con el **push a `main`**: el merge solo promueve la sesión de `main` (el *binding* sesión↔PR del diseño no está implementado; es una limitación conocida).
+La sesión de staging es por rama y el merge del PR promueve la sesión de la rama de origen (HU-04.1). Así funciona el piloto:
 
-El script lo muestra tal cual:
+- El workflow `promote.yml` se dispara con el **push a la rama por defecto** (el merge del PR). Pide un token OIDC, que GitHub emite con `ref: refs/heads/<rama por defecto>`, y busca el PR asociado al commit del merge con la API de GitHub (`GITHUB_TOKEN`, permiso `pull-requests: read`). Si hay exactamente un PR mergeado, del mismo repositorio y con destino la rama por defecto, envía `source_branch = <rama del PR>` y `pr_number`; si no (push directo, ningún PR o varios), envía la rama por defecto.
+- `POST /promote` exige que el token se haya emitido en la rama por defecto (un token de un workflow de PR o de una rama feature se rechaza) y, si `source_branch` no es la rama por defecto, que venga `pr_number`. La memoria aplicada guarda `origin_branch` = rama feature y `origin_pr` = número del PR.
+- Límite de confianza: el PR lo resuelve el workflow a partir del commit del merge; el servidor **no** vuelve a verificar el PR contra la API de GitHub (necesitaría una GitHub App o un token en el servidor y queda fuera del alcance). La garantía es que solo el workflow de la rama por defecto, que ejecuta código revisado, puede obtener un token aceptado: el servidor exige `event_name = push` y `job_workflow_ref = <repo>/.github/workflows/promote.yml@refs/heads/<rama por defecto>`, así que otro workflow o evento (`workflow_dispatch`, `schedule`, `pull_request_target`) se rechaza.
 
-1. llama a `/promote` con `source_branch: feature/notif-async` y comprueba que **se rechaza** (respuesta opaca);
-2. lleva los borradores a la sesión de `main` (los vuelve a proponer con `X-Git-Branch: main`, lo mismo que haría el agente después del merge) y los descarta de la rama feature con `discard_staged`;
-3. llama a `/promote` con `source_branch: main` y `pr_number`, exactamente lo que envía el workflow tras el push a `main`.
+El script lo reproduce con el *bypass* OIDC de desarrollo (el principal fijo informa `ref: refs/heads/main`, igual que el token real del workflow):
+
+1. llama a `/promote` con `source_branch: feature/notif-async` **sin** `pr_number` y comprueba que **se rechaza** (respuesta opaca);
+2. llama a `/promote` con `source_branch: feature/notif-async` y `pr_number`, exactamente lo que envía el workflow tras el merge, y comprueba que la sesión de la rama queda cerrada.
 
 Todo lo que ocurre después (sanitización, juez, cola, cuarentena, aplicación idempotente) es el código real.
 
@@ -147,7 +150,7 @@ Las capturas de `docs/demo/capturas/` se regeneran con `pnpm screenshots` sobre 
 
 > Usá gmemo. Primero buscá con `recall` qué decisiones hay sobre el envío de notificaciones a clientes. Después proponé con `remember` un gotcha, en inglés, sobre que el worker del outbox debe confirmar (ack) el trabajo solo cuando el proveedor de email responde 2xx, citando `src/notifications/outboxWorker.ts`. Al final mostrame `list_staged`.
 
-El borrador queda en la sesión de `feature/notif-async`; para promoverlo, seguir el guion 6.2.
+El borrador queda en la sesión de `feature/notif-async`. Esa sesión se promueve directamente al mergear su PR: en local, con `POST /promote` y `{"repo": "crombie-llc/gmemo-demo", "source_branch": "feature/notif-async", "pr_number": <n>}` (ver 6.2).
 
 ## 8. Tests y métricas
 
@@ -169,6 +172,7 @@ Tras ejecutar la suite con base de datos, el esquema queda reiniciado: volver a 
 | HU | Qué | Endpoint o herramienta | Pantalla |
 |---|---|---|---|
 | HU-03.4 | Rechazo de credenciales en la captura | MCP `remember` (escaneo de secretos antes de escribir) | — |
+| HU-04.1 | El merge del PR promueve la sesión de su rama (registra rama y PR de origen) | `POST /promote` con `source_branch` = rama del PR y `pr_number` (workflow `promote.yml`) | — |
 | HU-04.2 | PR cerrado sin merge descarta su staging | `POST /promote` con `event: "closed_unmerged"` | — |
 | HU-05 | Sanitización: credenciales, instrucciones embebidas, datos personales enmascarados | Pipeline de `POST /promote` | Cuarentena (`#/quarantine`) |
 | HU-06.1–6.6 | Juez: aceptar, duplicado, contradicción/confianza, revisión obligatoria, segunda capa de seguridad | Pipeline de `POST /promote` (`DeterministicJudge` en local) | Cola de revisión (`#/review`) |
@@ -197,8 +201,6 @@ Tras ejecutar la suite con base de datos, el esquema queda reiniciado: volver a 
 | EventBridge Scheduler para los jobs | Llamada manual a `POST /internal/jobs/*` (o `pnpm job:*`), abierta solo en desarrollo |
 | WAF / CloudFront | Rate limit y cabeceras de seguridad en el propio proceso (express-rate-limit, helmet) |
 | Despliegue: ECS Fargate, RDS, ALB + ACM, Route 53, Terraform | `docker compose` con `pgvector/pgvector:pg16` y la imagen del servidor; la web la sirve Express (`WEB_STATIC_DIR`, prohibido en producción) |
-| Merge del PR promueve la sesión de su rama | El piloto promueve la sesión de la rama por defecto (ver 6.2) |
-
 ## 11. Solución de problemas
 
 - **El puerto 5432 está ocupado**: es normal si hay un PostgreSQL local; compose publica Postgres en el **5433** del host. Usar `postgres://gmemo:gmemo@localhost:5433/gmemo`.

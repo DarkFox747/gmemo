@@ -17,6 +17,8 @@
  *  7. Injected fault in promoteService.promote → opaque 500, no message/stack leakage.
  *  8. HU-04.2 closed_unmerged: discard, repeat no_op, promoted rows kept, and the
  *     PR-bound OIDC ref rules (C1–C4) all deny opaquely.
+ *  9. HU-04.1 merged PR: default-branch token promotes the feature session with
+ *     origin branch/PR; feature source without pr_number or non-default token denied.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -97,12 +99,17 @@ function makeOidcVerifier(
   repository: string,
   ref = 'refs/heads/main',
   headRef: string | null = null,
+  extra: Partial<PromotePrincipal> = {},
 ): OidcVerifier {
   return {
     verify: async (_authorization) => ({
       repository,
       ref,
       headRef,
+      // Default: the post-merge push run of promote.yml on the default branch.
+      eventName: 'push',
+      jobWorkflowRef: `${repository}/.github/workflows/promote.yml@refs/heads/main`,
+      ...extra,
     }),
   };
 }
@@ -322,16 +329,18 @@ describe('POST /promote', () => {
     expect(serialised).not.toContain('ZodError');
   });
 
-  // H1: OIDC ref claim enforcement — ref mismatch → opaque denial
-  it('ref claim mismatch: canonicalized principal.ref ≠ body.source_branch → opaque 500, no branch name echoed (H1)', async () => {
-    // OIDC token claims 'refs/heads/deploy/prod' but body requests source_branch='feature/billing-dispatch'.
-    // After canonicalization ('deploy/prod' ≠ 'feature/billing-dispatch') → PERMISSION_DENIED.
+  // H1: OIDC ref claim enforcement — token not minted on the default branch → opaque denial
+  it('ref claim is not the default branch → opaque 500, no branch name echoed (H1)', async () => {
+    // OIDC token claims 'refs/heads/deploy/prod' (not refs/heads/main) → PERMISSION_DENIED,
+    // whatever the source_branch and even with a pr_number.
     const services = makeStubAuthServices({
       oidcVerifier: {
         verify: async (_authorization) => ({
           repository: OWNER_REPO,
           ref: 'refs/heads/deploy/prod',
           headRef: null,
+          eventName: 'push',
+          jobWorkflowRef: `${OWNER_REPO}/.github/workflows/promote.yml@refs/heads/deploy/prod`,
         }),
       },
       authRepository: new InMemoryAuthRepository([
@@ -350,7 +359,7 @@ describe('POST /promote', () => {
     const res = await request(app)
       .post('/promote')
       .set('Authorization', 'Bearer fake-oidc-token')
-      .send({ repo: OWNER_REPO, source_branch: 'feature/billing-dispatch' });
+      .send({ repo: OWNER_REPO, source_branch: 'feature/billing-dispatch', pr_number: 3 });
 
     expect(res.status).toBe(500);
     expect(res.body).toEqual(OPAQUE_ERROR_BODY);
@@ -392,7 +401,10 @@ describe('POST /promote', () => {
       authorizeProjectAdmin: (_principal: Principal, _projectId: string): Promise<AdminActor> => {
         throw new AppError(ErrorCode.PERMISSION_DENIED);
       },
-      authorizeProjectMember: (_principal: Principal, _projectId: string): Promise<ProjectMember> => {
+      authorizeProjectMember: (
+        _principal: Principal,
+        _projectId: string,
+      ): Promise<ProjectMember> => {
         throw new AppError(ErrorCode.PERMISSION_DENIED);
       },
     };
@@ -419,12 +431,11 @@ describe('POST /promote', () => {
     expect(serialised).not.toContain(PROJECT_ID);
   });
 
-  // FLAG #1: default-branch enforcement — feature branch → denied
-  it('source_branch is a feature branch (≠ default_branch) → opaque 500, no branch detail echoed (FLAG#1)', async () => {
-    // The OIDC token's ref and source_branch both say 'feature/bill-42' (ref check passes),
-    // but the repo's default_branch is 'main' → default-branch assertion denies.
+  // Feature source without a PR number: the merged event can only promote a
+  // feature session when it is bound to the merged PR.
+  it('feature source_branch without pr_number (default-branch token) → opaque 500, no branch detail echoed', async () => {
     const services = makeStubAuthServices({
-      oidcVerifier: makeOidcVerifier(OWNER_REPO, 'refs/heads/feature/bill-42'),
+      oidcVerifier: makeOidcVerifier(OWNER_REPO, 'refs/heads/main'),
       authRepository: new InMemoryAuthRepository([
         {
           remoteUrl: REMOTE_URL,
@@ -530,6 +541,8 @@ function makeClosedServices(setup: ClosedSetup = {}) {
     repository: OWNER_REPO,
     ref: `refs/pull/${PR}/merge`,
     headRef: FEATURE,
+    eventName: 'pull_request',
+    jobWorkflowRef: `${OWNER_REPO}/.github/workflows/promote.yml@refs/pull/${PR}/merge`,
     ...setup.principal,
   };
   const verifyOpts: Array<OidcVerifyOptions | undefined> = [];
@@ -659,7 +672,7 @@ describe('POST /promote — closed_unmerged (HU-04.2)', () => {
     expect(res.body).toEqual({ status: 'abandoned', discarded: 3 });
   });
 
-  it('passes devRef refs/heads/<source_branch> to the verifier', async () => {
+  it('passes devRef refs/heads/<source_branch> to the verifier (closed_unmerged only)', async () => {
     const { services, verifyOpts } = makeClosedServices();
 
     await postPromote(createApp(services), CLOSED_BODY);
@@ -745,25 +758,180 @@ describe('POST /promote — merged path with event discriminator', () => {
     expect(res.body).toEqual(HAPPY_OUTCOME);
   });
 
-  it('merged without event on a feature branch is denied as before, even with a PR ref', async () => {
-    const services = makeStubAuthServices({
-      oidcVerifier: makeOidcVerifier(OWNER_REPO, `refs/pull/${PR}/merge`, FEATURE),
-      authRepository: new InMemoryAuthRepository([
-        { remoteUrl: REMOTE_URL, repoId: REPO_ID, projectId: PROJECT_ID, defaultBranch: 'main' },
-      ]),
-      promotionRepository: makePromotionRepo(SESSION_ID),
-      promoteService: makeScriptedPromoteService(HAPPY_OUTCOME),
-    });
+  it('merged event passes no devRef to the verifier', async () => {
+    const verifyOpts: Array<OidcVerifyOptions | undefined> = [];
+    const services = makeHappyServices();
+    services.oidcVerifier = {
+      verify: async (_authorization, opts) => {
+        verifyOpts.push(opts);
+        return {
+          repository: OWNER_REPO,
+          ref: 'refs/heads/main',
+          headRef: null,
+          eventName: 'push',
+          jobWorkflowRef: `${OWNER_REPO}/.github/workflows/promote.yml@refs/heads/main`,
+        };
+      },
+    };
 
-    const res = await postPromote(createApp(services), {
+    await postPromote(createApp(services), {
       repo: OWNER_REPO,
       source_branch: FEATURE,
       pr_number: PR,
     });
 
+    expect(verifyOpts).toEqual([undefined]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HU-04.1 — merged PR promotes its feature branch
+// ---------------------------------------------------------------------------
+
+describe('POST /promote — feature-branch promotion bound to the merged PR', () => {
+  type PromoteMeta = Parameters<PromoteServiceLike['promote']>[1];
+
+  function makeFeatureServices(
+    ref = 'refs/heads/main',
+    headRef: string | null = null,
+    extra: Partial<PromotePrincipal> = {},
+  ) {
+    const promoteCalls: Array<{ sessionId: string; meta: PromoteMeta }> = [];
+    const tenants: TenantContext[] = [];
+    const services = makeStubAuthServices({
+      oidcVerifier: makeOidcVerifier(OWNER_REPO, ref, headRef, extra),
+      authRepository: new InMemoryAuthRepository([
+        { remoteUrl: REMOTE_URL, repoId: REPO_ID, projectId: PROJECT_ID, defaultBranch: 'main' },
+      ]),
+      promotionRepository: {
+        ...makePromotionRepo(SESSION_ID),
+        findOpenSessionId: async (tenant: TenantContext) => {
+          tenants.push(tenant);
+          return SESSION_ID;
+        },
+      },
+      promoteService: {
+        promote: async (sessionId, meta) => {
+          promoteCalls.push({ sessionId, meta });
+          return HAPPY_OUTCOME;
+        },
+      },
+    });
+    return { services, promoteCalls, tenants };
+  }
+
+  it('default-branch token + feature source + pr_number → promotes the feature session with origin branch/PR', async () => {
+    const { services, promoteCalls, tenants } = makeFeatureServices();
+
+    const res = await postPromote(createApp(services), {
+      repo: OWNER_REPO,
+      source_branch: FEATURE,
+      pr_number: PR,
+      merge_sha: 'abc123',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(HAPPY_OUTCOME);
+    const featureTenant = { projectId: PROJECT_ID, repoId: REPO_ID, branch: FEATURE };
+    expect(tenants).toEqual([featureTenant]);
+    expect(promoteCalls).toHaveLength(1);
+    expect(promoteCalls[0].sessionId).toBe(SESSION_ID);
+    expect(promoteCalls[0].meta.tenant).toEqual(featureTenant);
+    expect(promoteCalls[0].meta.originBranch).toBe(FEATURE);
+    expect(promoteCalls[0].meta.originPr).toBe(PR);
+    expect(promoteCalls[0].meta.mergeSha).toBe('abc123');
+  });
+
+  it('default branch with pr_number → promotes the default session, origin PR recorded', async () => {
+    const { services, promoteCalls } = makeFeatureServices();
+
+    const res = await postPromote(createApp(services), { ...VALID_BODY, pr_number: PR });
+
+    expect(res.status).toBe(200);
+    expect(promoteCalls[0].meta.tenant.branch).toBe('main');
+    expect(promoteCalls[0].meta.originBranch).toBe('main');
+    expect(promoteCalls[0].meta.originPr).toBe(PR);
+  });
+
+  it('default branch without pr_number → promotes the default session, origin PR null', async () => {
+    const { services, promoteCalls } = makeFeatureServices();
+
+    const res = await postPromote(createApp(services), VALID_BODY);
+
+    expect(res.status).toBe(200);
+    expect(promoteCalls[0].meta.originBranch).toBe('main');
+    expect(promoteCalls[0].meta.originPr).toBeNull();
+  });
+
+  it('feature source without pr_number → denied, nothing promoted', async () => {
+    const { services, promoteCalls } = makeFeatureServices();
+
+    const res = await postPromote(createApp(services), {
+      repo: OWNER_REPO,
+      source_branch: FEATURE,
+    });
+
     expect(res.status).toBe(500);
     expect(res.body).toEqual(OPAQUE_ERROR_BODY);
+    expect(promoteCalls).toHaveLength(0);
   });
+
+  const nonDefaultTokens: Array<[string, string, string | null]> = [
+    ['feature-branch token', `refs/heads/${FEATURE}`, null],
+    ['PR merge-ref token', `refs/pull/${PR}/merge`, FEATURE],
+  ];
+  const sources: Array<[string, Record<string, unknown>]> = [
+    ['feature source + pr_number', { repo: OWNER_REPO, source_branch: FEATURE, pr_number: PR }],
+    ['default source', { repo: OWNER_REPO, source_branch: 'main' }],
+    ['default source + pr_number', { repo: OWNER_REPO, source_branch: 'main', pr_number: PR }],
+  ];
+  const matrix = nonDefaultTokens.flatMap(([tName, ref, headRef]) =>
+    sources.map(([sName, body]) => [`${tName}, ${sName}`, ref, headRef, body] as const),
+  );
+
+  it.each(matrix)('%s → denied, nothing promoted', async (_name, ref, headRef, body) => {
+    const { services, promoteCalls } = makeFeatureServices(ref, headRef);
+
+    const res = await postPromote(createApp(services), { ...body });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual(OPAQUE_ERROR_BODY);
+    expect(promoteCalls).toHaveLength(0);
+    expect(JSON.stringify(res.body)).not.toContain('feature');
+  });
+
+  // Verify M1: a default-branch ref is not enough — the token must come from the
+  // push run of promote.yml on the default branch.
+  const WF = `${OWNER_REPO}/.github/workflows`;
+  const otherWorkflowTokens: Array<[string, Partial<PromotePrincipal>]> = [
+    ['event pull_request_target', { eventName: 'pull_request_target' }],
+    ['event workflow_dispatch', { eventName: 'workflow_dispatch' }],
+    ['event schedule', { eventName: 'schedule' }],
+    ['event_name absent', { eventName: null }],
+    ['other workflow file', { jobWorkflowRef: `${WF}/other.yml@refs/heads/main` }],
+    ['promote.yml on another ref', { jobWorkflowRef: `${WF}/promote.yml@refs/heads/${FEATURE}` }],
+    [
+      'promote.yml from another repository',
+      { jobWorkflowRef: 'evil/fork/.github/workflows/promote.yml@refs/heads/main' },
+    ],
+    ['job_workflow_ref absent', { jobWorkflowRef: null }],
+  ];
+  const workflowMatrix = otherWorkflowTokens.flatMap(([tName, extra]) =>
+    sources.map(([sName, body]) => [`${tName}, ${sName}`, extra, body] as const),
+  );
+
+  it.each(workflowMatrix)(
+    'default-branch token, %s → denied, nothing promoted',
+    async (_name, extra, body) => {
+      const { services, promoteCalls } = makeFeatureServices('refs/heads/main', null, extra);
+
+      const res = await postPromote(createApp(services), { ...body });
+
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual(OPAQUE_ERROR_BODY);
+      expect(promoteCalls).toHaveLength(0);
+    },
+  );
 });
 
 describe('POST /promote — DevOidcAuthenticator (devRef)', () => {
@@ -801,13 +969,26 @@ describe('POST /promote — DevOidcAuthenticator (devRef)', () => {
     expect(res.body).toEqual({ status: 'abandoned', discarded: 2 });
   });
 
-  it('merged on feature/x is still denied (default-branch check)', async () => {
+  it('merged on feature/x without pr_number is denied', async () => {
     const { services } = makeDevServices();
 
     const res = await postPromote(createApp(services), { repo: DEV_REPO, source_branch: FEATURE });
 
     expect(res.status).toBe(500);
     expect(res.body).toEqual(OPAQUE_ERROR_BODY);
+  });
+
+  it('merged on feature/x with pr_number → promoted (stub ref is the default branch)', async () => {
+    const { services } = makeDevServices();
+
+    const res = await postPromote(createApp(services), {
+      repo: DEV_REPO,
+      source_branch: FEATURE,
+      pr_number: PR,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(HAPPY_OUTCOME);
   });
 
   it('merged on main → promote outcome as before', async () => {

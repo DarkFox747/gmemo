@@ -4,9 +4,12 @@
  * DevOidcAuthenticator bypasses GitHub OIDC verification entirely and returns
  * a FIXED repository regardless of the Authorization header (the arg is
  * intentionally ignored). The ref defaults to 'refs/heads/main' and can be
- * overridden with `opts.devRef` (the /promote handler passes
- * 'refs/heads/<source_branch>' so the closed_unmerged demo works locally);
- * headRef is always null. It is chosen at the composition root ONLY when
+ * overridden with `opts.devRef`. The /promote handler passes
+ * 'refs/heads/<source_branch>' only for `closed_unmerged` (so the HU-04.2 demo
+ * works locally); the merged event passes no devRef, so the stub reports the
+ * seeded default branch like the real post-merge workflow token would.
+ * headRef is always null; eventName is 'push' and jobWorkflowRef is promote.yml
+ * on refs/heads/main (devRef does not change them). It is chosen at the composition root ONLY when
  * PROMOTE_OIDC_DEV_BYPASS=true AND NODE_ENV !== 'production'. config.loadConfig()
  * fails fast if that pairing is ever attempted in production, so this class can
  * never run there.
@@ -29,6 +32,10 @@ export const DEV_PROMOTE_PRINCIPAL: PromotePrincipal = {
   repository: 'crombie-llc/gmemo-demo', // == machine_credential.principal_name (seed)
   ref: 'refs/heads/main',
   headRef: null,
+  // Consistent with the fixed repository and default ref: the post-merge push
+  // run of promote.yml on main (the only workflow the merged path accepts).
+  eventName: 'push',
+  jobWorkflowRef: 'crombie-llc/gmemo-demo/.github/workflows/promote.yml@refs/heads/main',
 };
 
 export class DevOidcAuthenticator implements OidcVerifier {

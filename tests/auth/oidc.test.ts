@@ -6,7 +6,8 @@
  *  1. DevOidcAuthenticator — DEV-only stub that always returns the fixed
  *     DEV_PROMOTE_PRINCIPAL regardless of the Authorization header (or its
  *     absence). Verified shape: repository='crombie-llc/gmemo-demo',
- *     ref='refs/heads/main' (or opts.devRef when given), headRef=null.
+ *     ref='refs/heads/main' (or opts.devRef when given), headRef=null,
+ *     eventName='push', jobWorkflowRef=promote.yml on refs/heads/main.
  *
  *  2. GithubOidcAuthenticator — real implementation with an injected fake
  *     OidcJwtVerifier. Tests cover the full fail-closed matrix without any
@@ -81,10 +82,20 @@ describe('DevOidcAuthenticator', () => {
     await expect(auth.verify('garbage!!!')).resolves.toEqual(DEV_PROMOTE_PRINCIPAL);
   });
 
-  it('returned object has exactly the repository, ref and headRef fields', async () => {
+  it('returned object has exactly the principal fields', async () => {
     const principal = await auth.verify(undefined);
-    expect(Object.keys(principal).sort()).toEqual(['headRef', 'ref', 'repository']);
+    expect(Object.keys(principal).sort()).toEqual([
+      'eventName',
+      'headRef',
+      'jobWorkflowRef',
+      'ref',
+      'repository',
+    ]);
     expect(principal.headRef).toBeNull();
+    expect(principal.eventName).toBe('push');
+    expect(principal.jobWorkflowRef).toBe(
+      'crombie-llc/gmemo-demo/.github/workflows/promote.yml@refs/heads/main',
+    );
   });
 
   it('honours opts.devRef as the ref (dev-only), keeping the fixed repository and headRef null', async () => {
@@ -93,6 +104,8 @@ describe('DevOidcAuthenticator', () => {
       repository: 'crombie-llc/gmemo-demo',
       ref: 'refs/heads/feature/x',
       headRef: null,
+      eventName: 'push',
+      jobWorkflowRef: 'crombie-llc/gmemo-demo/.github/workflows/promote.yml@refs/heads/main',
     });
   });
 
@@ -109,16 +122,49 @@ describe('DevOidcAuthenticator', () => {
 describe('GithubOidcAuthenticator — injected fake verifier', () => {
   // --- Happy path ---
 
-  it('valid token → PromotePrincipal { repository, ref, headRef: null }', async () => {
+  it('valid token without optional claims → PromotePrincipal with null optionals', async () => {
     const auth = new GithubOidcAuthenticator(makeFakeVerifier(VALID_CLAIMS));
     const principal = await auth.verify(VALID_HEADER);
-    expect(principal).toEqual({ repository: 'org/repo', ref: 'refs/heads/main', headRef: null });
+    expect(principal).toEqual({
+      repository: 'org/repo',
+      ref: 'refs/heads/main',
+      headRef: null,
+      eventName: null,
+      jobWorkflowRef: null,
+    });
   });
 
-  it('returned principal has exactly the repository, ref and headRef fields', async () => {
+  it('returned principal has exactly the principal fields', async () => {
     const auth = new GithubOidcAuthenticator(makeFakeVerifier(VALID_CLAIMS));
     const principal = await auth.verify(VALID_HEADER);
-    expect(Object.keys(principal).sort()).toEqual(['headRef', 'ref', 'repository']);
+    expect(Object.keys(principal).sort()).toEqual([
+      'eventName',
+      'headRef',
+      'jobWorkflowRef',
+      'ref',
+      'repository',
+    ]);
+  });
+
+  // --- event_name / job_workflow_ref claims (workflow binding for /promote) ---
+
+  it('event_name and job_workflow_ref claims present → extracted', async () => {
+    const jobWorkflowRef = 'org/repo/.github/workflows/promote.yml@refs/heads/main';
+    const auth = new GithubOidcAuthenticator(
+      makeFakeVerifier({ ...VALID_CLAIMS, event_name: 'push', job_workflow_ref: jobWorkflowRef }),
+    );
+    const principal = await auth.verify(VALID_HEADER);
+    expect(principal.eventName).toBe('push');
+    expect(principal.jobWorkflowRef).toBe(jobWorkflowRef);
+  });
+
+  it('event_name / job_workflow_ref empty or not a string → null', async () => {
+    const auth = new GithubOidcAuthenticator(
+      makeFakeVerifier({ ...VALID_CLAIMS, event_name: '', job_workflow_ref: 42 }),
+    );
+    const principal = await auth.verify(VALID_HEADER);
+    expect(principal.eventName).toBeNull();
+    expect(principal.jobWorkflowRef).toBeNull();
   });
 
   // --- head_ref claim (pull_request workflows) ---
@@ -132,6 +178,8 @@ describe('GithubOidcAuthenticator — injected fake verifier', () => {
       repository: 'org/repo',
       ref: 'refs/pull/7/merge',
       headRef: 'feature/x',
+      eventName: null,
+      jobWorkflowRef: null,
     });
   });
 

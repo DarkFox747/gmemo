@@ -11,7 +11,10 @@
  *  3. Assert body.repo === principal.repository (token claim is authoritative)
  *  4. authRepository.findRepoByGithubSlug(principal.repository) → RepoResolution
  *     (null → PERMISSION_DENIED — opaque, no oracle)
- *  5. Build TenantContext from resolution + source_branch
+ *  4a. Token ref must be refs/heads/<default_branch>, event_name 'push' and
+ *      job_workflow_ref promote.yml on that branch (trusted post-merge
+ *      workflow); a feature source_branch also requires pr_number (HU-04.1)
+ *  5. Build TenantContext from resolution + source_branch (the promoted session)
  *  6. authorizer.authorizePromote(principal, tenant) → ActorIdentity
  *  7. promotionRepository.findOpenSessionId(tenant) → sessionId | null
  *     (null → 200 no_op)
@@ -21,8 +24,7 @@
  * `event: 'closed_unmerged'` (HU-04.2) branches off after step 3 into
  * handleClosedUnmerged (rules C1–C7 in design.md): PR-bound ref check, never
  * the default branch, same machine-credential authorization, then abandon the
- * open session and discard its non-promoted items. The merged path (steps
- * 3.5–9) is unchanged; `event` defaults to 'merged'.
+ * open session and discard its non-promoted items. `event` defaults to 'merged'.
  */
 
 import type { NextFunction, Request, Response } from 'express';
@@ -122,7 +124,10 @@ async function handleClosedUnmerged(
     await services.auditLogger.recordAbandon({ tenant, actor }, { sessionId, discarded, prNumber });
   } catch (err) {
     // The abandon is already committed: log the session id only, then fail closed.
-    logger.error('[promote] audit failed after committed abandon', { sessionId, errorName: err instanceof Error ? err.name : 'unknown' });
+    logger.error('[promote] audit failed after committed abandon', {
+      sessionId,
+      errorName: err instanceof Error ? err.name : 'unknown',
+    });
     throw err;
   }
   res.status(200).json({ status: 'abandoned', discarded });
@@ -145,12 +150,16 @@ export function makePromoteHandler(
       }
       const body = bodyResult.data;
 
-      // Step 2: Verify OIDC token → PromotePrincipal { repository, ref, headRef }.
+      // Step 2: Verify OIDC token → PromotePrincipal { repository, ref, headRef, eventName, jobWorkflowRef }.
       // devRef is honoured only by the dev stub (prod-guarded); the real
-      // GitHub verifier ignores it.
-      const principal = await services.oidcVerifier.verify(req.headers.authorization, {
-        devRef: `refs/heads/${body.source_branch}`,
-      });
+      // GitHub verifier ignores it. Only closed_unmerged needs a branch-bound
+      // ref; the merged event keeps the stub default (the default branch).
+      const principal = await services.oidcVerifier.verify(
+        req.headers.authorization,
+        body.event === 'closed_unmerged'
+          ? { devRef: `refs/heads/${body.source_branch}` }
+          : undefined,
+      );
 
       // Step 3: Token claim is authoritative over the body.
       if (body.repo !== principal.repository) {
@@ -162,16 +171,6 @@ export function makePromoteHandler(
         return;
       }
 
-      // Step 3.5: Enforce the OIDC ref claim against the requested source branch.
-      // The token's `ref` is the authoritative signal for which branch the CI workflow
-      // ran on. Strip the full-ref prefix (GitHub tokens use 'refs/heads/<branch>')
-      // and assert it matches body.source_branch so a credential cannot target an
-      // arbitrary branch's staging session.
-      const canonicalRef = principal.ref.replace(/^refs\/heads\//, '');
-      if (canonicalRef !== body.source_branch) {
-        throw new AppError(ErrorCode.PERMISSION_DENIED);
-      }
-
       // Step 4: Resolve tenant from the GitHub slug carried by the token.
       const repoResolution = await services.authRepository.findRepoByGithubSlug(
         principal.repository,
@@ -180,11 +179,22 @@ export function makePromoteHandler(
         throw new AppError(ErrorCode.PERMISSION_DENIED);
       }
 
-      // Step 4a: Enforce that promotion only originates from the repo's default
-      // branch.  A valid OIDC token minted on a feature branch must not be able
-      // to promote that branch's staged items into authoritative memory —
-      // promotion is exclusively a PR-merge-to-default-branch operation.
-      if (body.source_branch !== repoResolution.defaultBranch) {
+      // Step 4a: The token must be minted on the repo's default branch — only the
+      // post-merge workflow (reviewed code) can promote; tokens from feature
+      // branches or PR merge refs are denied. A feature source_branch is the
+      // merged PR's head branch and must carry that PR's number (HU-04.1).
+      if (principal.ref !== `refs/heads/${repoResolution.defaultBranch}`) {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+      // The ref alone is not enough: any default-branch workflow (dispatch,
+      // schedule, pull_request_target running untrusted PR code) can mint a
+      // token with it. Bind the push event and promote.yml on the default
+      // branch; renaming that workflow file requires updating this check.
+      const expectedWorkflowRef = `${principal.repository}/.github/workflows/promote.yml@refs/heads/${repoResolution.defaultBranch}`;
+      if (principal.eventName !== 'push' || principal.jobWorkflowRef !== expectedWorkflowRef) {
+        throw new AppError(ErrorCode.PERMISSION_DENIED);
+      }
+      if (body.source_branch !== repoResolution.defaultBranch && body.pr_number === undefined) {
         throw new AppError(ErrorCode.PERMISSION_DENIED);
       }
 

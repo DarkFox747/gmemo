@@ -11,11 +11,11 @@
  *     gotcha, a decision contradicting an active one, a unit with embedded
  *     instructions, a duplicate, and a credential rejected at capture (HU-03.4).
  *  2. list_staged and recall show the drafts.
- *  3. Merge: the pilot's merge path only promotes the DEFAULT branch session
- *     (POST /promote enforces source_branch == default branch; the promote.yml
- *     workflow runs on push to main). The script shows that the feature branch
- *     is refused, moves the drafts to the main session (re-proposed on main,
- *     discarded on the feature branch) and promotes main, as the workflow does.
+ *  3. Merge (HU-04.1): the promote.yml workflow runs on push to main, finds the
+ *     merged PR of the commit and POSTs /promote with the PR's head branch and
+ *     number. The script shows that the feature branch without pr_number is
+ *     refused, then promotes feature/notif-async with PR_NUMBER, as the workflow
+ *     does (the dev OIDC stub reports ref refs/heads/main, like the real token).
  *  4. Tech lead: review queue, approve the decision superseding the old one,
  *     restore the quarantined duplicate (the pipeline runs again), revalidation job.
  *  5. Final recall: the new decision appears; the superseded decision and the
@@ -356,22 +356,18 @@ async function main(): Promise<void> {
   });
 
   await step('Merge simulado: POST /promote (bypass OIDC de desarrollo)', async () => {
-    const refused = await promote(FEATURE, PR_NUMBER);
+    const refused = await promote(FEATURE);
     check(
       refused.status !== 200,
-      `/promote con source_branch=${FEATURE} se rechaza (solo se promueve la rama por defecto)`,
+      `/promote con source_branch=${FEATURE} sin pr_number se rechaza (debe venir del PR mergeado)`,
     );
     await refused.text();
 
-    for (const unit of UNITS) {
-      const payload = await toolOk(MAIN, 'remember', unit.args);
-      check(payload.state === 'pending', `${unit.label}: llevado a la sesion de ${MAIN}`);
-    }
-    for (const id of featureIds.values()) await toolOk(FEATURE, 'discard_staged', { item_id: id });
-    info(`borradores descartados en ${FEATURE}: ${featureIds.size}`);
-
-    const res = await promote(MAIN, PR_NUMBER);
-    check(res.status === 200, `/promote con source_branch=${MAIN} responde 200`);
+    const res = await promote(FEATURE, PR_NUMBER);
+    check(
+      res.status === 200,
+      `/promote con source_branch=${FEATURE} y pr_number=${PR_NUMBER} responde 200`,
+    );
     const outcome = (await res.json()) as Record<string, unknown>;
     info(`resumen: ${JSON.stringify(outcome)}`);
     check(
@@ -387,8 +383,10 @@ async function main(): Promise<void> {
       Number(outcome.quarantined) >= 2,
       `en cuarentena: ${String(outcome.quarantined)} (>= 2, inyeccion y duplicado)`,
     );
+    const left = (await toolOk(FEATURE, 'list_staged', {})).items as unknown[];
+    check(left.length === 0, `la sesion de ${FEATURE} queda cerrada (sin borradores pendientes)`);
     summary.push(
-      `promote: applied=${String(outcome.applied)} uncertain=${String(outcome.uncertain)} quarantined=${String(outcome.quarantined)}`,
+      `promote ${FEATURE} (PR #${PR_NUMBER}): applied=${String(outcome.applied)} uncertain=${String(outcome.uncertain)} quarantined=${String(outcome.quarantined)}`,
     );
   });
 

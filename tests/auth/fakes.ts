@@ -240,7 +240,12 @@ export class InMemoryAuthRepository implements AuthRepository {
     for (const m of this.memberships) {
       const project = this.projectById.get(m.projectId);
       if (m.userId !== userId || !project || project.archived) continue;
-      result.push({ projectId: project.projectId, slug: project.slug, name: project.name, role: m.role });
+      result.push({
+        projectId: project.projectId,
+        slug: project.slug,
+        name: project.name,
+        role: m.role,
+      });
     }
     // Mirrors ORDER BY p.name, p.id.
     return result.sort(
@@ -348,7 +353,11 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
   };
 
   const stubAuthorizer: Authorizer = {
-    authorize(_principal: Principal, _tenant: TenantContext, _tool: ToolName): Promise<ActorIdentity> {
+    authorize(
+      _principal: Principal,
+      _tenant: TenantContext,
+      _tool: ToolName,
+    ): Promise<ActorIdentity> {
       return Promise.resolve(STUB_ACTOR);
     },
     authorizePromote(_principal: PromotePrincipal, _tenant: TenantContext): Promise<ActorIdentity> {
@@ -447,13 +456,20 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     ) => Promise.resolve('ok' as const),
     recordDecision: (_itemId: string, _d: PersistedDecision, _flags: SanitizeFlags) =>
       Promise.resolve(),
-    applyAccepted: (_item: PromotionItemRow, _ctx: ApplyContext, _embedding: number[] | null): Promise<ApplyResult> =>
+    applyAccepted: (
+      _item: PromotionItemRow,
+      _ctx: ApplyContext,
+      _embedding: number[] | null,
+    ): Promise<ApplyResult> =>
       Promise.resolve({ status: 'applied' as const, memoryId: '', deduped: false }),
     quarantineItem: (_item: PromotionItemRow, _ctx: ApplyContext, _q: QuarantineInput) =>
       Promise.resolve(null),
-    finalizeSession: (_sessionId: string, _status: 'promoted' | 'rejected' | 'partially_promoted') =>
-      Promise.resolve(),
-    approveReviewItem: (_i: ReviewApproveInput) => Promise.resolve({ status: 'not_found' as const }),
+    finalizeSession: (
+      _sessionId: string,
+      _status: 'promoted' | 'rejected' | 'partially_promoted',
+    ) => Promise.resolve(),
+    approveReviewItem: (_i: ReviewApproveInput) =>
+      Promise.resolve({ status: 'not_found' as const }),
     rejectReviewItem: (_i: ReviewRejectInput) => Promise.resolve('not_found' as const),
     abandonOpenSession: (_sessionId: string, _projectId: string) =>
       Promise.resolve({ abandoned: false, discarded: 0 }),
@@ -477,7 +493,13 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
   // Stub OIDC verifier: returns a fixed promote principal.
   const stubOidcVerifier: OidcVerifier = {
     verify: (_authorization: string | undefined) =>
-      Promise.resolve({ repository: 'stub-owner/stub-repo', ref: 'refs/heads/main', headRef: null }),
+      Promise.resolve({
+        repository: 'stub-owner/stub-repo',
+        ref: 'refs/heads/main',
+        headRef: null,
+        eventName: 'push',
+        jobWorkflowRef: 'stub-owner/stub-repo/.github/workflows/promote.yml@refs/heads/main',
+      }),
   };
 
   // Stub auth repository (no seed data — tests that need specific data build their own).

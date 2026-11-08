@@ -104,7 +104,14 @@ describeWithDb('PgPromotionRepository integration', () => {
        VALUES ($1, 'add', 'pattern', $2, $3, $4, $5, 'integ-test-user', $6::jsonb)
        ON CONFLICT (session_id, content_hash) DO NOTHING
        RETURNING id`,
-      [params.sessionId, title, summary, body, params.contentHash, JSON.stringify(params.fields ?? {})],
+      [
+        params.sessionId,
+        title,
+        summary,
+        body,
+        params.contentHash,
+        JSON.stringify(params.fields ?? {}),
+      ],
     );
     if (rows.length > 0) return rows[0].id as string;
     const { rows: existing } = await pool!.query(
@@ -140,8 +147,14 @@ describeWithDb('PgPromotionRepository integration', () => {
        ON CONFLICT (session_id, content_hash) DO NOTHING
        RETURNING id`,
       [
-        params.sessionId, params.op, title, summary, body,
-        params.contentHash, params.targetMemoryId, params.targetRevision,
+        params.sessionId,
+        params.op,
+        title,
+        summary,
+        body,
+        params.contentHash,
+        params.targetMemoryId,
+        params.targetRevision,
       ],
     );
     if (rows.length > 0) return rows[0].id as string;
@@ -217,10 +230,9 @@ describeWithDb('PgPromotionRepository integration', () => {
        ON CONFLICT (slug) DO NOTHING`,
       [PROJECT_SLUG],
     );
-    const { rows: projRows } = await pool.query(
-      `SELECT id FROM project WHERE slug = $1`,
-      [PROJECT_SLUG],
-    );
+    const { rows: projRows } = await pool.query(`SELECT id FROM project WHERE slug = $1`, [
+      PROJECT_SLUG,
+    ]);
     projectId = projRows[0].id as string;
 
     // -- Seed: repo --
@@ -230,10 +242,9 @@ describeWithDb('PgPromotionRepository integration', () => {
        ON CONFLICT (remote_url) DO NOTHING`,
       [projectId, REPO_URL],
     );
-    const { rows: repoRows } = await pool.query(
-      `SELECT id FROM repo WHERE remote_url = $1`,
-      [REPO_URL],
-    );
+    const { rows: repoRows } = await pool.query(`SELECT id FROM repo WHERE remote_url = $1`, [
+      REPO_URL,
+    ]);
     repoId = repoRows[0].id as string;
 
     // -- Seed: main open session (shared by most tests) --
@@ -646,10 +657,9 @@ describeWithDb('PgPromotionRepository integration', () => {
     expect(newMem[0].current_revision).toBe(1);
 
     // Old memory is superseded
-    const { rows: oldMem } = await pool!.query(
-      `SELECT status FROM memory WHERE id = $1`,
-      [oldMemoryId],
-    );
+    const { rows: oldMem } = await pool!.query(`SELECT status FROM memory WHERE id = $1`, [
+      oldMemoryId,
+    ]);
     expect(oldMem[0].status).toBe('superseded');
 
     // memory_relation: from=new, to=old, type=supersedes, source=judge
@@ -894,7 +904,11 @@ describeWithDb('PgPromotionRepository integration', () => {
     });
     const item = await fetchItem(SESS_MAIN, itemId);
     const ctx: ApplyContext = {
-      projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
+      projectId,
+      repoId,
+      originBranch: 'main',
+      originPr: null,
+      sessionId: SESS_MAIN,
       provenance: 'pr_reviewed',
       approvedBy: null,
     };
@@ -907,7 +921,8 @@ describeWithDb('PgPromotionRepository integration', () => {
     });
 
     const { rows: q } = await pool!.query(
-      `SELECT fields FROM quarantine WHERE origin_item_id = $1`, [itemId],
+      `SELECT fields FROM quarantine WHERE origin_item_id = $1`,
+      [itemId],
     );
     expect(q[0].fields).toEqual({});
 
@@ -924,7 +939,8 @@ describeWithDb('PgPromotionRepository integration', () => {
     // SEC-M2: the hash of the secret-bearing content is replaced by
     // sha256(item id : hash of the redacted content), the same value as quarantine's mixed with the id.
     const { rows: qh } = await pool!.query(
-      `SELECT content_hash FROM quarantine WHERE origin_item_id = $1`, [itemId],
+      `SELECT content_hash FROM quarantine WHERE origin_item_id = $1`,
+      [itemId],
     );
     expect(st[0].content_hash).not.toBe('promo-integ-quarantine-redact-fields-001');
     expect(st[0].content_hash).toBe(sha256Hex(`${itemId}:${qh[0].content_hash}`));
@@ -932,11 +948,23 @@ describeWithDb('PgPromotionRepository integration', () => {
 
   it('SEC-M2: two items whole-redacted in the same session do not collide on content_hash', async () => {
     const ids = [
-      await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m2-a', body: 'm2 a AKIAIOSFODNN7EXAMPLE' }),
-      await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m2-b', body: 'm2 b AKIAIOSFODNN7EXAMPLE' }),
+      await insertAddItem({
+        sessionId: SESS_MAIN,
+        contentHash: 'promo-integ-m2-a',
+        body: 'm2 a AKIAIOSFODNN7EXAMPLE',
+      }),
+      await insertAddItem({
+        sessionId: SESS_MAIN,
+        contentHash: 'promo-integ-m2-b',
+        body: 'm2 b AKIAIOSFODNN7EXAMPLE',
+      }),
     ];
     const ctx: ApplyContext = {
-      projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
+      projectId,
+      repoId,
+      originBranch: 'main',
+      originPr: null,
+      sessionId: SESS_MAIN,
       provenance: 'pr_reviewed',
       approvedBy: null,
     };
@@ -950,11 +978,13 @@ describeWithDb('PgPromotionRepository integration', () => {
       expect(qid).not.toBeNull();
     }
     const { rows } = await pool!.query(
-      `SELECT content_hash, body FROM staging_item WHERE id = ANY($1::uuid[])`, [ids],
+      `SELECT content_hash, body FROM staging_item WHERE id = ANY($1::uuid[])`,
+      [ids],
     );
     expect(rows.map((r) => r.body)).toEqual(['[REDACTADO]', '[REDACTADO]']);
     expect(new Set(rows.map((r) => r.content_hash)).size).toBe(2);
-    for (const r of rows) expect(['promo-integ-m2-a', 'promo-integ-m2-b']).not.toContain(r.content_hash);
+    for (const r of rows)
+      expect(['promo-integ-m2-a', 'promo-integ-m2-b']).not.toContain(r.content_hash);
   });
 
   it('quarantineItem writes the decision columns on the staging row', async () => {
@@ -964,7 +994,11 @@ describeWithDb('PgPromotionRepository integration', () => {
     });
     const item = await fetchItem(SESS_MAIN, itemId);
     const ctx: ApplyContext = {
-      projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
+      projectId,
+      repoId,
+      originBranch: 'main',
+      originPr: null,
+      sessionId: SESS_MAIN,
       provenance: 'pr_reviewed',
       approvedBy: null,
     };
@@ -1036,10 +1070,14 @@ describeWithDb('PgPromotionRepository integration', () => {
       sessionId: SESS_MAIN,
       contentHash: 'promo-integ-reviewed-001',
     });
-    expect((await repo!.fetchPromotableItems(SESS_MAIN, projectId)).some((i) => i.id === itemId)).toBe(true);
+    expect(
+      (await repo!.fetchPromotableItems(SESS_MAIN, projectId)).some((i) => i.id === itemId),
+    ).toBe(true);
 
     await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
-    expect((await repo!.fetchPromotableItems(SESS_MAIN, projectId)).some((i) => i.id === itemId)).toBe(false);
+    expect(
+      (await repo!.fetchPromotableItems(SESS_MAIN, projectId)).some((i) => i.id === itemId),
+    ).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -1049,7 +1087,12 @@ describeWithDb('PgPromotionRepository integration', () => {
   it('persistMasked updates content, hash and flags; reports hash_conflict on duplicate hash', async () => {
     const idA = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-mask-a' });
     const idB = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-mask-b' });
-    const masked = { title: 'T [EMAIL]', summary: 'S [PHONE]', body: 'B [ID]', fields: { k: '[EMAIL]' } };
+    const masked = {
+      title: 'T [EMAIL]',
+      summary: 'S [PHONE]',
+      body: 'B [ID]',
+      fields: { k: '[EMAIL]' },
+    };
 
     const ok = await repo!.persistMasked(idA, masked, 'promo-integ-mask-a-new', { pii: ['email'] });
     expect(ok).toBe('ok');
@@ -1059,29 +1102,39 @@ describeWithDb('PgPromotionRepository integration', () => {
       [idA],
     );
     expect(rows[0]).toMatchObject({
-      title: 'T [EMAIL]', summary: 'S [PHONE]', body: 'B [ID]',
-      fields: { k: '[EMAIL]' }, content_hash: 'promo-integ-mask-a-new',
+      title: 'T [EMAIL]',
+      summary: 'S [PHONE]',
+      body: 'B [ID]',
+      fields: { k: '[EMAIL]' },
+      content_hash: 'promo-integ-mask-a-new',
       sanitize_flags: { pii: ['email'] },
     });
 
     // idB masked to the same hash within the same session -> UNIQUE violation
-    const conflict = await repo!.persistMasked(idB, masked, 'promo-integ-mask-a-new', { pii: ['email'] });
+    const conflict = await repo!.persistMasked(idB, masked, 'promo-integ-mask-a-new', {
+      pii: ['email'],
+    });
     expect(conflict).toBe('hash_conflict');
     const { rows: bRows } = await pool!.query(
-      `SELECT content_hash FROM staging_item WHERE id = $1`, [idB],
+      `SELECT content_hash FROM staging_item WHERE id = $1`,
+      [idB],
     );
     expect(bRows[0].content_hash).toBe('promo-integ-mask-b');
   });
 
   it('persistMasked does not touch an already-reviewed item', async () => {
-    const id = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-mask-reviewed' });
+    const id = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-mask-reviewed',
+    });
     await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [id]);
     const masked = { title: 'T2', summary: 'S2', body: 'B2', fields: {} };
 
     await repo!.persistMasked(id, masked, 'promo-integ-mask-reviewed-new', {});
 
     const { rows } = await pool!.query(
-      `SELECT title, content_hash FROM staging_item WHERE id = $1`, [id],
+      `SELECT title, content_hash FROM staging_item WHERE id = $1`,
+      [id],
     );
     expect(rows[0].content_hash).toBe('promo-integ-mask-reviewed');
     expect(rows[0].title).not.toBe('T2');
@@ -1102,12 +1155,14 @@ describeWithDb('PgPromotionRepository integration', () => {
     const word = 'zorblaxcontext';
     const ids: string[] = [];
     for (let i = 0; i < 4; i++) {
-      ids.push(await insertMemory({
-        contentHash: `promo-integ-ctx-${i}`,
-        title: `${word} memory ${i}`,
-        summary: `About ${word} number ${i}.`,
-        body: `Body for ${word} ${i}.`,
-      }));
+      ids.push(
+        await insertMemory({
+          contentHash: `promo-integ-ctx-${i}`,
+          title: `${word} memory ${i}`,
+          summary: `About ${word} number ${i}.`,
+          body: `Body for ${word} ${i}.`,
+        }),
+      );
     }
     // Non-active memory must not appear.
     const deprecatedId = await insertMemory({
@@ -1126,16 +1181,23 @@ describeWithDb('PgPromotionRepository integration', () => {
       expect(Object.keys(c).sort()).toEqual(['id', 'summary', 'title', 'type']);
     }
 
-    const excluded = await repo!.findJudgeContext(projectId, { title: word, summary: '' }, ctxItems[0]!.id);
+    const excluded = await repo!.findJudgeContext(
+      projectId,
+      { title: word, summary: '' },
+      ctxItems[0]!.id,
+    );
     expect(excluded.some((c: { id: string }) => c.id === ctxItems[0]!.id)).toBe(false);
 
-    expect(await repo!.findJudgeContext(projectId, { title: 'a b', summary: 'it' }, null)).toEqual([]);
+    expect(await repo!.findJudgeContext(projectId, { title: 'a b', summary: 'it' }, null)).toEqual(
+      [],
+    );
   });
 
   it('findJudgeContext is project-scoped', async () => {
     const other = 'promotion-repo-integ-test-other';
     await pool!.query(
-      `INSERT INTO project (slug, name) VALUES ($1, 'Other') ON CONFLICT (slug) DO NOTHING`, [other],
+      `INSERT INTO project (slug, name) VALUES ($1, 'Other') ON CONFLICT (slug) DO NOTHING`,
+      [other],
     );
     const { rows: pr } = await pool!.query(`SELECT id FROM project WHERE slug = $1`, [other]);
     const otherProject = pr[0].id as string;
@@ -1147,9 +1209,17 @@ describeWithDb('PgPromotionRepository integration', () => {
                  'active', 'pr_reviewed', 'seed-user', 'promo-integ-scope-other')`,
         [otherProject],
       );
-      const mine = await repo!.findJudgeContext(projectId, { title: 'quxscopedword', summary: '' }, null);
+      const mine = await repo!.findJudgeContext(
+        projectId,
+        { title: 'quxscopedword', summary: '' },
+        null,
+      );
       expect(mine).toEqual([]);
-      const theirs = await repo!.findJudgeContext(otherProject, { title: 'quxscopedword', summary: '' }, null);
+      const theirs = await repo!.findJudgeContext(
+        otherProject,
+        { title: 'quxscopedword', summary: '' },
+        null,
+      );
       expect(theirs).toHaveLength(1);
     } finally {
       await pool!.query(`DELETE FROM project WHERE slug = $1`, [other]);
@@ -1174,20 +1244,18 @@ describeWithDb('PgPromotionRepository integration', () => {
   it('finalizeSession transitions an open session to rejected', async () => {
     await repo!.finalizeSession(SESS_FIN_REJECTED, 'rejected');
 
-    const { rows } = await pool!.query(
-      `SELECT status FROM staging_session WHERE id = $1`,
-      [SESS_FIN_REJECTED],
-    );
+    const { rows } = await pool!.query(`SELECT status FROM staging_session WHERE id = $1`, [
+      SESS_FIN_REJECTED,
+    ]);
     expect(rows[0].status).toBe('rejected');
   });
 
   it('finalizeSession transitions an open session to partially_promoted', async () => {
     await repo!.finalizeSession(SESS_FIN_PARTIAL, 'partially_promoted');
 
-    const { rows } = await pool!.query(
-      `SELECT status FROM staging_session WHERE id = $1`,
-      [SESS_FIN_PARTIAL],
-    );
+    const { rows } = await pool!.query(`SELECT status FROM staging_session WHERE id = $1`, [
+      SESS_FIN_PARTIAL,
+    ]);
     expect(rows[0].status).toBe('partially_promoted');
   });
 
@@ -1196,10 +1264,9 @@ describeWithDb('PgPromotionRepository integration', () => {
     // Second call with a different status should not overwrite
     await repo!.finalizeSession(SESS_FIN_NOOP, 'rejected');
 
-    const { rows } = await pool!.query(
-      `SELECT status FROM staging_session WHERE id = $1`,
-      [SESS_FIN_NOOP],
-    );
+    const { rows } = await pool!.query(`SELECT status FROM staging_session WHERE id = $1`, [
+      SESS_FIN_NOOP,
+    ]);
     expect(rows[0].status).toBe('promoted'); // first finalize wins
   });
 
@@ -1239,8 +1306,13 @@ describeWithDb('PgPromotionRepository integration', () => {
   // -------------------------------------------------------------------------
 
   const mainCtx = (): ApplyContext => ({
-    projectId, repoId, originBranch: 'main', originPr: null, sessionId: SESS_MAIN,
-    provenance: 'pr_reviewed', approvedBy: null,
+    projectId,
+    repoId,
+    originBranch: 'main',
+    originPr: null,
+    sessionId: SESS_MAIN,
+    provenance: 'pr_reviewed',
+    approvedBy: null,
   });
 
   async function insertTypedMemory(type: string, contentHash: string): Promise<string> {
@@ -1256,7 +1328,11 @@ describeWithDb('PgPromotionRepository integration', () => {
     return rows[0].id as string;
   }
 
-  async function insertTypedAmend(type: string, contentHash: string, targetId: string): Promise<string> {
+  async function insertTypedAmend(
+    type: string,
+    contentHash: string,
+    targetId: string,
+  ): Promise<string> {
     const { rows } = await pool!.query(
       `INSERT INTO staging_item
          (session_id, op, type, title, summary, body, content_hash,
@@ -1275,7 +1351,10 @@ describeWithDb('PgPromotionRepository integration', () => {
     const item = await fetchItem(SESS_MAIN, itemId);
     expect(item.target_type).toBe('decision');
 
-    const addId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m1-fetch-add' });
+    const addId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-m1-fetch-add',
+    });
     expect((await fetchItem(SESS_MAIN, addId)).target_type).toBeNull();
   });
 
@@ -1288,12 +1367,17 @@ describeWithDb('PgPromotionRepository integration', () => {
     expect(result).toEqual({ status: 'review_required' });
 
     const { rows: mem } = await pool!.query(
-      `SELECT type, current_revision, title FROM memory WHERE id = $1`, [memId],
+      `SELECT type, current_revision, title FROM memory WHERE id = $1`,
+      [memId],
     );
-    expect(mem[0]).toMatchObject({ type: 'decision', current_revision: 1, title: 'Typed seed memory' });
-    const { rows: st } = await pool!.query(
-      `SELECT promoted_at FROM staging_item WHERE id = $1`, [itemId],
-    );
+    expect(mem[0]).toMatchObject({
+      type: 'decision',
+      current_revision: 1,
+      title: 'Typed seed memory',
+    });
+    const { rows: st } = await pool!.query(`SELECT promoted_at FROM staging_item WHERE id = $1`, [
+      itemId,
+    ]);
     expect(st[0].promoted_at).toBeNull();
   });
 
@@ -1304,22 +1388,33 @@ describeWithDb('PgPromotionRepository integration', () => {
 
     const result = await repo!.applyAccepted(item, mainCtx(), null, new Set(['decision']));
     expect(result).toEqual({ status: 'review_required' });
-    const { rows: mem } = await pool!.query(`SELECT current_revision FROM memory WHERE id = $1`, [memId]);
+    const { rows: mem } = await pool!.query(`SELECT current_revision FROM memory WHERE id = $1`, [
+      memId,
+    ]);
     expect(mem[0].current_revision).toBe(1);
   });
 
   it('SEC M-3: quarantineItem on an applied or reviewed item writes nothing (no orphan row)', async () => {
-    const appliedId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m3-applied' });
+    const appliedId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-m3-applied',
+    });
     const applied = await fetchItem(SESS_MAIN, appliedId);
     expect((await repo!.applyAccepted(applied, mainCtx(), null, new Set())).status).toBe('applied');
 
-    const reviewedId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m3-reviewed' });
+    const reviewedId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-m3-reviewed',
+    });
     const reviewed = await fetchItem(SESS_MAIN, reviewedId);
     await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [reviewedId]);
 
     for (const item of [applied, reviewed]) {
       await repo!.quarantineItem(item, mainCtx(), {
-        reason: 'specificity', redact: 'none', decision: null, sanitizeFlags: {},
+        reason: 'specificity',
+        redact: 'none',
+        decision: null,
+        sanitizeFlags: {},
       });
     }
 
@@ -1329,57 +1424,90 @@ describeWithDb('PgPromotionRepository integration', () => {
     );
     expect(q[0].n).toBe(0);
     const { rows: st } = await pool!.query(
-      `SELECT id, judge_state FROM staging_item WHERE id = ANY($1::uuid[])`, [[appliedId, reviewedId]],
+      `SELECT id, judge_state FROM staging_item WHERE id = ANY($1::uuid[])`,
+      [[appliedId, reviewedId]],
     );
     expect(st).toHaveLength(2);
     for (const r of st) expect(r.judge_state).not.toBe('rejected');
   });
 
   it('SEC M-3: recordDecision does not touch a reviewed item', async () => {
-    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m3-record' });
+    const itemId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-m3-record',
+    });
     await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
-    await repo!.recordDecision(itemId, {
-      verdict: 'uncertain', criterion: 'confidence', confidence: 0.1,
-      reason: 'late', relatedMemoryId: null, mandatoryReview: true,
-    }, {});
+    await repo!.recordDecision(
+      itemId,
+      {
+        verdict: 'uncertain',
+        criterion: 'confidence',
+        confidence: 0.1,
+        reason: 'late',
+        relatedMemoryId: null,
+        mandatoryReview: true,
+      },
+      {},
+    );
     const { rows } = await pool!.query(
-      `SELECT judge_state, judge_reason FROM staging_item WHERE id = $1`, [itemId],
+      `SELECT judge_state, judge_reason FROM staging_item WHERE id = $1`,
+      [itemId],
     );
     expect(rows[0]).toEqual({ judge_state: 'pending', judge_reason: null });
   });
 
   it('Reviewer M1: R3/R4 keep the judge justification on staging; quarantine keeps the code', async () => {
-    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m1r-just' });
+    const itemId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-m1r-just',
+    });
     const item = await fetchItem(SESS_MAIN, itemId);
     await repo!.quarantineItem(item, mainCtx(), {
       reason: 'specificity',
       redact: 'none',
       decision: {
-        verdict: 'rejected', criterion: 'specificity', confidence: 0.9,
+        verdict: 'rejected',
+        criterion: 'specificity',
+        confidence: 0.9,
         reason: 'Too generic: no file, module or concrete behaviour named.',
-        relatedMemoryId: null, mandatoryReview: false,
+        relatedMemoryId: null,
+        mandatoryReview: false,
       },
       sanitizeFlags: {},
     });
-    const { rows: st } = await pool!.query(`SELECT judge_reason FROM staging_item WHERE id = $1`, [itemId]);
+    const { rows: st } = await pool!.query(`SELECT judge_reason FROM staging_item WHERE id = $1`, [
+      itemId,
+    ]);
     expect(st[0].judge_reason).toBe('Too generic: no file, module or concrete behaviour named.');
-    const { rows: q } = await pool!.query(`SELECT judge_reason FROM quarantine WHERE origin_item_id = $1`, [itemId]);
+    const { rows: q } = await pool!.query(
+      `SELECT judge_reason FROM quarantine WHERE origin_item_id = $1`,
+      [itemId],
+    );
     expect(q[0].judge_reason).toBe('specificity');
   });
 
   it('Reviewer M1: a redacted judge quarantine keeps the constant on staging', async () => {
-    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-m1r-redact' });
+    const itemId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-m1r-redact',
+    });
     const item = await fetchItem(SESS_MAIN, itemId);
     await repo!.quarantineItem(item, mainCtx(), {
       reason: 'security_second_layer',
       redact: 'whole',
       decision: {
-        verdict: 'rejected', criterion: 'security_second_layer', confidence: 0.9,
-        reason: 'security_second_layer', relatedMemoryId: null, mandatoryReview: false,
+        verdict: 'rejected',
+        criterion: 'security_second_layer',
+        confidence: 0.9,
+        reason: 'security_second_layer',
+        relatedMemoryId: null,
+        mandatoryReview: false,
       },
       sanitizeFlags: { leak: true },
     });
-    const { rows: st } = await pool!.query(`SELECT judge_reason FROM staging_item WHERE id = $1`, [itemId]);
+    const { rows: st } = await pool!.query(`SELECT judge_reason FROM staging_item WHERE id = $1`, [
+      itemId,
+    ]);
     expect(st[0].judge_reason).toBe('security_second_layer');
   });
 
@@ -1391,15 +1519,25 @@ describeWithDb('PgPromotionRepository integration', () => {
     });
     const item = await fetchItem(SESS_MAIN, itemId);
     await repo!.quarantineItem(item, mainCtx(), {
-      reason: 'secret_detected', redact: 'whole', decision: null,
+      reason: 'secret_detected',
+      redact: 'whole',
+      decision: null,
       sanitizeFlags: { leak: true, secrets: ['aws_access_key_id'] },
     });
     const sentinel = '[REDACTADO]';
     const expected = computeContentHash({
-      op: 'add', type: 'pattern', title: sentinel, summary: sentinel, body: sentinel,
-      fields: {}, target: null,
+      op: 'add',
+      type: 'pattern',
+      title: sentinel,
+      summary: sentinel,
+      body: sentinel,
+      fields: {},
+      target: null,
     });
-    const { rows: q } = await pool!.query(`SELECT content_hash FROM quarantine WHERE origin_item_id = $1`, [itemId]);
+    const { rows: q } = await pool!.query(
+      `SELECT content_hash FROM quarantine WHERE origin_item_id = $1`,
+      [itemId],
+    );
     expect(q[0].content_hash).toBe(expected);
     expect(q[0].content_hash).not.toBe('promo-integ-l7-original-hash');
   });
@@ -1412,7 +1550,9 @@ describeWithDb('PgPromotionRepository integration', () => {
     });
     const item = await fetchItem(SESS_MAIN, itemId);
     await repo!.quarantineItem(item, mainCtx(), {
-      reason: 'secret_detected', redact: 'spans', decision: null,
+      reason: 'secret_detected',
+      redact: 'spans',
+      decision: null,
       sanitizeFlags: { leak: true, secrets: ['aws_access_key_id'] },
     });
     const { rows: q } = await pool!.query(
@@ -1438,14 +1578,24 @@ describeWithDb('PgPromotionRepository integration', () => {
       });
       const item = await fetchItem(SESS_MAIN, itemId);
       await repo!.quarantineItem(item, mainCtx(), {
-        reason: 'secret_detected', redact: 'spans', decision: null,
+        reason: 'secret_detected',
+        redact: 'spans',
+        decision: null,
         sanitizeFlags: { leak: true, secrets: ['aws_access_key_id'] },
       });
       const { rows: q } = await pool!.query(
-        `SELECT title, summary, body, fields FROM quarantine WHERE origin_item_id = $1`, [itemId],
+        `SELECT title, summary, body, fields FROM quarantine WHERE origin_item_id = $1`,
+        [itemId],
       );
-      expect(q[0]).toEqual({ title: '[REDACTADO]', summary: '[REDACTADO]', body: '[REDACTADO]', fields: {} });
-      const { rows: st } = await pool!.query(`SELECT body FROM staging_item WHERE id = $1`, [itemId]);
+      expect(q[0]).toEqual({
+        title: '[REDACTADO]',
+        summary: '[REDACTADO]',
+        body: '[REDACTADO]',
+        fields: {},
+      });
+      const { rows: st } = await pool!.query(`SELECT body FROM staging_item WHERE id = $1`, [
+        itemId,
+      ]);
       expect(st[0].body).toBe('[REDACTADO]');
       expect(warn).toHaveBeenCalledWith(
         '[promote] span redaction re-check failed — whole-field fallback',
@@ -1463,13 +1613,22 @@ describeWithDb('PgPromotionRepository integration', () => {
     const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c3-r3' });
     const item = await fetchItem(SESS_MAIN, itemId);
     // Simulate an amend snapshot (target columns come from the item).
-    const amend: PromotionItemRow = { ...item, op: 'amend', target_memory_id: targetId, target_revision: 3 };
+    const amend: PromotionItemRow = {
+      ...item,
+      op: 'amend',
+      target_memory_id: targetId,
+      target_revision: 3,
+    };
     await repo!.quarantineItem(amend, mainCtx(), {
       reason: 'duplicate_content',
       redact: 'none',
       decision: {
-        verdict: 'rejected', criterion: 'duplication', confidence: 0.9,
-        reason: 'same as existing', relatedMemoryId: relatedId, mandatoryReview: false,
+        verdict: 'rejected',
+        criterion: 'duplication',
+        confidence: 0.9,
+        reason: 'same as existing',
+        relatedMemoryId: relatedId,
+        mandatoryReview: false,
       },
       sanitizeFlags: {},
     });
@@ -1479,8 +1638,11 @@ describeWithDb('PgPromotionRepository integration', () => {
       [itemId],
     );
     expect(q[0]).toEqual({
-      criterion: 'judge', reason_code: 'duplicate_content',
-      related_memory_id: relatedId, target_memory_id: targetId, target_revision: 3,
+      criterion: 'judge',
+      reason_code: 'duplicate_content',
+      related_memory_id: relatedId,
+      target_memory_id: targetId,
+      target_revision: 3,
     });
   });
 
@@ -1488,28 +1650,46 @@ describeWithDb('PgPromotionRepository integration', () => {
     const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c3-r2' });
     const item = await fetchItem(SESS_MAIN, itemId);
     await repo!.quarantineItem(item, mainCtx(), {
-      reason: 'security_second_layer', redact: 'whole',
+      reason: 'security_second_layer',
+      redact: 'whole',
       decision: {
-        verdict: 'rejected', criterion: 'security_second_layer', confidence: 0.9,
-        reason: 'security_second_layer', relatedMemoryId: null, mandatoryReview: false,
+        verdict: 'rejected',
+        criterion: 'security_second_layer',
+        confidence: 0.9,
+        reason: 'security_second_layer',
+        relatedMemoryId: null,
+        mandatoryReview: false,
       },
       sanitizeFlags: { leak: true },
     });
     const { rows: q } = await pool!.query(
-      `SELECT criterion, reason_code, body FROM quarantine WHERE origin_item_id = $1`, [itemId],
+      `SELECT criterion, reason_code, body FROM quarantine WHERE origin_item_id = $1`,
+      [itemId],
     );
-    expect(q[0]).toEqual({ criterion: 'judge', reason_code: 'secret_detected', body: '[REDACTADO]' });
+    expect(q[0]).toEqual({
+      criterion: 'judge',
+      reason_code: 'secret_detected',
+      body: '[REDACTADO]',
+    });
   });
 
   it('C3: quarantineItem returns null when the item was resolved meanwhile', async () => {
-    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c3-null' });
+    const itemId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-c3-null',
+    });
     const item = await fetchItem(SESS_MAIN, itemId);
     await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
     const id = await repo!.quarantineItem(item, mainCtx(), {
-      reason: 'specificity', redact: 'none', decision: null, sanitizeFlags: {},
+      reason: 'specificity',
+      redact: 'none',
+      decision: null,
+      sanitizeFlags: {},
     });
     expect(id).toBeNull();
-    const { rows } = await pool!.query(`SELECT 1 FROM quarantine WHERE origin_item_id = $1`, [itemId]);
+    const { rows } = await pool!.query(`SELECT 1 FROM quarantine WHERE origin_item_id = $1`, [
+      itemId,
+    ]);
     expect(rows).toHaveLength(0);
   });
 
@@ -1526,12 +1706,27 @@ describeWithDb('PgPromotionRepository integration', () => {
     const maskedTitle = 'Owner [EMAIL] m2';
     // Sibling already holds the masked content under its canonical hash.
     const maskedHash = computeContentHash({
-      op: 'add', type: 'pattern', title: maskedTitle, summary, body, fields: {}, target: null,
+      op: 'add',
+      type: 'pattern',
+      title: maskedTitle,
+      summary,
+      body,
+      fields: {},
+      target: null,
     });
-    await insertAddItem({ sessionId: SESS_M2, contentHash: maskedHash, title: maskedTitle, summary, body });
+    await insertAddItem({
+      sessionId: SESS_M2,
+      contentHash: maskedHash,
+      title: maskedTitle,
+      summary,
+      body,
+    });
     const rawId = await insertAddItem({
-      sessionId: SESS_M2, contentHash: 'promo-integ-m2-raw',
-      title: 'Owner jane.doe@example.com m2', summary, body,
+      sessionId: SESS_M2,
+      contentHash: 'promo-integ-m2-raw',
+      title: 'Owner jane.doe@example.com m2',
+      summary,
+      body,
     });
 
     const { PromoteService } = await import('../../src/promote/promoteService.js');
@@ -1552,12 +1747,16 @@ describeWithDb('PgPromotionRepository integration', () => {
     });
 
     const { rows } = await pool!.query(
-      `SELECT title, judge_state, judge_reason FROM staging_item WHERE id = $1`, [rawId],
+      `SELECT title, judge_state, judge_reason FROM staging_item WHERE id = $1`,
+      [rawId],
     );
     expect(rows[0].judge_state).toBe('rejected');
     expect(rows[0].judge_reason).toBe('duplicate_content');
     expect(rows[0].title).toBe(maskedTitle);
-    const { rows: q } = await pool!.query(`SELECT title FROM quarantine WHERE origin_item_id = $1`, [rawId]);
+    const { rows: q } = await pool!.query(
+      `SELECT title FROM quarantine WHERE origin_item_id = $1`,
+      [rawId],
+    );
     expect(q[0].title).toBe(maskedTitle);
   });
 
@@ -1566,34 +1765,49 @@ describeWithDb('PgPromotionRepository integration', () => {
   // -------------------------------------------------------------------------
 
   it('C2 guard: applyAccepted on a human-reviewed row → already, nothing written', async () => {
-    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c2-reviewed-apply' });
+    const itemId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-c2-reviewed-apply',
+    });
     const item = await fetchItem(SESS_MAIN, itemId);
     await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
 
-    expect(await repo!.applyAccepted(item, mainCtx(), null, new Set())).toEqual({ status: 'already' });
+    expect(await repo!.applyAccepted(item, mainCtx(), null, new Set())).toEqual({
+      status: 'already',
+    });
     const { rows: mem } = await pool!.query(
       `SELECT count(*)::int AS n FROM memory WHERE project_id = $1 AND content_hash = $2`,
       [projectId, 'promo-integ-c2-reviewed-apply'],
     );
     expect(mem[0].n).toBe(0);
     const { rows: st } = await pool!.query(
-      `SELECT promoted_at, judge_state FROM staging_item WHERE id = $1`, [itemId],
+      `SELECT promoted_at, judge_state FROM staging_item WHERE id = $1`,
+      [itemId],
     );
     expect(st[0]).toEqual({ promoted_at: null, judge_state: 'pending' });
   });
 
   it('C2 guard: quarantineItem on a human-reviewed row logs a warning and writes nothing', async () => {
-    const itemId = await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c2-reviewed-q' });
+    const itemId = await insertAddItem({
+      sessionId: SESS_MAIN,
+      contentHash: 'promo-integ-c2-reviewed-q',
+    });
     const item = await fetchItem(SESS_MAIN, itemId);
     await pool!.query(`UPDATE staging_item SET reviewed_at = now() WHERE id = $1`, [itemId]);
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     await repo!.quarantineItem(item, mainCtx(), {
-      reason: 'specificity', redact: 'none', decision: null, sanitizeFlags: {},
+      reason: 'specificity',
+      redact: 'none',
+      decision: null,
+      sanitizeFlags: {},
     });
-    expect(warn).toHaveBeenCalledWith('[promote] quarantine skipped: item resolved concurrently', { itemId });
+    expect(warn).toHaveBeenCalledWith('[promote] quarantine skipped: item resolved concurrently', {
+      itemId,
+    });
     warn.mockRestore();
     const { rows } = await pool!.query(
-      `SELECT count(*)::int AS n FROM quarantine WHERE origin_item_id = $1`, [itemId],
+      `SELECT count(*)::int AS n FROM quarantine WHERE origin_item_id = $1`,
+      [itemId],
     );
     expect(rows[0].n).toBe(0);
   });
@@ -1609,10 +1823,15 @@ describeWithDb('PgPromotionRepository integration', () => {
        VALUES ($1, $2, $3, 'feature/abandon', 'integ-test-user')`,
       [SESS_AB, projectId, repoId],
     );
-    const promotedId = await insertAddItem({ sessionId: SESS_AB, contentHash: 'promo-integ-ab-promoted' });
+    const promotedId = await insertAddItem({
+      sessionId: SESS_AB,
+      contentHash: 'promo-integ-ab-promoted',
+    });
     const promoted = await fetchItem(SESS_AB, promotedId);
-    expect((await repo!.applyAccepted(promoted, { ...mainCtx(), sessionId: SESS_AB }, null, new Set())).status)
-      .toBe('applied');
+    expect(
+      (await repo!.applyAccepted(promoted, { ...mainCtx(), sessionId: SESS_AB }, null, new Set()))
+        .status,
+    ).toBe('applied');
     for (const h of ['promo-integ-ab-1', 'promo-integ-ab-2', 'promo-integ-ab-3']) {
       await insertAddItem({ sessionId: SESS_AB, contentHash: h });
     }
@@ -1622,16 +1841,29 @@ describeWithDb('PgPromotionRepository integration', () => {
       `INSERT INTO project (slug, name) VALUES ('promo-integ-abandon-other', 'x')
        ON CONFLICT (slug) DO UPDATE SET name = 'x' RETURNING id`,
     );
-    expect(await repo!.abandonOpenSession(SESS_AB, other[0].id)).toEqual({ abandoned: false, discarded: 0 });
+    expect(await repo!.abandonOpenSession(SESS_AB, other[0].id)).toEqual({
+      abandoned: false,
+      discarded: 0,
+    });
 
-    expect(await repo!.abandonOpenSession(SESS_AB, projectId)).toEqual({ abandoned: true, discarded: 3 });
-    const { rows: sess } = await pool!.query(`SELECT status FROM staging_session WHERE id = $1`, [SESS_AB]);
+    expect(await repo!.abandonOpenSession(SESS_AB, projectId)).toEqual({
+      abandoned: true,
+      discarded: 3,
+    });
+    const { rows: sess } = await pool!.query(`SELECT status FROM staging_session WHERE id = $1`, [
+      SESS_AB,
+    ]);
     expect(sess[0].status).toBe('abandoned');
-    const { rows: left } = await pool!.query(`SELECT id FROM staging_item WHERE session_id = $1`, [SESS_AB]);
+    const { rows: left } = await pool!.query(`SELECT id FROM staging_item WHERE session_id = $1`, [
+      SESS_AB,
+    ]);
     expect(left.map((r) => r.id)).toEqual([promotedId]);
 
     // Repeat: no-op.
-    expect(await repo!.abandonOpenSession(SESS_AB, projectId)).toEqual({ abandoned: false, discarded: 0 });
+    expect(await repo!.abandonOpenSession(SESS_AB, projectId)).toEqual({
+      abandoned: false,
+      discarded: 0,
+    });
     await pool!.query(`DELETE FROM project WHERE slug = 'promo-integ-abandon-other'`);
   });
 
@@ -1640,7 +1872,9 @@ describeWithDb('PgPromotionRepository integration', () => {
   // -------------------------------------------------------------------------
 
   async function revalidateAt(memoryId: string): Promise<Date | null> {
-    const { rows } = await pool!.query(`SELECT revalidate_at FROM memory WHERE id = $1`, [memoryId]);
+    const { rows } = await pool!.query(`SELECT revalidate_at FROM memory WHERE id = $1`, [
+      memoryId,
+    ]);
     return rows[0].revalidate_at as Date | null;
   }
 
@@ -1660,7 +1894,12 @@ describeWithDb('PgPromotionRepository integration', () => {
   }
 
   async function applyItem(sessionId: string, itemId: string, r = repo) {
-    return r!.applyAccepted(await fetchItem(sessionId, itemId), { ...mainCtx(), sessionId }, null, new Set());
+    return r!.applyAccepted(
+      await fetchItem(sessionId, itemId),
+      { ...mainCtx(), sessionId },
+      null,
+      new Set(),
+    );
   }
 
   it('C4: add sets revalidate_at to now + REVALIDATION_DAYS', async () => {
@@ -1673,15 +1912,25 @@ describeWithDb('PgPromotionRepository integration', () => {
   });
 
   it('C4: an outcome add has no deadline (NULL)', async () => {
-    const r = await applyItem(SESS_MAIN, await insertTypedAdd('outcome', 'promo-integ-c4-add-outcome'));
+    const r = await applyItem(
+      SESS_MAIN,
+      await insertTypedAdd('outcome', 'promo-integ-c4-add-outcome'),
+    );
     if (r.status !== 'applied') throw new Error(r.status);
     expect(await revalidateAt(r.memoryId)).toBeNull();
   });
 
   it('C4: the deadline follows the configured REVALIDATION_DAYS', async () => {
     const { PgPromotionRepository } = await import('../../src/db/promotionRepository.js');
-    const repo7 = new PgPromotionRepository(pool!, { quarantineRetentionDays: 60, revalidationDays: 7 });
-    const r = await applyItem(SESS_MAIN, await insertTypedAdd('pattern', 'promo-integ-c4-add-7d'), repo7);
+    const repo7 = new PgPromotionRepository(pool!, {
+      quarantineRetentionDays: 60,
+      revalidationDays: 7,
+    });
+    const r = await applyItem(
+      SESS_MAIN,
+      await insertTypedAdd('pattern', 'promo-integ-c4-add-7d'),
+      repo7,
+    );
     if (r.status !== 'applied') throw new Error(r.status);
     const d = await revalidateAt(r.memoryId);
     expect(daysFromNow(d!)).toBeGreaterThan(6.9);
@@ -1690,17 +1939,27 @@ describeWithDb('PgPromotionRepository integration', () => {
 
   it('C4: amend resets a deadline that was 10 days away to now + 60 days', async () => {
     const targetId = await insertTypedMemory('pattern', 'promo-integ-c4-amend-target');
-    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '10 days' WHERE id = $1`, [targetId]);
-    const r = await applyItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c4-amend-item', targetId));
+    await pool!.query(
+      `UPDATE memory SET revalidate_at = now() + interval '10 days' WHERE id = $1`,
+      [targetId],
+    );
+    const r = await applyItem(
+      SESS_MAIN,
+      await insertTypedAmend('pattern', 'promo-integ-c4-amend-item', targetId),
+    );
     expect(r.status).toBe('applied');
     expect(daysFromNow((await revalidateAt(targetId))!)).toBeGreaterThan(59.9);
   });
 
   it('C4: amend of an outcome clears the deadline (NULL)', async () => {
     const targetId = await insertTypedMemory('outcome', 'promo-integ-c4-amend-outcome-target');
-    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '10 days' WHERE id = $1`, [targetId]);
+    await pool!.query(
+      `UPDATE memory SET revalidate_at = now() + interval '10 days' WHERE id = $1`,
+      [targetId],
+    );
     const r = await applyItem(
-      SESS_MAIN, await insertTypedAmend('outcome', 'promo-integ-c4-amend-outcome-item', targetId),
+      SESS_MAIN,
+      await insertTypedAmend('outcome', 'promo-integ-c4-amend-outcome-item', targetId),
     );
     expect(r.status).toBe('applied');
     expect(await revalidateAt(targetId)).toBeNull();
@@ -1709,8 +1968,12 @@ describeWithDb('PgPromotionRepository integration', () => {
   it('C4: supersede sets the deadline on the new row', async () => {
     const targetId = await insertMemory({ contentHash: 'promo-integ-c4-sup-target' });
     const itemId = await insertTargetItem({
-      sessionId: SESS_MAIN, op: 'supersede', contentHash: 'promo-integ-c4-sup-item',
-      targetMemoryId: targetId, targetRevision: 1, title: 'C4 superseding title',
+      sessionId: SESS_MAIN,
+      op: 'supersede',
+      contentHash: 'promo-integ-c4-sup-item',
+      targetMemoryId: targetId,
+      targetRevision: 1,
+      title: 'C4 superseding title',
     });
     const r = await applyItem(SESS_MAIN, itemId);
     expect(r.status).toBe('applied');
@@ -1726,24 +1989,37 @@ describeWithDb('PgPromotionRepository integration', () => {
        VALUES ($1, $2, $3, 'c4-dedup-branch', 'integ-test-user') ON CONFLICT DO NOTHING`,
       [SESS_C4, projectId, repoId],
     );
-    const r1 = await applyItem(SESS_MAIN, await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c4-dedup' }));
+    const r1 = await applyItem(
+      SESS_MAIN,
+      await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c4-dedup' }),
+    );
     expect(r1.status).toBe('applied');
     if (r1.status !== 'applied') return;
-    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '3 days' WHERE id = $1`, [r1.memoryId]);
+    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '3 days' WHERE id = $1`, [
+      r1.memoryId,
+    ]);
     const before = await revalidateAt(r1.memoryId);
 
-    const r2 = await applyItem(SESS_C4, await insertAddItem({ sessionId: SESS_C4, contentHash: 'promo-integ-c4-dedup' }));
+    const r2 = await applyItem(
+      SESS_C4,
+      await insertAddItem({ sessionId: SESS_C4, contentHash: 'promo-integ-c4-dedup' }),
+    );
     expect(r2).toMatchObject({ status: 'applied', memoryId: r1.memoryId, deduped: true });
     expect(await revalidateAt(r1.memoryId)).toEqual(before);
   });
 
   it('C4: deprecate leaves the deadline untouched', async () => {
     const targetId = await insertMemory({ contentHash: 'promo-integ-c4-dep-target' });
-    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '5 days' WHERE id = $1`, [targetId]);
+    await pool!.query(`UPDATE memory SET revalidate_at = now() + interval '5 days' WHERE id = $1`, [
+      targetId,
+    ]);
     const before = await revalidateAt(targetId);
     const itemId = await insertTargetItem({
-      sessionId: SESS_MAIN, op: 'deprecate', contentHash: 'promo-integ-c4-dep-item',
-      targetMemoryId: targetId, targetRevision: 1,
+      sessionId: SESS_MAIN,
+      op: 'deprecate',
+      contentHash: 'promo-integ-c4-dep-item',
+      targetMemoryId: targetId,
+      targetRevision: 1,
     });
     expect((await applyItem(SESS_MAIN, itemId)).status).toBe('applied');
     expect(await revalidateAt(targetId)).toEqual(before);
@@ -1751,8 +2027,13 @@ describeWithDb('PgPromotionRepository integration', () => {
 
   it('C4: a pending_revalidation target makes an amend stale', async () => {
     const targetId = await insertTypedMemory('pattern', 'promo-integ-c4-pending-target');
-    await pool!.query(`UPDATE memory SET status = 'pending_revalidation' WHERE id = $1`, [targetId]);
-    const r = await applyItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c4-pending-item', targetId));
+    await pool!.query(`UPDATE memory SET status = 'pending_revalidation' WHERE id = $1`, [
+      targetId,
+    ]);
+    const r = await applyItem(
+      SESS_MAIN,
+      await insertTypedAmend('pattern', 'promo-integ-c4-pending-item', targetId),
+    );
     expect(r).toEqual({ status: 'stale' });
   });
 
@@ -1770,31 +2051,49 @@ describeWithDb('PgPromotionRepository integration', () => {
     return rows[0].id as string;
   }
 
-  async function provenanceOf(memoryId: string): Promise<{ provenance: string; approved_by: string | null }> {
-    const { rows } = await pool!.query(`SELECT provenance, approved_by FROM memory WHERE id = $1`, [memoryId]);
+  async function provenanceOf(
+    memoryId: string,
+  ): Promise<{ provenance: string; approved_by: string | null }> {
+    const { rows } = await pool!.query(`SELECT provenance, approved_by FROM memory WHERE id = $1`, [
+      memoryId,
+    ]);
     return rows[0];
   }
 
-  const webCtx = (approvedBy: string): ApplyContext => ({ ...mainCtx(), provenance: 'web_ui', approvedBy });
+  const webCtx = (approvedBy: string): ApplyContext => ({
+    ...mainCtx(),
+    provenance: 'web_ui',
+    approvedBy,
+  });
 
   it('C5: an automatic add stores pr_reviewed and approved_by NULL', async () => {
     const r = await applyItem(SESS_MAIN, await insertTypedAdd('gotcha', 'promo-integ-c5-auto-add'));
     if (r.status !== 'applied') throw new Error(r.status);
-    expect(await provenanceOf(r.memoryId)).toEqual({ provenance: 'pr_reviewed', approved_by: null });
+    expect(await provenanceOf(r.memoryId)).toEqual({
+      provenance: 'pr_reviewed',
+      approved_by: null,
+    });
   });
 
   it('C5: web_ui + approver are stored on add and on amend', async () => {
     const tl = await approverId();
     const add = await repo!.applyAccepted(
       await fetchItem(SESS_MAIN, await insertTypedAdd('pattern', 'promo-integ-c5-web-add')),
-      webCtx(tl), null, new Set(),
+      webCtx(tl),
+      null,
+      new Set(),
     );
     if (add.status !== 'applied') throw new Error(add.status);
     expect(await provenanceOf(add.memoryId)).toEqual({ provenance: 'web_ui', approved_by: tl });
 
     const amend = await repo!.applyAccepted(
-      await fetchItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c5-web-amend', add.memoryId)),
-      webCtx(tl), null, new Set(),
+      await fetchItem(
+        SESS_MAIN,
+        await insertTypedAmend('pattern', 'promo-integ-c5-web-amend', add.memoryId),
+      ),
+      webCtx(tl),
+      null,
+      new Set(),
     );
     expect(amend.status).toBe('applied');
     expect(await provenanceOf(add.memoryId)).toEqual({ provenance: 'web_ui', approved_by: tl });
@@ -1803,8 +2102,14 @@ describeWithDb('PgPromotionRepository integration', () => {
   it('C5: an automatic amend over an approved memory clears approved_by', async () => {
     const tl = await approverId();
     const targetId = await insertTypedMemory('pattern', 'promo-integ-c5-approved-target');
-    await pool!.query(`UPDATE memory SET approved_by = $1, provenance = 'web_ui' WHERE id = $2`, [tl, targetId]);
-    const r = await applyItem(SESS_MAIN, await insertTypedAmend('pattern', 'promo-integ-c5-auto-amend', targetId));
+    await pool!.query(`UPDATE memory SET approved_by = $1, provenance = 'web_ui' WHERE id = $2`, [
+      tl,
+      targetId,
+    ]);
+    const r = await applyItem(
+      SESS_MAIN,
+      await insertTypedAmend('pattern', 'promo-integ-c5-auto-amend', targetId),
+    );
     expect(r.status).toBe('applied');
     expect(await provenanceOf(targetId)).toEqual({ provenance: 'pr_reviewed', approved_by: null });
   });
@@ -1817,14 +2122,25 @@ describeWithDb('PgPromotionRepository integration', () => {
        VALUES ($1, $2, $3, 'c5-dedup-branch', 'integ-test-user') ON CONFLICT DO NOTHING`,
       [SESS_C5, projectId, repoId],
     );
-    const first = await applyItem(SESS_MAIN, await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c5-dedup' }));
+    const first = await applyItem(
+      SESS_MAIN,
+      await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c5-dedup' }),
+    );
     if (first.status !== 'applied') throw new Error(first.status);
     const second = await repo!.applyAccepted(
-      await fetchItem(SESS_C5, await insertAddItem({ sessionId: SESS_C5, contentHash: 'promo-integ-c5-dedup' })),
-      { ...webCtx(tl), sessionId: SESS_C5 }, null, new Set(),
+      await fetchItem(
+        SESS_C5,
+        await insertAddItem({ sessionId: SESS_C5, contentHash: 'promo-integ-c5-dedup' }),
+      ),
+      { ...webCtx(tl), sessionId: SESS_C5 },
+      null,
+      new Set(),
     );
     expect(second).toMatchObject({ status: 'applied', memoryId: first.memoryId, deduped: true });
-    expect(await provenanceOf(first.memoryId)).toEqual({ provenance: 'pr_reviewed', approved_by: null });
+    expect(await provenanceOf(first.memoryId)).toEqual({
+      provenance: 'pr_reviewed',
+      approved_by: null,
+    });
   });
 
   it('CR-M3: an automatic dedup re-add leaves an existing (non-null) approver', async () => {
@@ -1836,12 +2152,18 @@ describeWithDb('PgPromotionRepository integration', () => {
       [SESS_M3, projectId, repoId],
     );
     const first = await repo!.applyAccepted(
-      await fetchItem(SESS_MAIN, await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c5-m3-dedup' })),
-      webCtx(tl), null, new Set(),
+      await fetchItem(
+        SESS_MAIN,
+        await insertAddItem({ sessionId: SESS_MAIN, contentHash: 'promo-integ-c5-m3-dedup' }),
+      ),
+      webCtx(tl),
+      null,
+      new Set(),
     );
     if (first.status !== 'applied') throw new Error(first.status);
     const second = await applyItem(
-      SESS_M3, await insertAddItem({ sessionId: SESS_M3, contentHash: 'promo-integ-c5-m3-dedup' }),
+      SESS_M3,
+      await insertAddItem({ sessionId: SESS_M3, contentHash: 'promo-integ-c5-m3-dedup' }),
     );
     expect(second).toMatchObject({ status: 'applied', memoryId: first.memoryId, deduped: true });
     expect(await provenanceOf(first.memoryId)).toEqual({ provenance: 'web_ui', approved_by: tl });
@@ -1851,12 +2173,103 @@ describeWithDb('PgPromotionRepository integration', () => {
     const tl = await approverId();
     const targetId = await insertMemory({ contentHash: 'promo-integ-c5-sup-target' });
     const itemId = await insertTargetItem({
-      sessionId: SESS_MAIN, op: 'supersede', contentHash: 'promo-integ-c5-sup-item',
-      targetMemoryId: targetId, targetRevision: 1,
+      sessionId: SESS_MAIN,
+      op: 'supersede',
+      contentHash: 'promo-integ-c5-sup-item',
+      targetMemoryId: targetId,
+      targetRevision: 1,
     });
-    const r = await repo!.applyAccepted(await fetchItem(SESS_MAIN, itemId), webCtx(tl), null, new Set());
+    const r = await repo!.applyAccepted(
+      await fetchItem(SESS_MAIN, itemId),
+      webCtx(tl),
+      null,
+      new Set(),
+    );
     if (r.status !== 'applied') throw new Error(r.status);
     expect(r.memoryId).not.toBe(targetId);
     expect(await provenanceOf(r.memoryId)).toEqual({ provenance: 'web_ui', approved_by: tl });
+  });
+
+  // -------------------------------------------------------------------------
+  // HU-04.1: a merged PR promotes its feature branch through POST /promote
+  // -------------------------------------------------------------------------
+
+  it('HU-04.1: /promote with a default-branch token promotes feature/x with origin branch/PR; repeat → no_op', async () => {
+    const SESS_FEATURE = 'promo-integ-feature-x-01';
+    const FEATURE = 'feature/x';
+    await pool!.query(
+      `INSERT INTO staging_session (id, project_id, repo_id, branch, opened_by)
+       VALUES ($1, $2, $3, $4, 'integ-test-user') ON CONFLICT DO NOTHING`,
+      [SESS_FEATURE, projectId, repoId, FEATURE],
+    );
+    await insertAddItem({
+      sessionId: SESS_FEATURE,
+      contentHash: 'promo-integ-feature-x-item',
+      title: 'Feature branch item promoted by the merged PR',
+    });
+
+    const { PromoteService } = await import('../../src/promote/promoteService.js');
+    const { FakeJudge, FakeAuditLogger, FakeNotifier, DEFAULT_ROUTING } =
+      await import('../promote/fakes.js');
+    const { createApp } = await import('../../src/http/app.js');
+    const { makeStubAuthServices, InMemoryAuthRepository } = await import('../auth/fakes.js');
+    const { default: request } = await import('supertest');
+
+    const slug = 'test/promotion-repo-integ-test';
+    const services = makeStubAuthServices({
+      // Token minted on the default branch (trusted post-merge workflow).
+      oidcVerifier: {
+        verify: async () => ({
+          repository: slug,
+          ref: 'refs/heads/main',
+          headRef: null,
+          eventName: 'push',
+          jobWorkflowRef: `${slug}/.github/workflows/promote.yml@refs/heads/main`,
+        }),
+      },
+      authRepository: new InMemoryAuthRepository([
+        { remoteUrl: `https://github.com/${slug}.git`, repoId, projectId, defaultBranch: 'main' },
+      ]),
+      promotionRepository: repo,
+      promoteService: new PromoteService({
+        promotionRepository: repo,
+        judge: new FakeJudge(),
+        auditLogger: new FakeAuditLogger(),
+        embedder: { embed: () => Promise.reject(new Error('no embedder in this test')) },
+        notifier: new FakeNotifier(),
+        routing: DEFAULT_ROUTING,
+      }),
+    });
+    const app = createApp(services);
+    const body = { repo: slug, source_branch: FEATURE, pr_number: 7, merge_sha: 'abc123' };
+
+    const first = await request(app).post('/promote').set('Authorization', 'Bearer t').send(body);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ status: 'promoted', applied: 1 });
+
+    const { rows } = await pool!.query(
+      `SELECT origin_branch, origin_pr FROM memory WHERE project_id = $1 AND content_hash = $2`,
+      [projectId, 'promo-integ-feature-x-item'],
+    );
+    expect(rows).toEqual([{ origin_branch: FEATURE, origin_pr: 7 }]);
+    const { rows: sess } = await pool!.query(`SELECT status FROM staging_session WHERE id = $1`, [
+      SESS_FEATURE,
+    ]);
+    expect(sess[0].status).toBe('promoted');
+
+    const second = await request(app).post('/promote').set('Authorization', 'Bearer t').send(body);
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual({
+      status: 'no_op',
+      applied: 0,
+      deduped: 0,
+      quarantined: 0,
+      uncertain: 0,
+    });
+    const { rows: count } = await pool!.query(
+      `SELECT count(*)::int AS n FROM memory WHERE project_id = $1 AND content_hash = $2`,
+      [projectId, 'promo-integ-feature-x-item'],
+    );
+    expect(count[0].n).toBe(1);
   });
 });
