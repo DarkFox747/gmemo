@@ -258,8 +258,6 @@ const services: AppServices = {
   oidcVerifier,
   promoteService,
   embedder,                                                  // ← shared by PromoteService + recall handler
-  semanticFallbackMinResults: config.SEMANTIC_FALLBACK_MIN_RESULTS,
-  semanticFallbackK: config.SEMANTIC_FALLBACK_K,
   notifier: logNotifier,
   reviewService,
   quarantineService,

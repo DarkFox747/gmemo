@@ -37,7 +37,7 @@ const CTX: RequestContext = {
   actor:  { actorId: 'test-actor', roles: ['contributor'] },
 };
 
-/** Three main memories in the project — gives total_matches=3 and forces pagination at limit=2. */
+/** Three main memories matching 'architecture' — total_matches=3 and pagination at limit=2. */
 const MAIN_MEMORIES: FakeMemory[] = [
   {
     id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
@@ -58,7 +58,7 @@ const MAIN_MEMORIES: FakeMemory[] = [
     type: 'pattern',
     title: 'Repository pattern for data access',
     summary: 'Standard repository pattern for the data layer',
-    body: 'Repository pattern details and guidelines.',
+    body: 'Repository pattern details and architecture guidelines.',
     currentRevision: 1,
     updatedAt: new Date('2025-06-02T00:00:00Z'),
     status: 'active',
@@ -70,7 +70,7 @@ const MAIN_MEMORIES: FakeMemory[] = [
     type: 'constraint',
     title: 'Constraint on external dependencies',
     summary: 'No new runtime dependencies without review',
-    body: 'All new runtime dependencies require a formal review.',
+    body: 'All new runtime dependencies require a formal architecture review.',
     currentRevision: 1,
     updatedAt: new Date('2025-06-01T00:00:00Z'),
     status: 'active',
@@ -112,7 +112,7 @@ const STAGED_ITEMS: FakeStagingItem[] = [
 
 /** Recall request with limit=2 so the 3 main memories produce a cursor. */
 const BASE_REQUEST: RecallRequest = {
-  query: 'architecture decision',
+  query: 'architecture',
   scope: 'project',
   limit: 2,
 };
@@ -124,11 +124,7 @@ function makeDeps(
   return {
     memoryRepository: new InMemoryMemoryRepository(memories),
     stagingRepository: stagingRepo,
-    // semanticFallbackMinResults: 0 ensures Phase 2 never fires in these staging-mix tests
-    // (totalMatches < 0 is always false).
     embedder: { embed: (_: string) => Promise.resolve([] as number[]) },
-    semanticFallbackMinResults: 0,
-    semanticFallbackK: 8,
   };
 }
 

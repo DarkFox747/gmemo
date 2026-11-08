@@ -2,17 +2,18 @@
  * T241: recall handler — behavior tests via InMemoryMemoryRepository.
  *
  * These tests exercise the REAL handler logic wired to the seedable fake
- * (no DB, no network). After Group B rewrites recallHandler to use
- * deps.memoryRepository, all cases here must pass.
+ * (no DB, no network). The handler fuses the lexical and semantic candidate
+ * lists with RRF (see tests/mcp/recallRrf.test.ts for the fusion cases); the
+ * stub embedder here yields no vectors, so the fused order is the lexical order.
  *
  * Cases:
  *  1. Ranking order — higher-term-hit record ranks above lower-term-hit record.
  *  2. Project scope vs repo scope — scope='repo' excludes records from other repos.
  *  3. Type filter — types=['decision'] excludes non-decision records.
- *  4. Pagination + cursor round-trip — page 1 returns cursor; page 2 exhausts it.
+ *  4. Pagination + offset-cursor round-trip — page 1 returns cursor; page 2 exhausts it.
  *  5. Empty result — no seed → results:[], total_matches:0, cursor:null.
  *
- * Every result has source:'main' (D1: staging is deferred, recall is main-only).
+ * Every result has source:'main' (no staged drafts are seeded in these tests).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -58,11 +59,7 @@ function makeDeps(memories: FakeMemory[], now?: Date): HandlerDeps {
   return {
     memoryRepository: new InMemoryMemoryRepository(memories, [], nowFn),
     stagingRepository: EMPTY_STAGING_REPO,
-    // semanticFallbackMinResults: 0 ensures Phase 2 never fires in these behavior tests
-    // (totalMatches < 0 is always false).
     embedder: { embed: (_: string) => Promise.resolve([] as number[]) },
-    semanticFallbackMinResults: 0,
-    semanticFallbackK: 8,
   };
 }
 

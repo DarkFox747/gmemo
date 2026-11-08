@@ -33,7 +33,18 @@ Combina dos métodos (ninguno solo alcanza):
 - **Léxica/full-text (BM25):** tsvector + ts_rank. Fuerte con identificadores/términos exactos; débil con sinónimos.
 - **Semántica/vectorial (pgvector):** por significado. Fuerte con lenguaje natural; débil con identificadores.
 - **Híbrida:** corre ambas y fusiona rankings (Reciprocal Rank Fusion) + time-decay + filtros por tipo/status.
-Fases: arrancar léxica (ya en el esquema: tsvector+GIN), sumar semántica con pgvector; la interfaz no cambia.
+
+Implementación (`recall`):
+- Candidatos: top 50 léxicos (BM25 con time-decay `rank / (1 + edad_días/30)`) y top 50 semánticos
+  (coseno pgvector), ambos solo `status = 'active'` del proyecto y con los filtros de tipo/scope.
+- Fusión RRF: `score(d) = Σ 1/(60 + rank_i(d))`, rank desde 1, empates por id de memoria. `k = 60` y
+  los 50 candidatos son constantes (no configuración).
+- Devuelve `limit` registros (default 5, máx. 8) ordenados por score fusionado; con `scope=project`
+  primero las memorias del repo de la consulta. `total_matches` = candidatos fusionados.
+- Paginación por cursor de offset sobre la lista fusionada (un score calculado en consulta no tiene
+  clave keyset estable).
+- Fail-soft: si falla el embedding o la consulta semántica, se usa solo el ranking léxico y se registra
+  un warning (nunca silencioso).
 
 ## Alcance (repo → proyecto)
 - 1 repo: buscar el repo = buscar el proyecto.

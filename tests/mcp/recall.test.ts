@@ -10,8 +10,7 @@ import type { StagingRepository } from '../../src/db/stagingRepository.js';
  * T041 (updated for change B): recall handler — contract shape conformance.
  *
  * Calls recallHandler directly (bypassing MCP transport) with a seeded
- * InMemoryMemoryRepository as deps.  After Group B rewrites the handler body
- * to call deps.memoryRepository, these tests validate:
+ * InMemoryMemoryRepository as deps (RRF hybrid recall).  These tests validate:
  *  - RecallResponse shape (results array, total_matches number, cursor)
  *  - Every MemoryRecord has the required keys with correct types
  *  - source is always "main" (D1: staging deferred — no source:"staged" records)
@@ -99,11 +98,7 @@ function makeDeps(memories: FakeMemory[]): HandlerDeps {
   return {
     memoryRepository: new InMemoryMemoryRepository(memories),
     stagingRepository: EMPTY_STAGING_REPO,
-    // semanticFallbackMinResults: 0 ensures Phase 2 never fires in these shape tests
-    // (totalMatches < 0 is always false).
     embedder: { embed: (_: string) => Promise.resolve([] as number[]) },
-    semanticFallbackMinResults: 0,
-    semanticFallbackK: 8,
   };
 }
 

@@ -4,32 +4,27 @@
  * Provides:
  *  - FakeMemory / FakeRelation — seed types for the in-memory repository fake.
  *  - InMemoryMemoryRepository  — seedable, deterministic fake of MemoryRepository
- *    that reuses encodeRecallCursor/decodeRecallCursor from the production module
- *    so pagination is exercised with identical cursor codec logic.
+ *    exposing the two RRF candidate lists (lexical + semantic).
  *
  * Deterministic rank formula (mirrors the SQL decay heuristic, §D4):
  *   rank = (distinct query terms found in title + summary + body)
  *          / (1 + ageDays / 30)
  * where ageDays is derived from row.updated_at vs the injected `now`.
  *
- * The fake does NOT filter by FTS match — it returns all active, correctly-scoped
- * records.  Tests therefore control which records appear by scoping projectId /
- * repoId / type, and control rank by choosing updatedAt and query terms.
+ * The lexical list mirrors the FTS `@@` filter: a record is a lexical candidate
+ * only when at least one query term appears in its text.  Tests control rank by
+ * choosing updatedAt and query terms, and the semantic list by injecting
+ * `embedding` vectors on the seeds.
  */
 
 import type {
   MemoryRepository,
   MemoryRow,
-  RecallParams,
-  RecallResult,
+  LexicalCandidateParams,
   RelationRow,
   MemoryDetail,
   ContextRecords,
-  RecallSemanticFilters,
-} from '../../src/db/memoryRepository.js';
-import {
-  encodeRecallCursor,
-  decodeRecallCursor,
+  RecallCandidateFilters,
 } from '../../src/db/memoryRepository.js';
 import type { TenantContext } from '../../src/mcp/context.js';
 import type { MemoryType } from '../../src/contracts/memory.js';
@@ -88,8 +83,8 @@ export interface FakeRelation {
  *
  *   rank = termHits / (1 + ageDays / 30)
  *
- * A rank of 0 is returned when no terms match; those records still appear
- * in results (ranked last) because the fake does not apply a FTS filter.
+ * A rank of 0 is returned when no terms match; such records are not lexical
+ * candidates (mirrors the FTS `@@` filter).
  */
 function computeRank(row: MemoryRow, query: string, now: Date): number {
   const terms = query
@@ -164,6 +159,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
   private toMemoryRow(m: FakeMemory): MemoryRow {
     return {
       id: m.id,
+      repo_id: m.repoId ?? null,
       type: m.type,
       title: m.title,
       summary: m.summary,
@@ -177,75 +173,38 @@ export class InMemoryMemoryRepository implements MemoryRepository {
   }
 
   // -------------------------------------------------------------------------
-  // recall
+  // recallLexicalCandidates
   // -------------------------------------------------------------------------
 
-  async recall(tenant: TenantContext, params: RecallParams): Promise<RecallResult> {
-    const { query, scope, types, limit, cursor } = params;
+  async recallLexicalCandidates(
+    tenant: TenantContext,
+    params: LexicalCandidateParams,
+    limit: number,
+  ): Promise<MemoryRow[]> {
+    const { query, scope, types } = params;
     const now = this.now();
 
-    // Decode cursor; throws AppError(INVALID_REFERENCE) on malformed (same as prod).
-    let decoded: { rank: number; id: string } | null = null;
-    if (cursor) {
-      decoded = decodeRecallCursor(cursor);
-    }
-
-    // 1. Filter: active, same project, optional repo-scope, optional type filter.
-    const candidates = Array.from(this.memories.values()).filter((m) => {
-      if ((m.status ?? 'active') !== 'active') return false;
-      if (m.projectId !== tenant.projectId) return false;
-      if (scope === 'repo') {
-        if (m.repoId !== tenant.repoId) return false;
-      }
-      if (types && types.length > 0 && !types.includes(m.type)) return false;
-      return true;
-    });
-
-    // 2. Total matches = all candidates (mirrors the separate COUNT query in prod).
-    const totalMatches = candidates.length;
-
-    // 3. Compute rank and sort by (rank DESC, id DESC).
-    const ranked = candidates
+    return Array.from(this.memories.values())
+      .filter((m) => {
+        if ((m.status ?? 'active') !== 'active') return false;
+        if (m.projectId !== tenant.projectId) return false;
+        if (scope === 'repo' && m.repoId !== tenant.repoId) return false;
+        if (types && types.length > 0 && !types.includes(m.type)) return false;
+        return true;
+      })
       .map((m) => {
         const row = this.toMemoryRow(m);
-        const rank = computeRank(row, query, now);
-        return { row, rank };
+        return { row, rank: computeRank(row, query, now) };
       })
+      .filter((item) => item.rank > 0)
       .sort((a, b) => {
         if (b.rank !== a.rank) return b.rank - a.rank;
-        // Tie-break: id DESC (lexicographic descending).
+        // Tie-break: id DESC (lexicographic descending), as in the SQL.
         if (a.row.id < b.row.id) return 1;
-        if (a.row.id > b.row.id) return -1;
-        return 0;
-      });
-
-    // 4. Apply keyset cursor: skip to the first item "after" the cursor position
-    //    in (rank DESC, id DESC) order.
-    const startIndex = decoded
-      ? ranked.findIndex(
-          (item) =>
-            item.rank < decoded!.rank ||
-            (item.rank === decoded!.rank && item.row.id < decoded!.id),
-        )
-      : 0;
-
-    const page = startIndex === -1 ? [] : ranked.slice(startIndex);
-
-    // 5. Fetch limit + 1 to detect the next page (mirrors prod).
-    const hasNextPage = page.length > limit;
-    const resultItems = hasNextPage ? page.slice(0, limit) : page;
-
-    let nextCursor: string | null = null;
-    if (hasNextPage && resultItems.length > 0) {
-      const last = resultItems[resultItems.length - 1];
-      nextCursor = encodeRecallCursor({ rank: last.rank, id: last.row.id });
-    }
-
-    return {
-      rows: resultItems.map((item) => item.row),
-      totalMatches,
-      nextCursor,
-    };
+        return a.row.id > b.row.id ? -1 : 0;
+      })
+      .slice(0, limit)
+      .map((item) => item.row);
   }
 
   // -------------------------------------------------------------------------
@@ -255,7 +214,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
   async recallSemantic(
     tenant: TenantContext,
     queryEmbedding: number[],
-    filters: RecallSemanticFilters,
+    filters: RecallCandidateFilters,
     excludeIds: string[],
     k: number,
   ): Promise<MemoryRow[]> {

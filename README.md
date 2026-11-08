@@ -90,7 +90,6 @@ en local no hace falta `Authorization`.
 | `BEDROCK_EMBEDDING_MODEL_ID` | — | requerida si `EMBEDDER_STUB` no es `true` |
 | `AWS_REGION` | — | requerida si algún cliente Bedrock real está activo |
 | `BEDROCK_MAX_ATTEMPTS`, `BEDROCK_TIMEOUT_MS` | `3`, `15000` | cliente Bedrock |
-| `SEMANTIC_FALLBACK_MIN_RESULTS`, `SEMANTIC_FALLBACK_K` | `5`, `8` | recall semántico de respaldo |
 | `RATE_LIMIT_ENABLED` | `true` | `false` prohibido en producción |
 | `RATE_LIMIT_MCP_WINDOW_MS`, `RATE_LIMIT_MCP_MAX` | `60000`, `120` | límite de `/mcp` |
 | `RATE_LIMIT_PROMOTE_WINDOW_MS`, `RATE_LIMIT_PROMOTE_MAX` | `60000`, `10` | límite de `/promote` |

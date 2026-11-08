@@ -70,8 +70,6 @@ function makeDeps(
     memoryRepository: new InMemoryMemoryRepository(memories),
     stagingRepository: stagingRepo,
     embedder: { embed: (_: string) => Promise.resolve([] as number[]) },
-    semanticFallbackMinResults: 0,
-    semanticFallbackK: 8,
     notifier,
   };
 }

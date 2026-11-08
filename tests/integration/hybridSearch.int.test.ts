@@ -19,6 +19,12 @@
  *     - rows with embedding IS NULL are never returned by recallSemantic
  *     - excludeIds parameter correctly removes the specified rows from results
  *
+ *  4. RRF candidate lists (C6):
+ *     - recallLexicalCandidates: rank order (title match before body match),
+ *       repo_id carried, scope=repo hard filter, limit honoured
+ *     - recallHandler end-to-end over Pg: a lexical-only hit and a semantic-only
+ *       hit are both fused into the result list
+ *
  * Seed rows are isolated to a unique PROJECT_SLUG. Teardown deletes the
  * project row which cascades to all repo + memory rows (idempotent).
  *
@@ -336,5 +342,135 @@ describeWithDb('hybrid-search integration — 0005 schema + recallSemantic', () 
 
     const ids = (results as Array<{ id: string }>).map((r) => r.id);
     expect(ids).not.toContain(excludedId);
+  });
+
+  // =========================================================================
+  // 4. RRF candidate lists (C6)
+  // =========================================================================
+
+  /** Unique token so these rows never collide with rows seeded by other tests. */
+  const RRF_TOKEN = 'lexicalrrfzzq';
+
+  async function seedMemory(args: {
+    repo: string;
+    title: string;
+    body: string;
+    hash: string;
+    embedding?: number[] | null;
+  }): Promise<string> {
+    const { toVectorParam } = await import('../../src/db/vector.js');
+    await pool!.query(
+      `INSERT INTO memory
+         (project_id, repo_id, type, title, summary, body,
+          status, provenance, author_identity, content_hash, embedding)
+       VALUES ($1, $2, 'decision', $3, 'RRF integration summary', $4,
+               'active', 'pr_reviewed', 'integ-test-user', $5, $6::vector)
+       ON CONFLICT (project_id, content_hash) DO NOTHING`,
+      [projectId, args.repo, args.title, args.body, args.hash, toVectorParam(args.embedding ?? null)],
+    );
+    const { rows } = await pool!.query(
+      `SELECT id FROM memory WHERE project_id = $1 AND content_hash = $2`,
+      [projectId, args.hash],
+    );
+    return rows[0].id as string;
+  }
+
+  async function seedOtherRepo(): Promise<string> {
+    const url = `${REPO_URL}-other`;
+    await pool!.query(
+      `INSERT INTO repo (project_id, remote_url) VALUES ($1, $2)
+       ON CONFLICT (remote_url) DO NOTHING`,
+      [projectId, url],
+    );
+    const { rows } = await pool!.query(`SELECT id FROM repo WHERE remote_url = $1`, [url]);
+    return rows[0].id as string;
+  }
+
+  it('recallLexicalCandidates orders by rank, carries repo_id, filters scope and honours limit', async () => {
+    const otherRepoId = await seedOtherRepo();
+    const titleHit = await seedMemory({
+      repo: repoId,
+      title: `${RRF_TOKEN} in the title`,
+      body: 'Plain body without the token.',
+      hash: 'rrf-lex-title',
+    });
+    const bodyHit = await seedMemory({
+      repo: otherRepoId,
+      title: 'Plain title',
+      body: `Body that mentions ${RRF_TOKEN} once.`,
+      hash: 'rrf-lex-body',
+    });
+    const tenant = { projectId, repoId, branch: 'main' };
+
+    const projectRows = await repo!.recallLexicalCandidates(
+      tenant,
+      { query: RRF_TOKEN, scope: 'project' },
+      50,
+    );
+    expect(projectRows.map((r) => r.id)).toEqual([titleHit, bodyHit]);
+    expect(projectRows.map((r) => r.repo_id)).toEqual([repoId, otherRepoId]);
+
+    const repoRows = await repo!.recallLexicalCandidates(
+      tenant,
+      { query: RRF_TOKEN, scope: 'repo' },
+      50,
+    );
+    expect(repoRows.map((r) => r.id)).toEqual([titleHit]);
+
+    const limited = await repo!.recallLexicalCandidates(
+      tenant,
+      { query: RRF_TOKEN, scope: 'project' },
+      1,
+    );
+    expect(limited.map((r) => r.id)).toEqual([titleHit]);
+  });
+
+  it('recallHandler fuses a lexical-only hit and a semantic-only hit (Pg + StubEmbedder)', async () => {
+    const { StubEmbedder } = await import('../../src/embedder/stubEmbedder.js');
+    const { recallHandler } = await import('../../src/mcp/tools/recall.js');
+    const embedder = new StubEmbedder();
+    const query = `${RRF_TOKEN} fusion`;
+
+    // Lexical-only: matches the query text, no embedding.
+    const lexicalOnly = await seedMemory({
+      repo: repoId,
+      title: `${RRF_TOKEN} fusion lexical only`,
+      body: 'Lexical side of the fusion check.',
+      hash: 'rrf-fuse-lex',
+    });
+    // Semantic-only: no query terms in the text, embedding identical to the query's.
+    const semanticOnly = await seedMemory({
+      repo: repoId,
+      title: 'Unrelated wording entirely',
+      body: 'Nothing here overlaps with the query terms.',
+      hash: 'rrf-fuse-sem',
+      embedding: await embedder.embed(query),
+    });
+
+    const res = await recallHandler(
+      { query, scope: 'project', limit: 8 },
+      {
+        tenant: { projectId, repoId, branch: 'main' },
+        actor: { actorId: 'integ-test-user', roles: ['viewer'] },
+      },
+      {
+        memoryRepository: repo!,
+        stagingRepository: {
+          findOrCreateOpenSession: () => Promise.resolve('s'),
+          insertStagingItem: () =>
+            Promise.resolve({ id: '', judgeState: 'pending' as const, deduped: false }),
+          listStagingItems: () => Promise.resolve([]),
+          discardStagingItem: () => Promise.resolve(false),
+        },
+        embedder,
+        notifier: { notify: () => Promise.resolve() },
+      },
+    );
+
+    const { decodeHandle } = await import('../../src/mcp/handle.js');
+    const ids = res.results.map((r) => decodeHandle(r.handle).memoryId);
+    expect(ids).toContain(lexicalOnly);
+    expect(ids).toContain(semanticOnly);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });

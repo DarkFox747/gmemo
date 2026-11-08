@@ -46,23 +46,41 @@ Toda memoria devuelta o propuesta tiene esta forma:
 ## 2. Tools de lectura
 
 ### recall(query, scope?, types?, limit?)
-Búsqueda híbrida (léxica BM25 + semántica) sobre la memoria del proyecto.
+Búsqueda híbrida sobre la memoria del proyecto: **Reciprocal Rank Fusion (RRF)** de dos
+rankings, ambos filtrados por proyecto, `status = 'active'`, `types` y `scope`:
+
+- **Léxico:** top 50 por BM25 (`ts_rank_cd`) con time-decay.
+- **Semántico:** top 50 por similitud coseno (pgvector).
+- **Fusión:** `score(d) = Σ 1/(60 + rank_i(d))` (rank desde 1; `k = 60` constante, no
+  configurable). Empates por id de memoria (determinista). Si el embedding o la consulta
+  semántica fallan, se devuelve el ranking léxico solo y se registra un warning.
 
 | Param | Tipo | Default | Notas |
 |---|---|---|---|
 | `query` | string | — | consulta en lenguaje natural o términos |
-| `scope` | `repo` \| `project` | `project` (config. por proyecto) | `repo` primero + boost; `project` amplía |
+| `scope` | `repo` \| `project` | `project` | `repo` filtra solo ese repo; `project` amplía, con las memorias del repo de la consulta **primero** y luego el resto del proyecto |
 | `types` | lista de `memory_type` | todos | filtro opcional |
-| `limit` | int | 8 | tope de resultados |
+| `limit` | int | 5 | tope de resultados; **máximo 8** (valores mayores se rechazan) |
+| `cursor` | string | — | cursor opaco de una respuesta previa |
 
-**Respuesta:** lista de registros **completos** (sección 1), ordenados por ranking
-híbrido con time-decay. Reglas de presupuesto:
+**Respuesta:** lista de registros **completos** (sección 1), ordenados por score RRF
+(con las memorias del repo de la consulta delante cuando `scope=project`). Reglas de presupuesto:
 
 - Devuelve registros **enteros** hasta ~**3.000 tokens** o `limit` (lo que ocurra primero).
   Nunca trunca un registro a la mitad (garantizado por el tope de `body` ≤2.000 car.).
-- Incluye `total_matches` y un `cursor` para pedir la siguiente tanda.
+- Incluye `total_matches` (= número de candidatos fusionados) y un `cursor` para pedir la
+  siguiente tanda (`null` en la última).
+- **Cursor por offset:** el score RRF se calcula en tiempo de consulta sobre la lista fusionada,
+  así que no existe una clave estable para paginar por keyset. El cursor es opaco
+  (`base64url("o:<offset>")`) y recorre la lista fusionada; la forma de la respuesta
+  `{results, total_matches, cursor}` no cambia. Si los datos cambian entre páginas el
+  offset puede desplazarse (riesgo bajo: páginas de ≤ 8). Un cursor inválido devuelve el
+  error de referencia opaco.
+- **Prioridad de repo:** se aplica después de tomar el top 50 de cada ranking; una memoria del
+  repo de la consulta por debajo del puesto 50 en ambas listas no se devuelve. Las páginas por
+  offset se recalculan en cada petición, así que escrituras concurrentes pueden desplazar resultados.
 - Devuelve `active` únicamente; incluye además la **staging de la sesión activa**
-  marcada `source: "staged"` (ver §5).
+  marcada `source: "staged"` (ver §5), solo en la primera página y como máximo `limit`.
 
 ### get_memory(handle)
 Trae **una** memoria con el máximo detalle: registro completo + relaciones
@@ -138,6 +156,6 @@ Sesiones paralelas (otras ramas) no se ven entre sí.
 | Límite | Valor |
 |---|---|
 | `body` por memoria | ≤ 2.000 caracteres (~500 tokens) |
-| `recall` | K=8 · ~3.000 tokens · registros enteros |
+| `recall` | k=5 por defecto (máx. 8) · ~3.000 tokens · registros enteros |
 | `get_context` | ~2.000–2.500 tokens · constraints primero |
 | `get_memory` | un registro, detalle completo (sin tope de set) |

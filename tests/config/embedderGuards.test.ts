@@ -1,7 +1,7 @@
 /**
  * T014 / T009 migration: Embedder config guards — load-bearing fail-fast tests.
  *
- * Covers the superRefine guards added for EMBEDDER_STUB, SEMANTIC_FALLBACK_*,
+ * Covers the superRefine guards added for EMBEDDER_STUB,
  * AWS_REGION (real Bedrock path), and BEDROCK_MAX_ATTEMPTS / BEDROCK_TIMEOUT_MS
  * WITHOUT duplicating the AUTH_DEV_BYPASS, JUDGE_STUB, or PROMOTE_OIDC_DEV_BYPASS
  * cases in the sibling test files:
@@ -9,9 +9,8 @@
  *  (a) EMBEDDER_STUB=true + NODE_ENV=production          → loadConfig() calls process.exit(1)
  *  (b) EMBEDDER_STUB=false (dev) without BEDROCK_EMBEDDING_MODEL_ID → process.exit(1)
  *  (c) valid dev combo (EMBEDDER_STUB=true, JUDGE_STUB=true) loads OK;
- *      SEMANTIC_FALLBACK_MIN_RESULTS defaults to 5 and
- *      SEMANTIC_FALLBACK_K defaults to 8 when unset;
- *      a provided numeric string override is parsed to a number.
+ *      the removed SEMANTIC_FALLBACK_* settings are no longer part of the config
+ *      (RRF constants are named constants, not config).
  *  (d) AWS_REGION required when EMBEDDER_STUB=false (real Bedrock embedder active).
  *  (e) AWS_REGION required when JUDGE_STUB=false (real Bedrock judge active).
  *  (f) AWS_REGION not required when BOTH stubs are true (no real Bedrock client).
@@ -44,7 +43,7 @@ async function loadFresh(): Promise<() => ReturnType<typeof import('../../src/co
   return mod.loadConfig;
 }
 
-describe('config embedder guards (EMBEDDER_STUB + SEMANTIC_FALLBACK_* + superRefine)', () => {
+describe('config embedder guards (EMBEDDER_STUB + superRefine)', () => {
   // ── (a) Forbidden pairing: EMBEDDER_STUB=true + prod ────────────────────
   it('fails fast (process.exit(1)) when EMBEDDER_STUB=true and NODE_ENV=production', async () => {
     process.env = {
@@ -86,9 +85,8 @@ describe('config embedder guards (EMBEDDER_STUB + SEMANTIC_FALLBACK_* + superRef
     expect(exit).toHaveBeenCalledWith(1);
   });
 
-  // ── (c) Valid dev combo loads OK; fallback threshold defaults and overrides
-  it('loads successfully with EMBEDDER_STUB=true and applies SEMANTIC_FALLBACK_* defaults and overrides', async () => {
-    // Verify defaults when SEMANTIC_FALLBACK_MIN_RESULTS and SEMANTIC_FALLBACK_K are unset.
+  // ── (c) Valid dev combo loads OK; the old semantic-fallback settings are gone
+  it('loads successfully with EMBEDDER_STUB=true and exposes no SEMANTIC_FALLBACK_* settings', async () => {
     process.env = {
       DATABASE_URL: 'postgres://x/y',
       AUTH_DEV_BYPASS: 'true',
@@ -96,34 +94,17 @@ describe('config embedder guards (EMBEDDER_STUB + SEMANTIC_FALLBACK_* + superRef
       PROMOTE_OIDC_DEV_BYPASS: 'true',
       EMBEDDER_STUB: 'true',
       NODE_ENV: 'development',
+      // Legacy env vars must be ignored, not parsed into the config.
+      SEMANTIC_FALLBACK_MIN_RESULTS: '3',
+      SEMANTIC_FALLBACK_K: '12',
     };
 
     const loadConfig = await loadFresh();
     const cfg = loadConfig();
 
     expect(cfg.EMBEDDER_STUB).toBe(true);
-    expect(cfg.SEMANTIC_FALLBACK_MIN_RESULTS).toBe(5);
-    expect(cfg.SEMANTIC_FALLBACK_K).toBe(8);
-
-    // Verify that numeric string overrides are parsed to numbers.
-    process.env = {
-      DATABASE_URL: 'postgres://x/y',
-      AUTH_DEV_BYPASS: 'true',
-      JUDGE_STUB: 'true',
-      PROMOTE_OIDC_DEV_BYPASS: 'true',
-      EMBEDDER_STUB: 'true',
-      NODE_ENV: 'development',
-      SEMANTIC_FALLBACK_MIN_RESULTS: '3',
-      SEMANTIC_FALLBACK_K: '12',
-    };
-
-    const loadConfig2 = await loadFresh();
-    const cfg2 = loadConfig2();
-
-    expect(typeof cfg2.SEMANTIC_FALLBACK_MIN_RESULTS).toBe('number');
-    expect(cfg2.SEMANTIC_FALLBACK_MIN_RESULTS).toBe(3);
-    expect(typeof cfg2.SEMANTIC_FALLBACK_K).toBe('number');
-    expect(cfg2.SEMANTIC_FALLBACK_K).toBe(12);
+    expect(cfg).not.toHaveProperty('SEMANTIC_FALLBACK_MIN_RESULTS');
+    expect(cfg).not.toHaveProperty('SEMANTIC_FALLBACK_K');
   });
 });
 

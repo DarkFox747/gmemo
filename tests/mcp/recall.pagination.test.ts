@@ -11,11 +11,12 @@
  *
  * Seed layout:
  *   5 records, all in projectId='stub-project' (matching STUB_TENANT).
- *   Query 'xyzxyz' matches no record text → all ranks are 0.
- *   Sort order is therefore purely by id DESC:
+ *   Query 'record' matches every title equally (same age) → all lexical ranks tie.
+ *   The stub embedder yields no vectors, so the fused order is the lexical order,
+ *   i.e. id DESC:
  *     eeeeeeee > dddddddd > cccccccc > bbbbbbbb > aaaaaaaa
  *
- *   limit=2:
+ *   limit=2 (offset cursor over the fused list):
  *     page 1 (no cursor) → [eeee…, dddd…]  + nextCursor
  *     page 2 (with cursor) → [cccc…, bbbb…]  (distinct from page 1)
  */
@@ -146,7 +147,7 @@ describe('recall tool — transport-level cursor forwarding (REQ-07)', () => {
     // --- Page 1: no cursor, limit=2 ---
     const page1Result = await client.callTool({
       name: 'recall',
-      arguments: { query: 'xyzxyz', scope: 'project', limit: 2 },
+      arguments: { query: 'record', scope: 'project', limit: 2 },
     });
 
     expect(page1Result.isError).toBeFalsy();
@@ -163,7 +164,7 @@ describe('recall tool — transport-level cursor forwarding (REQ-07)', () => {
     // --- Page 2: use cursor returned from page 1 ---
     const page2Result = await client.callTool({
       name: 'recall',
-      arguments: { query: 'xyzxyz', scope: 'project', limit: 2, cursor: page1.cursor },
+      arguments: { query: 'record', scope: 'project', limit: 2, cursor: page1.cursor },
     });
 
     expect(page2Result.isError).toBeFalsy();

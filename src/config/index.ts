@@ -103,15 +103,10 @@ const envSchema = z
     // Credentials come from the default AWS provider chain — never in config.
     AWS_REGION: z.string().min(1).optional(),
     // Retry policy: one try + (maxAttempts-1) retries via SDK standard retry mode.
-    // Parsed like SEMANTIC_FALLBACK_*: coerce string env var to integer, enforce ≥ 1.
+    // Coerce string env var to integer, enforce ≥ 1.
     BEDROCK_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(3),
     // Per-request timeout in milliseconds, enforced by AbortController.
     BEDROCK_TIMEOUT_MS: z.coerce.number().int().min(1).default(15000),
-
-    // Semantic fallback thresholds — two-phase recall (lexical-first, semantic fallback).
-    // Parsed like PORT: coerce string env var to integer, enforce ≥ 1.
-    SEMANTIC_FALLBACK_MIN_RESULTS: z.coerce.number().int().min(1).default(5),
-    SEMANTIC_FALLBACK_K: z.coerce.number().int().min(1).default(8),
 
     // Rate limiting — express-rate-limit in-process limiter (no Redis/WAF).
     // Safe boolean via z.enum (NOT z.coerce.boolean, which treats "false" as true).

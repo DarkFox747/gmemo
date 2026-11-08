@@ -1,22 +1,19 @@
 /**
  * MemoryRepository — the single DB seam for the memory read path.
  *
- * The interface exposes exactly the three queries the three read tools need:
- *   1. recall              — FTS + time-decay, keyset-paginated (D4/D5)
+ * The interface exposes the queries the three read tools need:
+ *   1. recallLexicalCandidates / recallSemantic — the two ordered candidate lists
+ *      (BM25 + time-decay, pgvector cosine) that the recall handler fuses with RRF
  *   2. getMemoryByHandle   — single active memory + bidirectional relations (D9)
  *   3. getContextRecords   — phase1 (constraint/domain_rule) + phase2 (decision/gotcha) (D6)
  *
  * All SQL uses parameterized queries exclusively — no string concatenation of
- * query text, types, scope, repoId, cursor, or handle values.
- *
- * The cursor codec is private to this module but re-exported so the in-memory
- * fake (tests/memory/fakes.ts) can exercise identical pagination logic.
+ * query text, types, scope, repoId, or handle values.
  */
 
 import pg from 'pg';
 import type { MemoryType } from '../contracts/memory.js';
 import type { TenantContext } from '../mcp/context.js';
-import { AppError, ErrorCode } from '../errors/appError.js';
 import { toVectorParam } from './vector.js';
 
 // ---------------------------------------------------------------------------
@@ -35,24 +32,21 @@ export interface MemoryRow {
   origin_pr: number | null;
   current_revision: number;
   updated_at: Date;
+  /** Owning repo; populated by the recall candidate queries (repo-priority in the handler). */
+  repo_id?: string | null;
   /** Only populated by getContextRecords; TTL-expired-but-active. */
   stale?: boolean;
 }
 
-export interface RecallParams {
-  query: string;
+/** Filters shared by both candidate queries (scope → repo_id derivation lives in the repo). */
+export interface RecallCandidateFilters {
   scope: 'repo' | 'project';
   types?: MemoryType[];
-  /** Caller-normalized (default 8, max 50). */
-  limit: number;
-  /** Opaque cursor from a prior recall response; decoded inside the repo. */
-  cursor?: string | null;
 }
 
-export interface RecallResult {
-  rows: MemoryRow[];
-  totalMatches: number;
-  nextCursor: string | null;
+/** Lexical candidate query: the shared filters plus the raw query text. */
+export interface LexicalCandidateParams extends RecallCandidateFilters {
+  query: string;
 }
 
 export interface RelationRow {
@@ -73,83 +67,36 @@ export interface ContextRecords {
   phase2: MemoryRow[];
 }
 
-/**
- * Filters for the vector nearest-neighbour fallback query.
- * scope → repo_id derivation mirrors recall (same rule, same layer).
- */
-export interface RecallSemanticFilters {
-  scope: 'repo' | 'project';
-  types?: MemoryType[];
-}
-
-// ---------------------------------------------------------------------------
-// Cursor codec (private to this module; re-exported for the fake)
-// ---------------------------------------------------------------------------
-
-export interface RecallCursor {
-  rank: number;
-  id: string;
-}
-
-/** Encodes a recall cursor as base64url("${rank}:${id}"). */
-export function encodeRecallCursor(c: RecallCursor): string {
-  return Buffer.from(`${c.rank}:${c.id}`, 'utf8').toString('base64url');
-}
-
-/**
- * Decodes a recall cursor. Throws AppError(INVALID_REFERENCE) on any
- * malformed input — same opaque error class as an invalid handle (D5).
- */
-export function decodeRecallCursor(s: string): RecallCursor {
-  if (typeof s !== 'string' || s.length === 0) {
-    throw new AppError(ErrorCode.INVALID_REFERENCE);
-  }
-  // Node never throws on Buffer.from(…, 'base64url'); the post-decode UUID regex
-  // and Number.isFinite check below are the sole guards against malformed input.
-  const raw = Buffer.from(s, 'base64url').toString('utf8');
-
-  const colonIdx = raw.indexOf(':');
-  if (colonIdx === -1) throw new AppError(ErrorCode.INVALID_REFERENCE);
-
-  const rankStr = raw.slice(0, colonIdx);
-  const id = raw.slice(colonIdx + 1);
-
-  // Number() rejects partial parses like "1.5abc" (parseFloat would accept them).
-  const rank = Number(rankStr);
-  if (!Number.isFinite(rank)) throw new AppError(ErrorCode.INVALID_REFERENCE);
-
-  // UUID: 8-4-4-4-12 hex chars with hyphens; no further ':' expected.
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!UUID_RE.test(id)) throw new AppError(ErrorCode.INVALID_REFERENCE);
-
-  return { rank, id };
-}
-
 // ---------------------------------------------------------------------------
 // Interface
 // ---------------------------------------------------------------------------
 
 export interface MemoryRepository {
   /**
-   * FTS + time-decay recall, project-scoped (repo-scoped when scope='repo'),
-   * status='active', optional type filter, keyset paginated over (rank, id).
-   * Returns the page rows, total_matches (full predicate, no keyset), and the
-   * next opaque cursor (null when exhausted). Throws AppError on malformed cursor.
+   * Lexical candidate list: FTS (`websearch_to_tsquery('english')`) ranked by
+   * `ts_rank_cd / (1 + age_days/30)`, project-scoped (repo-scoped when
+   * scope='repo'), status='active', optional type filter. Ordered by
+   * (rank DESC, id DESC), at most `limit` rows. No keyset, no COUNT — the
+   * handler fuses this list with the semantic one and paginates by offset.
    */
-  recall(tenant: TenantContext, params: RecallParams): Promise<RecallResult>;
+  recallLexicalCandidates(
+    tenant: TenantContext,
+    params: LexicalCandidateParams,
+    limit: number,
+  ): Promise<MemoryRow[]>;
 
   /**
-   * Pure vector nearest-neighbour scan — Phase 2 of the hybrid recall.
-   * Returns at most k rows ordered by cosine distance to queryEmbedding,
-   * filtered to active+project-scoped rows that have a non-null embedding and
-   * whose ids are not in excludeIds (Phase-1 dedup).
-   * Never called with a null queryEmbedding — the handler only invokes it on a
-   * successful embed. No cursor, no COUNT (these rows are first-page-only extras).
+   * Semantic candidate list: pgvector cosine nearest neighbours of
+   * queryEmbedding, same filters as the lexical list, status='active',
+   * `embedding IS NOT NULL`, ordered by distance, at most k rows. Rows whose id
+   * is in excludeIds are skipped (the recall handler always passes []).
+   * Never called with a null embedding — the handler only invokes it after a
+   * successful embed.
    */
   recallSemantic(
     tenant: TenantContext,
     queryEmbedding: number[],
-    filters: RecallSemanticFilters,
+    filters: RecallCandidateFilters,
     excludeIds: string[],
     k: number,
   ): Promise<MemoryRow[]>;
@@ -175,22 +122,9 @@ export interface MemoryRepository {
 // Internal raw row types (pg-typed; private to this module)
 // ---------------------------------------------------------------------------
 
-interface RawPageRow {
-  id: string;
-  type: string;
-  title: string;
-  summary: string;
-  body: string;
-  fields: Record<string, unknown>;
-  origin_branch: string | null;
-  origin_pr: number | null;
-  current_revision: number;
-  updated_at: Date;
-  rank: number;
-}
-
 interface RawMemoryRow {
   id: string;
+  repo_id?: string | null;
   type: string;
   title: string;
   summary: string;
@@ -222,50 +156,32 @@ interface RawContextRow {
   stale: boolean;
 }
 
-interface CountRow {
-  total: number;
-}
-
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
 
-// D4/D5: CTE so the computed `rank` alias is referenceable in the keyset WHERE.
-const RECALL_PAGE_SQL = `
-WITH q AS (SELECT websearch_to_tsquery('english', $1) AS tsq),
-ranked AS (
-  SELECT m.id, m.type, m.title, m.summary, m.body, m.fields,
-         m.origin_branch, m.origin_pr, m.current_revision, m.updated_at,
-         ts_rank_cd(m.content_tsv, q.tsq)
-           / (1 + (EXTRACT(EPOCH FROM (now() - m.updated_at)) / 86400.0) / 30.0) AS rank
-  FROM memory m, q
-  WHERE m.project_id = $2
-    AND m.status = 'active'
-    AND m.content_tsv @@ q.tsq
-    AND ($3::uuid IS NULL OR m.repo_id = $3)
-    AND ($4::text[] IS NULL OR m.type = ANY($4::memory_type[]))
-)
-SELECT * FROM ranked
-WHERE ($5::float8 IS NULL OR rank < $5 OR (rank = $5 AND id < $6::uuid))
-ORDER BY rank DESC, id DESC
-LIMIT $7
-`.trim();
-
-// Separate count over the same predicate (no keyset, no limit) — D5.
-const RECALL_COUNT_SQL = `
-SELECT COUNT(*)::int AS total
-FROM memory m, websearch_to_tsquery('english', $1) q
+// Lexical candidates: BM25 (ts_rank_cd) with 30-day time-decay, fully ordered, no keyset/COUNT.
+// $1=query  $2=project_id  $3=repo_id|null  $4=types|null  $5=limit
+const RECALL_LEXICAL_SQL = `
+WITH q AS (SELECT websearch_to_tsquery('english', $1) AS tsq)
+SELECT m.id, m.repo_id, m.type, m.title, m.summary, m.body, m.fields,
+       m.origin_branch, m.origin_pr, m.current_revision, m.updated_at,
+       ts_rank_cd(m.content_tsv, q.tsq)
+         / (1 + (EXTRACT(EPOCH FROM (now() - m.updated_at)) / 86400.0) / 30.0) AS rank
+FROM memory m, q
 WHERE m.project_id = $2
   AND m.status = 'active'
-  AND m.content_tsv @@ q
+  AND m.content_tsv @@ q.tsq
   AND ($3::uuid IS NULL OR m.repo_id = $3)
   AND ($4::text[] IS NULL OR m.type = ANY($4::memory_type[]))
+ORDER BY rank DESC, m.id DESC
+LIMIT $5
 `.trim();
 
-// Phase-2 pure vector nearest-neighbour scan (HNSW index accelerates this).
+// Semantic candidates: pure vector nearest-neighbour scan (HNSW index accelerates this).
 // $1=project_id  $2=repo_id|null  $3=types|null  $4=exclude_ids  $5=query_vec  $6=k
 const RECALL_SEMANTIC_SQL = `
-SELECT m.id, m.type, m.title, m.summary, m.body, m.fields,
+SELECT m.id, m.repo_id, m.type, m.title, m.summary, m.body, m.fields,
        m.origin_branch, m.origin_pr, m.current_revision, m.updated_at
 FROM memory m
 WHERE m.project_id = $1
@@ -274,7 +190,7 @@ WHERE m.project_id = $1
   AND ($2::uuid IS NULL OR m.repo_id = $2)
   AND ($3::text[] IS NULL OR m.type = ANY($3::memory_type[]))
   AND m.id <> ALL($4::uuid[])
-ORDER BY m.embedding <=> $5::vector
+ORDER BY m.embedding <=> $5::vector, m.id
 LIMIT $6
 `.trim();
 
@@ -329,13 +245,13 @@ LIMIT $2
 // ---------------------------------------------------------------------------
 
 /**
- * Maps a raw DB row (without `rank`) to a MemoryRow.
- * Used by both recall (RawPageRow has an extra `rank` that is ignored here)
- * and recallSemantic (RawMemoryRow, no `rank`).
+ * Maps a raw candidate row to a MemoryRow. The lexical query also selects a
+ * `rank` column; it is only used for ordering in SQL and is ignored here.
  */
 function mapRow(r: RawMemoryRow): MemoryRow {
   return {
     id: r.id,
+    repo_id: r.repo_id ?? null,
     type: r.type as MemoryType,
     title: r.title,
     summary: r.summary,
@@ -355,61 +271,28 @@ function mapRow(r: RawMemoryRow): MemoryRow {
 export class PgMemoryRepository implements MemoryRepository {
   constructor(private readonly pool: pg.Pool) {}
 
-  async recall(tenant: TenantContext, params: RecallParams): Promise<RecallResult> {
-    const { query, scope, types, limit, cursor } = params;
+  async recallLexicalCandidates(
+    tenant: TenantContext,
+    params: LexicalCandidateParams,
+    limit: number,
+  ): Promise<MemoryRow[]> {
+    const { query, scope, types } = params;
     const { projectId, repoId } = tenant;
 
-    // Decode cursor; throws AppError(INVALID_REFERENCE) on malformed.
-    let decodedCursor: RecallCursor | null = null;
-    if (cursor) {
-      decodedCursor = decodeRecallCursor(cursor);
-    }
-
-    const repoIdParam: string | null = scope === 'repo' ? repoId : null;
-    const typesParam: MemoryType[] | null = types ?? null;
-
-    const pageParams = [
-      query,                              // $1
-      projectId,                          // $2
-      repoIdParam,                        // $3 — null → project scope
-      typesParam,                         // $4 — null → all types
-      decodedCursor?.rank ?? null,        // $5 — null → first page
-      decodedCursor?.id ?? null,          // $6 — null → first page
-      limit + 1,                          // $7 — extra row detects next page
-    ];
-
-    const countParams = [
-      query,       // $1
-      projectId,   // $2
-      repoIdParam, // $3
-      typesParam,  // $4
-    ];
-
-    const [pageResult, countResult] = await Promise.all([
-      this.pool.query<RawPageRow>(RECALL_PAGE_SQL, pageParams),
-      this.pool.query<CountRow>(RECALL_COUNT_SQL, countParams),
+    const { rows } = await this.pool.query<RawMemoryRow>(RECALL_LEXICAL_SQL, [
+      query,                                          // $1
+      projectId,                                      // $2
+      scope === 'repo' ? repoId : null,               // $3 — null → project scope
+      types && types.length > 0 ? types : null,       // $4 — null → all types
+      limit,                                          // $5
     ]);
-
-    const hasNextPage = pageResult.rows.length === limit + 1;
-    const resultRows = hasNextPage ? pageResult.rows.slice(0, limit) : pageResult.rows;
-
-    let nextCursor: string | null = null;
-    if (hasNextPage && resultRows.length > 0) {
-      const last = resultRows[resultRows.length - 1];
-      nextCursor = encodeRecallCursor({ rank: last.rank, id: last.id });
-    }
-
-    const rows: MemoryRow[] = resultRows.map((r) => mapRow(r));
-
-    const totalMatches = countResult.rows[0]?.total ?? 0;
-
-    return { rows, totalMatches, nextCursor };
+    return rows.map((r) => mapRow(r));
   }
 
   async recallSemantic(
     tenant: TenantContext,
     queryEmbedding: number[],
-    filters: RecallSemanticFilters,
+    filters: RecallCandidateFilters,
     excludeIds: string[],
     k: number,
   ): Promise<MemoryRow[]> {

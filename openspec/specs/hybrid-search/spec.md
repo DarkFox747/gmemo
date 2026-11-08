@@ -32,7 +32,7 @@ Source: hybrid-search
 
 ### Requirement: Embedder stub guard and fallback config
 
-`EMBEDDER_STUB` and `BEDROCK_EMBEDDING_MODEL_ID` MUST be validated by `superRefine`: the stub is forbidden when `NODE_ENV=production` and the model id is required when the stub is off. The composition root MUST add a `NODE_ENV !== 'production'` double-check and a WARN banner. `SEMANTIC_FALLBACK_MIN_RESULTS` (default 5) and `SEMANTIC_FALLBACK_K` (default 8) MUST be validated numeric config.
+`EMBEDDER_STUB` and `BEDROCK_EMBEDDING_MODEL_ID` MUST be validated by `superRefine`: the stub is forbidden when `NODE_ENV=production` and the model id is required when the stub is off. The composition root MUST add a `NODE_ENV !== 'production'` double-check and a WARN banner. `(removed in hybrid-search-rrf) SEMANTIC_FALLBACK_MIN_RESULTS` (default 5) and `SEMANTIC_FALLBACK_K` (default 8) MUST be validated numeric config.
 
 Source: hybrid-search
 
@@ -53,48 +53,6 @@ Source: hybrid-search
 - GIVEN the embedder throws for an accepted add
 - WHEN promoting
 - THEN the memory is written with `embedding = NULL` and the promotion succeeds
-
-### Requirement: Two-phase recall
-
-Phase 1 MUST be the existing `memoryRepository.recall`, unchanged (SQL, keyset cursor, params and COUNT). `memoryRepository.recallSemantic(tenant, queryEmbedding, filters, excludeIds, k)` MUST run a parameterized vector nearest-neighbour search `ORDER BY embedding <=> $qvec LIMIT k`, tenant-scoped, `status='active'`, `embedding IS NOT NULL`, with the same repo/type filters as recall and excluding `excludeIds`. The handler MUST run Phase 2 ONLY when `cursor === null` AND Phase-1 `total_matches < SEMANTIC_FALLBACK_MIN_RESULTS`. Phase 2 MUST embed the query fail-soft: on error it logs a warning and returns Phase-1 results only, never a 500.
-
-Source: hybrid-search
-
-#### Scenario: Enough lexical results
-
-- GIVEN BM25 returns at least N matches
-- WHEN calling `recall`
-- THEN the embedder is not called
-
-#### Scenario: Few lexical results
-
-- GIVEN BM25 returns fewer than N matches and no cursor
-- WHEN calling `recall`
-- THEN the query is embedded, `recallSemantic` runs, and hits are appended deduplicated
-
-#### Scenario: Embedder error on read
-
-- GIVEN the embedder throws
-- WHEN calling `recall`
-- THEN BM25-only results are returned without error
-
-#### Scenario: Subsequent page
-
-- GIVEN a request with a cursor
-- WHEN calling `recall`
-- THEN Phase 2 never runs
-
-### Requirement: Result ordering and counts
-
-Semantic hits MUST be appended after BM25 results and deduplicated by id. First-page order MUST be staged, then BM25, then semantic. `total_matches` MUST reflect the BM25 count only, semantic hits are additive, vector rows carry `source:"main"`, and the keyset cursor stays BM25-only.
-
-Source: hybrid-search
-
-#### Scenario: Deduplication
-
-- GIVEN a memory returned by both phases
-- WHEN merging
-- THEN it appears once
 
 ### Requirement: Embedder wiring
 
@@ -120,8 +78,59 @@ Source: hybrid-search
 - WHEN running `recallSemantic`
 - THEN the row is not returned
 
+### Requirement: Reciprocal Rank Fusion (HU-08.1)
+
+Source: hybrid-search-rrf
+
+`recall` SHALL combine up to 50 lexical candidates (BM25 with time-decay) and up to 50 semantic candidates (vector similarity), restricted to active memories of the project (and type/scope filters), fusing them with `score = Σ 1/(60 + rank)`; ties broken deterministically. It SHALL return up to `limit` complete units ordered by fused score; `limit` defaults to 5 and MUST NOT exceed 8.
+
+#### Scenario: Fusion order with known rankings
+- GIVEN memory A ranked 1st lexically and 3rd semantically, B 2nd lexically and absent semantically, and C absent lexically and 1st semantically
+- WHEN recall runs
+- THEN the order is A (1/61+1/63), C (1/61), B (1/62)
+
+#### Scenario: Limit bounds
+- GIVEN 20 matching memories
+- WHEN recall is called without limit and with limit 9
+- THEN the first returns 5 results and the second is rejected as invalid input
+
+### Requirement: Fail-soft semantic side
+
+Source: hybrid-search-rrf
+
+If embedding or the semantic query fails, recall SHALL return the lexical ranking alone and MUST log a warning (no silent failure).
+
+#### Scenario: Embedder down
+- GIVEN the embedder throws
+- WHEN recall runs
+- THEN lexical results are returned and one warning is logged
+
+### Requirement: Repo priority and drafts (HU-08.3, HU-08.4 regression)
+
+Source: hybrid-search-rrf
+
+With project scope, results from the query's repository SHALL come before the rest of the project; the caller's own drafts on the current branch SHALL be prepended on the first page marked `source:"staged"`, at most `limit` of them.
+
+#### Scenario: Repo first
+- GIVEN two equally relevant memories, one in the query's repo and one in another repo
+- WHEN recall runs with project scope
+- THEN the query-repo memory comes first
+
+### Requirement: Offset pagination over the fused list
+
+Source: hybrid-search-rrf
+
+`recall` SHALL page through the fused list with an opaque cursor while keeping the response shape `{results, total_matches, cursor}`; an invalid cursor fails with the opaque invalid-reference error.
+
+#### Scenario: Second page does not overlap
+- GIVEN 12 fused candidates and limit 5
+- WHEN the client follows the cursor twice
+- THEN pages of 5, 5 and 2 are returned without duplicates and the last cursor is null
+
 ## History
 
 | Requirement | Source | Superseded by |
 |---|---|---|
 | `BedrockEmbedder.embed` throws (real `invokeModel` deferred, no `@aws-sdk` import) | hybrid-search | real-bedrock-clients (real Titan v2 embedder; see `bedrock-clients`) |
+| Two-phase recall (lexical first, semantic fallback) | hybrid-search | hybrid-search-rrf |
+| Result ordering and counts (keyset cursor, BM25 total) | hybrid-search | hybrid-search-rrf |

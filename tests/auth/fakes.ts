@@ -492,8 +492,6 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
   };
 
   // Stub embedder: no-op that returns an empty vector.
-  // semanticFallbackMinResults: 0 ensures Phase 2 never fires in tests that use
-  // this stub (totalMatches < 0 is always false).
   const stubEmbedder: Embedder = { embed: (_: string) => Promise.resolve([] as number[]) };
 
   // Stub PromoteService: instantiated with the stubs above so the private
@@ -549,8 +547,6 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     oidcVerifier: stubOidcVerifier,
     promoteService: stubPromoteService,
     embedder: stubEmbedder,
-    semanticFallbackMinResults: 0,  // Phase 2 never fires in stub-services tests
-    semanticFallbackK: 8,
     notifier: stubNotifier,
     reviewService: stubReviewService,
     quarantineService: stubQuarantineService,

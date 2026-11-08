@@ -86,17 +86,15 @@ describeWithDb('read-path status exclusion (real SQL)', () => {
   });
 
   describe.each(NON_ACTIVE)('%s rows are hidden', (status) => {
-    it('recall returns only the active row and total_matches = 1', async () => {
+    it('recallLexicalCandidates returns only the active row', async () => {
       await seed('decision', 'active', 'Active zephyrine row');
       await seed('decision', status, 'Hidden zephyrine row');
-      const res = await memoryRepo.recall(tenant, {
-        query: 'zephyrine lifecycle',
-        scope: 'project',
-        limit: 10,
-        cursor: null,
-      });
-      expect(res.rows.map((r) => r.title)).toEqual(['Active zephyrine row']);
-      expect(res.totalMatches).toBe(1);
+      const rows = await memoryRepo.recallLexicalCandidates(
+        tenant,
+        { query: 'zephyrine lifecycle', scope: 'project' },
+        50,
+      );
+      expect(rows.map((r) => r.title)).toEqual(['Active zephyrine row']);
     });
 
     it('recallSemantic returns only the active row', async () => {

@@ -10,8 +10,8 @@ export interface RecallRequest {
   query: string; // required
   scope?: 'repo' | 'project'; // default 'project' (contract §2)
   types?: MemoryType[]; // optional filter; default all
-  limit?: number; // default 8 (contract §2 / §8)
-  cursor?: string; // opaque keyset cursor from a prior recall response (design D5)
+  limit?: number; // default 5, max 8 (contract §2 / §8)
+  cursor?: string; // opaque offset cursor over the fused RRF list, from a prior recall response
 }
 
 export interface RecallResponse {

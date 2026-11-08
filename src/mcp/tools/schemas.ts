@@ -40,13 +40,14 @@ export const recallInputShape = {
     .number()
     .int()
     .positive()
-    .max(50)
+    .max(8)
     .optional()
-    .describe('Max records to return; default 8 (contract §8)'),
+    .describe('Max records to return; default 5, max 8 (contract §8)'),
   cursor: z
     .string()
+    .max(64)
     .optional()
-    .describe('Opaque pagination cursor from a prior recall response (design D5)'),
+    .describe('Opaque pagination cursor from a prior recall response (offset over the fused list)'),
 };
 
 // ---------------------------------------------------------------------------
@@ -54,9 +55,7 @@ export const recallInputShape = {
 // ---------------------------------------------------------------------------
 
 export const getMemoryInputShape = {
-  handle: z
-    .string()
-    .describe('Opaque handle returned by a prior recall call (contract §1)'),
+  handle: z.string().describe('Opaque handle returned by a prior recall call (contract §1)'),
 };
 
 // ---------------------------------------------------------------------------
@@ -73,21 +72,13 @@ export const STAGING_OPS = ['add', 'amend', 'supersede', 'deprecate'] as const;
 // ---------------------------------------------------------------------------
 
 export const rememberInputShape = {
-  op: z
-    .enum(STAGING_OPS)
-    .describe('Suggested operation; the judge may reclassify at promotion'),
+  op: z.enum(STAGING_OPS).describe('Suggested operation; the judge may reclassify at promotion'),
   type: z.enum(MEMORY_TYPES).describe('Memory type (contract §1)'),
   title: z.string().min(1).max(120),
   summary: z.string().min(1).max(200),
   body: z.string().min(1).max(2000),
-  fields: z
-    .record(z.unknown())
-    .optional()
-    .describe('Per-type fields (skill-guided)'),
-  target_handle: z
-    .string()
-    .optional()
-    .describe('Required for amend/supersede/deprecate'),
+  fields: z.record(z.unknown()).optional().describe('Per-type fields (skill-guided)'),
+  target_handle: z.string().optional().describe('Required for amend/supersede/deprecate'),
 };
 
 // ---------------------------------------------------------------------------
@@ -101,8 +92,5 @@ export const listStagedInputShape = {};
 // ---------------------------------------------------------------------------
 
 export const discardStagedInputShape = {
-  item_id: z
-    .string()
-    .uuid()
-    .describe("UUID of a staging item in the caller's own session"),
+  item_id: z.string().uuid().describe("UUID of a staging item in the caller's own session"),
 };

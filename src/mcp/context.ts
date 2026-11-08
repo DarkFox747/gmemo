@@ -276,18 +276,13 @@ export interface AuditLogger {
  * Dependencies injected into pure tool handlers (input, ctx, deps).
  * memoryRepository is the data-access seam added in change B (D7).
  * stagingRepository is added in the write-path slice (Batch B T007).
- * embedder, semanticFallbackMinResults, and semanticFallbackK are added
- * for the hybrid-search two-phase recall (lexical-first, semantic fallback).
+ * embedder is added for the hybrid-search RRF recall (query embedding).
  */
 export interface HandlerDeps {
   memoryRepository: MemoryRepository;
   stagingRepository: StagingRepository;
-  /** Embedder seam — used by the recall handler for Phase-2 query embedding. */
+  /** Embedder seam — used by the recall handler to embed the query (fail-soft). */
   embedder: Embedder;
-  /** Threshold N: Phase 2 only fires when BM25 totalMatches < N. */
-  semanticFallbackMinResults: number;
-  /** k: number of nearest-neighbour rows to retrieve in Phase 2. */
-  semanticFallbackK: number;
   /** Best-effort review/leak notifications (call via safeNotify; never fails a write). */
   notifier: Notifier;
 }
@@ -323,12 +318,8 @@ export interface AppServices extends AuthServices {
   authRepository: AuthRepository;
   /** Promotion orchestration service. */
   promoteService: PromoteServiceLike;
-  /** Embedder seam — shared by PromoteService (write-time) and recall handler (Phase 2). */
+  /** Embedder seam — shared by PromoteService (write-time) and recall handler (query-time). */
   embedder: Embedder;
-  /** Threshold N: Phase-2 semantic fallback fires when BM25 totalMatches < N. */
-  semanticFallbackMinResults: number;
-  /** k: number of nearest-neighbour rows to retrieve in Phase-2 semantic fallback. */
-  semanticFallbackK: number;
   /** Notifier seam — shared by remember (capture) and PromoteService. */
   notifier: Notifier;
   /** Human review queue (HU-07) — consumed by the /api review routes. */

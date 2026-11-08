@@ -59,13 +59,11 @@ function memory(
   };
 }
 
-function makeDeps(memories: FakeMemory[], semanticMin = 0): HandlerDeps {
+function makeDeps(memories: FakeMemory[]): HandlerDeps {
   return {
     memoryRepository: new InMemoryMemoryRepository(memories),
     stagingRepository: emptyStaging,
     embedder: { embed: () => Promise.resolve(UNIT_VEC) },
-    semanticFallbackMinResults: semanticMin,
-    semanticFallbackK: 8,
     notifier: { notify: () => Promise.resolve() },
   };
 }
