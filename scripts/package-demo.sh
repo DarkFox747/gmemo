@@ -7,9 +7,10 @@
 # explicit exclusion list is applied on top as defence in depth.
 #
 # Gate: the zip is unzipped into a temp dir and checked for forbidden paths
-# and, when the local .sanitize-patterns file exists (gitignored, extended
-# regexes), grepped with it. Any hit fails the script. Only file paths are
-# printed, never the matched text.
+# and grepped with the local .sanitize-patterns file (gitignored, extended
+# regexes). The gate fails closed: a missing or empty patterns file aborts the
+# script unless ALLOW_NO_PATTERNS=1 is set. Any hit fails the script. Only file
+# paths are printed, never the matched text.
 #
 # POSIX sh; works in Git Bash. Needs git, tar, unzip and zip (or bsdtar).
 
@@ -24,7 +25,7 @@ TOP="gmemo-demo"
 PATTERNS=".sanitize-patterns"
 
 # Paths never shipped (extended regex over repo-relative paths).
-EXCLUDE='(^|/)node_modules/|^\.git/|(^|/)\.claude/|(^|/)\.claude\.json$|(^|/)\.mcp\.json$|(^|/)CLAUDE\.md$|^entrevistas/|(^|/)prompt\.md$|(^|/)PROMPT-demo-entrega4\.md$|(^|/)\.sanitize-patterns$|(^|/)dist/|^dist-demo/|\.tfvars$|\.tfvars\.json$|\.tfstate|(^|/)\.terraform/|(^|/)\.env$|(^|/)\.env\.'
+EXCLUDE='(^|/)node_modules/|^\.git/|(^|/)\.claude/|(^|/)\.claude\.json$|(^|/)\.mcp\.json$|(^|/)CLAUDE\.md$|^entrevistas/|(^|/)prompt\.md$|(^|/)PROMPT-demo-entrega4\.md$|(^|/)\.sanitize-patterns$|(^|/)dist/|^dist-demo/|\.tfvars$|\.tfvars\.json$|\.tfstate|(^|/)\.terraform/|(^|/)\.env$|(^|/)\.env\.|\.pem$|\.key$|\.p12$|\.pfx$|(^|/)id_rsa|(^|/)id_ed25519|(^|/)\.codex/|(^|/)\.cursor/|(^|/)\.windsurf/|(^|/)\.aider'
 # ...except the documented examples.
 KEEP='(^|/)\.env(\.[^/]*)?\.example$|\.tfvars\.example$'
 
@@ -81,27 +82,29 @@ unzip -q "$ZIP_PATH" -d "$WORK/check"
 find "$WORK/check" \( -name node_modules -o -name .git -o -name .claude -o -name .claude.json \
   -o -name .mcp.json -o -name CLAUDE.md -o -name entrevistas -o -name prompt.md \
   -o -name PROMPT-demo-entrega4.md -o -name .sanitize-patterns -o -name .terraform \
-  -o -name dist -o -name '*.tfvars' -o -name '*.tfvars.json' -o -name '*.tfstate*' -o -name .env \
+  -o -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' -o -name 'id_rsa*'   -o -name 'id_ed25519*' -o -name .codex -o -name .cursor -o -name .windsurf -o -name '.aider*'   -o -name dist -o -name '*.tfvars' -o -name '*.tfvars.json' -o -name '*.tfstate*' -o -name .env \
   -o \( -name '.env.*' ! -name '*.example' \) \) > "$WORK/forbidden"
 if [ -s "$WORK/forbidden" ]; then
   sed "s|^$WORK/check/||" "$WORK/forbidden" >&2
   fail "forbidden paths found in the package"
 fi
 
+# Fail closed: without patterns the gate would silently check nothing.
+: > "$WORK/patterns"
 if [ -f "$PATTERNS" ]; then
   # Blank or comment lines would match everything: drop them.
   grep -v -E '^[[:space:]]*(#|$)' "$PATTERNS" > "$WORK/patterns" || true
-  if [ -s "$WORK/patterns" ]; then
-    if grep -r -I -l -i -E -f "$WORK/patterns" "$WORK/check" > "$WORK/hits"; then
-      sed "s|^$WORK/check/||" "$WORK/hits" >&2
-      fail "sanitization patterns matched the files above"
-    fi
-    echo "[package-demo] sanitization grep: clean ($(wc -l < "$WORK/patterns" | tr -d ' ') patterns)"
-  else
-    echo "[package-demo] $PATTERNS has no patterns; forbidden-path check only"
+fi
+if [ -s "$WORK/patterns" ]; then
+  if grep -r -I -l -i -E -f "$WORK/patterns" "$WORK/check" > "$WORK/hits"; then
+    sed "s|^$WORK/check/||" "$WORK/hits" >&2
+    fail "sanitization patterns matched the files above"
   fi
+  echo "[package-demo] sanitization grep: clean ($(wc -l < "$WORK/patterns" | tr -d ' ') patterns)"
+elif [ "${ALLOW_NO_PATTERNS:-}" = "1" ]; then
+  echo "[package-demo] WARNING: $PATTERNS is missing or empty; ALLOW_NO_PATTERNS=1 set, so the sanitization grep is SKIPPED (forbidden-path check only)" >&2
 else
-  echo "[package-demo] $PATTERNS not found (it is local and gitignored); forbidden-path check only"
+  fail "$PATTERNS is missing or empty; refusing to package without the sanitization gate (set ALLOW_NO_PATTERNS=1 to override)"
 fi
 
 SIZE=$(wc -c < "$ZIP_PATH" | tr -d ' ')
