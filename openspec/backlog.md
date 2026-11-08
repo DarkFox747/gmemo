@@ -113,3 +113,18 @@ Deferred work items, ordered. Promote to a `/sdd-new <name>` change when ready.
 - Tighten `query`/`limit` bounds to contract-exact budgets when real search lands.
 - Replace test `as any` for `deps` with the real `Deps` type.
 - AWS infra / containerization for production (ECR + Fargate) — beyond dev-harness.
+
+## Entrega 4 — demo (2026-11-08, branch `demo/e4`)
+
+✅ Archived: C0 demo-baseline · C1 judge-structured-verdict · C2 web-api-and-review-queue · C3 quarantine-management · C4 memory-lifecycle · C5 direct-memory-management · C6 hybrid-search-rrf · C7 governance-web · C8 demo-kit. Report: `docs/demo/REPORTE-E4.md`.
+
+### Follow-ups (from verify reports, all LOW/MEDIUM, none blocking)
+1. Compensating un-claim after a post-claim restore failure (C3).
+2. Detector coverage gaps: `sk-proj-`, `github_pat_`, AWS secret access keys (C3).
+3. Audit row inside the write transaction for API writes (C2/C4).
+4. Per-user rate limiting for preview/create/amend and behind CloudFront (C2/C5).
+5. `NODE_ENV` required with no default; rate limiters before body parsing (pre-existing).
+6. Feature-branch session ↔ PR linking for `/promote` (pilot limitation).
+7. Web: gate the dev-user selector to dev builds; Cognito PKCE login; screen-level component tests (C7).
+8. Dev-user email allowlist (C2); refuse `judge_output_invalid` on human confirm (C5).
+9. Re-run `/sdd-init` to refresh `openspec/project-map.yaml` (area context, staleness anchor).

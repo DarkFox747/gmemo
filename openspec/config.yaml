@@ -11,7 +11,7 @@ project:
     service with a single MCP facade. Two-layer memory (governed decision memory
     in RDS + derived code graph), single write path (agents stage only; promotion
     via PR merge or human Web UI action).
-  stage: pilot-ready-for-aws-deploy   # 12 SDD changes archived; read + stage + promote (GitHub-OIDC) working; real Bedrock; Terraform pilot (single-AZ + Cognito + HTTPS) validated; hardened (helmet + spoof-resistant rate-limit) — apply out-of-band (updated 2026-07-31)
+  stage: demo-e4-complete   # C0–C8 archived on branch demo/e4: governed memory (judge, review queue, quarantine, lifecycle, direct management), RRF search, governance web, demo kit (updated 2026-11-08)
   primary_language: TypeScript (Node.js, ESM)   # pilot runtime: Express
 
 stack:
