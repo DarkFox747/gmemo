@@ -4,7 +4,13 @@
  */
 
 import type {
+  ActivityAction,
+  ActivityCategory,
+  ActivityFactsDto,
   ConflictCode,
+  JudgeState,
+  SessionStatus,
+  StagingItemState,
   DecisionCriterion,
   MemoryStatus,
   MemoryType,
@@ -114,6 +120,88 @@ const PROVENANCE_LABELS: Record<string, string> = {
   web_ui: 'Interfaz web',
 };
 
+// --- Governance insights (C12) ---
+
+const ACTIVITY_ACTION_LABELS: Record<ActivityAction, string> = {
+  'staging.remember': 'Propuesta registrada por un agente',
+  'staging.discard': 'Propuesta descartada por el agente',
+  'promotion.run': 'Promoción tras el merge',
+  'promotion.abandon': 'PR cerrada sin merge: propuestas descartadas',
+  'review.approve': 'Propuesta aprobada en revisión',
+  'review.reject': 'Propuesta rechazada en revisión',
+  'quarantine.restore': 'Restaurada desde cuarentena',
+  'memory.create': 'Unidad creada desde la web',
+  'memory.amend': 'Unidad modificada desde la web',
+  'memory.confirm': 'Unidad revalidada',
+  'memory.retire': 'Unidad retirada',
+  'memory.retire_by_pr': 'Unidades retiradas por PR',
+  'job.quarantine_purge': 'Purga de cuarentena',
+  'job.revalidation_sweep': 'Barrido de revalidación',
+  'job.web_session_reaper': 'Limpieza de sesiones web',
+  other: 'Otra acción registrada',
+};
+
+const ACTIVITY_CATEGORY_LABELS: Record<ActivityCategory, string> = {
+  staging: 'Propuestas',
+  promotion: 'Promociones',
+  review: 'Revisión',
+  quarantine: 'Cuarentena',
+  memory: 'Memoria',
+  jobs: 'Tareas',
+};
+
+const STAGING_ITEM_STATE_LABELS: Record<StagingItemState, string> = {
+  staged: 'En preparación',
+  queued: 'En cola de revisión',
+  applied: 'Incorporada',
+  quarantined: 'En cuarentena',
+  review_rejected: 'Rechazada en revisión',
+};
+
+const SESSION_STATUS_LABELS: Record<SessionStatus, string> = {
+  open: 'Abierta',
+  validating: 'Validando',
+  promoted: 'Promovida',
+  partially_promoted: 'Promovida parcialmente',
+  rejected: 'Rechazada',
+  abandoned: 'Descartada',
+};
+
+const JUDGE_STATE_LABELS: Record<JudgeState, string> = {
+  pending: 'Sin evaluar',
+  accepted: 'Aceptada',
+  uncertain: 'Dudosa',
+  rejected: 'Rechazada',
+};
+
+const OUTCOME_LABELS: Record<NonNullable<ActivityFactsDto['outcome']>, string> = {
+  applied: 'aplicada',
+  queued: 'enviada a revisión',
+  quarantined: 'en cuarentena',
+};
+
+export const activityActionLabel = (a: ActivityAction): string => ACTIVITY_ACTION_LABELS[a];
+export const activityCategoryLabel = (c: ActivityCategory): string => ACTIVITY_CATEGORY_LABELS[c];
+export const stagingItemStateLabel = (s: StagingItemState): string => STAGING_ITEM_STATE_LABELS[s];
+export const sessionStatusLabel = (s: SessionStatus): string => SESSION_STATUS_LABELS[s];
+export const judgeStateLabel = (s: JudgeState): string => JUDGE_STATE_LABELS[s];
+export const outcomeLabel = (o: NonNullable<ActivityFactsDto['outcome']>): string =>
+  OUTCOME_LABELS[o];
+
+/** Definitions shown next to the live Juez indicators (Inicio) and in docs/demo/INSTRUCTIVO.md. */
+export const METRICS = {
+  falsePositiveTitle: 'Falsos positivos del Juez',
+  falsePositiveDefinition:
+    'Unidades buenas que el Juez retuvo (dudosas o rechazadas) sobre las unidades buenas etiquetadas. Buena = aprobada en revisión o restaurada desde una cuarentena del Juez.',
+  falseNegativeTitle: 'Falsos negativos del Juez',
+  falseNegativeDefinition:
+    'Unidades malas que el Juez dejó pasar sobre las unidades malas etiquetadas. Mala = rechazada en revisión; solo es observable en los tipos con revisión obligatoria.',
+  bias: 'La muestra está sesgada: los falsos positivos solo se miden sobre lo que el Juez retuvo y un humano resolvió; los falsos negativos, solo sobre los tipos críticos.',
+  synthetic:
+    'La contraparte sintética (conjunto de evaluación fijo) está en docs/demo/metricas.md.',
+  noData: 'sin datos',
+} as const;
+
 export const typeLabel = (t: MemoryType): string => TYPE_LABELS[t];
 export const statusLabel = (s: MemoryStatus): string => STATUS_LABELS[s];
 export const criterionShort = (c: DecisionCriterion): string => CRITERION_SHORT[c];
@@ -201,5 +289,5 @@ export const MESSAGES = {
     'El Juez no está disponible en este momento; no se aplicó ningún cambio. Inténtalo más tarde.',
   noAccess: 'Esta sección requiere el rol de líder técnico en el proyecto seleccionado.',
   quarantineFooter:
-    'Las restauraciones se registran como etiquetas para medir los falsos negativos del Juez.',
+    'Las restauraciones se registran como etiquetas para medir los falsos positivos del Juez (unidades buenas que el Juez retuvo).',
 } as const;

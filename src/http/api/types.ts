@@ -24,6 +24,7 @@ import type { LifecycleServiceLike } from '../../lifecycle/types.js';
 import type { MemoryStatus } from '../../db/memoryAdminRepository.js';
 import type { DirectMemoryServiceLike } from '../../memory/types.js';
 import type { AdminSummaryRepository } from '../../db/adminSummaryRepository.js';
+import type { InsightsRepository } from '../../db/insightsRepository.js';
 
 /**
  * Approve outcomes the caller can fix by reloading the item.
@@ -106,6 +107,8 @@ export interface ApiRouterDeps {
   directMemoryService: DirectMemoryServiceLike;
   /** Read-only administration summary (C7). */
   adminSummaryRepository: AdminSummaryRepository;
+  /** Read-only governance insights: dashboard, activity, staging (C12). */
+  insightsRepository: InsightsRepository;
 }
 
 export interface ApiRouterOptions {
@@ -401,4 +404,147 @@ export interface AdminSummaryDto {
     revokedAt: string | null;
     status: 'active' | 'expired' | 'revoked';
   }>;
+}
+
+// ---------------------------------------------------------------------------
+// Governance insights (C12, read-only): Inicio, Actividad, Área de preparación
+// ---------------------------------------------------------------------------
+
+/** A live indicator: count over its labelled denominator; rate null when `of` is 0. */
+export interface RateDto {
+  count: number;
+  of: number;
+  rate: number | null;
+}
+
+export interface DashboardDto {
+  generatedAt: string;
+  /** Window of the judge section, in days (30). */
+  windowDays: number;
+  memories: {
+    total: number;
+    byStatus: Record<MemoryStatus, number>;
+    activeByType: Record<MemoryType, number>;
+  };
+  /** Same predicate and counters as the review queue badge. */
+  queue: { pending: number; uncertain: number; mandatory: number };
+  /** Active (non-restored) quarantine entries; `active` includes a legacy NULL criterion. */
+  quarantine: { active: number; byCriterion: Record<QuarantineCriterion, number> };
+  judge: {
+    outcomes: {
+      accepted: number;
+      uncertain: number;
+      rejected: number;
+      pipelineBlocked: number;
+      notEvaluated: number;
+    };
+    labels: {
+      uncertainApproved: number;
+      uncertainRejected: number;
+      acceptedApproved: number;
+      acceptedRejected: number;
+      restoredFromJudge: number;
+    };
+    /** Human corrections outside the judge metrics. */
+    restoredOther: { pipeline: number; humanReview: number };
+    unlabeled: { autoApplied: number; judgeRejectedNotRestored: number };
+    falsePositive: RateDto;
+    falseNegative: RateDto;
+  };
+}
+
+export type ActivityCategory =
+  'staging' | 'promotion' | 'review' | 'quarantine' | 'memory' | 'jobs';
+
+export type ActivityAction =
+  | 'staging.remember'
+  | 'staging.discard'
+  | 'promotion.run'
+  | 'promotion.abandon'
+  | 'review.approve'
+  | 'review.reject'
+  | 'quarantine.restore'
+  | 'memory.create'
+  | 'memory.amend'
+  | 'memory.confirm'
+  | 'memory.retire'
+  | 'memory.retire_by_pr'
+  | 'job.quarantine_purge'
+  | 'job.revalidation_sweep'
+  | 'job.web_session_reaper'
+  | 'other';
+
+export type ActorKind = 'user' | 'agent' | 'ci' | 'system';
+
+/** Allow-listed facts of an audit event; nothing else from access_log.detail is returned. */
+export interface ActivityFactsDto {
+  branch?: string;
+  prNumber?: number;
+  applied?: number;
+  queued?: number;
+  quarantined?: number;
+  discarded?: number;
+  count?: number;
+  originPr?: number;
+  outcome?: 'applied' | 'queued' | 'quarantined';
+}
+
+export interface ActivityEventDto {
+  /** access_log.id as a decimal string. */
+  id: string;
+  at: string;
+  action: ActivityAction;
+  /** Display name only (users and agents); never an email, subject, user id or CI identity. */
+  actor: { kind: ActorKind; name: string | null };
+  /** Resolved only inside the same project; null when deleted, purged or foreign. */
+  target: {
+    kind: 'memory' | 'staging_item' | 'quarantine';
+    type: MemoryType;
+    title: string;
+  } | null;
+  facts: ActivityFactsDto;
+}
+
+export interface ActivityListDto {
+  items: ActivityEventDto[];
+  /** Opaque keyset cursor of the next page; null on the last page. */
+  nextCursor: string | null;
+}
+
+export type StagingItemState = 'staged' | 'queued' | 'applied' | 'quarantined' | 'review_rejected';
+
+export interface StagingOverviewItemDto {
+  id: string;
+  op: 'add' | 'amend' | 'supersede' | 'deprecate';
+  type: MemoryType;
+  /** PII-masked. */
+  title: string;
+  judgeState: 'pending' | 'accepted' | 'uncertain' | 'rejected';
+  criterion: DecisionCriterion | null;
+  mandatoryReview: boolean;
+  state: StagingItemState;
+  createdAt: string;
+}
+
+export interface StagingSessionDto {
+  id: string;
+  repo: { id: string; label: string };
+  branch: string;
+  status: 'open' | 'validating' | 'promoted' | 'partially_promoted' | 'rejected' | 'abandoned';
+  prNumber: number | null;
+  /** Display name only. */
+  openedBy: string | null;
+  createdAt: string;
+  lastActivityAt: string;
+  expiresAt: string | null;
+  closedAt: string | null;
+  itemCount: number;
+  /** Newest first, at most 100. */
+  items: StagingOverviewItemDto[];
+  itemsTruncated: boolean;
+}
+
+export interface StagingOverviewDto {
+  sessions: StagingSessionDto[];
+  truncated: boolean;
 }

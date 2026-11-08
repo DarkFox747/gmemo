@@ -15,7 +15,9 @@ import type { Route } from './lib/hashRoute';
 import { REFRESH_MS, startPolling } from './lib/polling';
 import type { AppStorage } from './lib/storage';
 import { useAsync } from './lib/useAsync';
+import { ActivityScreen } from './screens/ActivityScreen';
 import { AdminScreen } from './screens/AdminScreen';
+import { HomeScreen } from './screens/HomeScreen';
 import { MemoryDetailScreen } from './screens/MemoryDetailScreen';
 import { MemoryFormScreen } from './screens/MemoryFormScreen';
 import { MemoryScreen } from './screens/MemoryScreen';
@@ -23,6 +25,7 @@ import { QuarantineDetailScreen } from './screens/QuarantineDetailScreen';
 import { QuarantineScreen } from './screens/QuarantineScreen';
 import { ReviewDetailScreen } from './screens/ReviewDetailScreen';
 import { ReviewQueueScreen } from './screens/ReviewQueueScreen';
+import { StagingScreen } from './screens/StagingScreen';
 import type { ScreenProps } from './screens/types';
 
 const NO_BADGES: Badges = { review: null, quarantine: null };
@@ -30,6 +33,12 @@ const BADGE_LIMIT = 200;
 
 function Screen({ route, props }: { route: Route; props: ScreenProps }) {
   switch (route.name) {
+    case 'home':
+      return <HomeScreen {...props} />;
+    case 'activity':
+      return <ActivityScreen {...props} />;
+    case 'staging':
+      return <StagingScreen {...props} />;
     case 'review':
       return <ReviewQueueScreen {...props} />;
     case 'reviewDetail':

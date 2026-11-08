@@ -6,10 +6,16 @@ export interface Badges {
   quarantine: string | null;
 }
 
-type Section = 'review' | 'memory' | 'quarantine' | 'admin';
+type Section = 'home' | 'review' | 'staging' | 'memory' | 'quarantine' | 'activity' | 'admin';
 
 function sectionOf(r: Route): Section {
   switch (r.name) {
+    case 'home':
+      return 'home';
+    case 'staging':
+      return 'staging';
+    case 'activity':
+      return 'activity';
     case 'review':
     case 'reviewDetail':
       return 'review';
@@ -27,9 +33,12 @@ function sectionOf(r: Route): Section {
 }
 
 const NAV: Array<{ section: Section; label: string; route: Route }> = [
+  { section: 'home', label: 'Inicio', route: { name: 'home' } },
   { section: 'review', label: 'Cola de revisión', route: { name: 'review' } },
+  { section: 'staging', label: 'Área de preparación', route: { name: 'staging' } },
   { section: 'memory', label: 'Memoria del proyecto', route: { name: 'memory' } },
   { section: 'quarantine', label: 'Cuarentena', route: { name: 'quarantine' } },
+  { section: 'activity', label: 'Actividad', route: { name: 'activity' } },
   { section: 'admin', label: 'Administración', route: { name: 'admin' } },
 ];
 

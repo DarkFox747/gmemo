@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ACTIVITY_ACTIONS,
+  ACTIVITY_CATEGORIES,
   CONFLICT_CODES,
+  JUDGE_STATES,
+  SESSION_STATUSES,
+  STAGING_ITEM_STATES,
   DECISION_CRITERIA,
   MEMORY_STATUSES,
   MEMORY_TYPES,
@@ -30,6 +35,18 @@ describe('labels', () => {
     for (const o of OPS) expect(labels.opLabel(o)).not.toBe('');
     for (const v of VERDICTS) expect(labels.verdictLabel(v)).not.toBe('');
     for (const c of CONFLICT_CODES) expect(labels.MESSAGES.conflict[c]).not.toBe('');
+    for (const a of ACTIVITY_ACTIONS) expect(labels.activityActionLabel(a)).not.toBe('');
+    for (const c of ACTIVITY_CATEGORIES) expect(labels.activityCategoryLabel(c)).not.toBe('');
+    for (const s of STAGING_ITEM_STATES) expect(labels.stagingItemStateLabel(s)).not.toBe('');
+    for (const s of SESSION_STATUSES) expect(labels.sessionStatusLabel(s)).not.toBe('');
+    for (const s of JUDGE_STATES) expect(labels.judgeStateLabel(s)).not.toBe('');
+  });
+
+  it('quarantine footer measures false positives, consistent with Inicio', () => {
+    expect(labels.MESSAGES.quarantineFooter).toContain('falsos positivos del Juez');
+    expect(labels.MESSAGES.quarantineFooter).not.toContain('falsos negativos');
+    expect(labels.METRICS.falsePositiveDefinition).toContain('restaurada');
+    expect(labels.METRICS.falseNegativeDefinition).toContain('rechazada en revisión');
   });
 
   it('unknown role strings get a neutral label', () => {

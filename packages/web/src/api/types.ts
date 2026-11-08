@@ -2,7 +2,8 @@
  * Hand-kept mirror of the /api/v1 JSON shapes the web consumes.
  *
  * Source of truth (the server is the moving side — update this file with it):
- *   - src/http/api/types.ts            DTOs, ConflictCode, ApiErrorBody, AdminSummaryDto (C7)
+ *   - src/http/api/types.ts            DTOs, ConflictCode, ApiErrorBody, AdminSummaryDto (C7),
+ *                                      DashboardDto / ActivityListDto / StagingOverviewDto (C12)
  *   - src/mcp/tools/schemas.ts         MEMORY_TYPES
  *   - src/db/memoryAdminRepository.ts  MemoryStatus
  *   - src/judge/judge.ts               Verdict, DecisionCriterion
@@ -367,4 +368,164 @@ export interface AdminSummaryDto {
     revokedAt: string | null;
     status: 'active' | 'expired' | 'revoked';
   }>;
+}
+
+// ---------------------------------------------------------------------------
+// Governance insights (C12, read-only): Inicio, Actividad, Área de preparación
+// ---------------------------------------------------------------------------
+
+export interface RateDto {
+  count: number;
+  of: number;
+  rate: number | null;
+}
+
+export interface DashboardDto {
+  generatedAt: string;
+  windowDays: number;
+  memories: {
+    total: number;
+    byStatus: Record<MemoryStatus, number>;
+    activeByType: Record<MemoryType, number>;
+  };
+  queue: { pending: number; uncertain: number; mandatory: number };
+  quarantine: { active: number; byCriterion: Record<QuarantineCriterion, number> };
+  judge: {
+    outcomes: {
+      accepted: number;
+      uncertain: number;
+      rejected: number;
+      pipelineBlocked: number;
+      notEvaluated: number;
+    };
+    labels: {
+      uncertainApproved: number;
+      uncertainRejected: number;
+      acceptedApproved: number;
+      acceptedRejected: number;
+      restoredFromJudge: number;
+    };
+    restoredOther: { pipeline: number; humanReview: number };
+    unlabeled: { autoApplied: number; judgeRejectedNotRestored: number };
+    falsePositive: RateDto;
+    falseNegative: RateDto;
+  };
+}
+
+export const ACTIVITY_CATEGORIES = [
+  'staging',
+  'promotion',
+  'review',
+  'quarantine',
+  'memory',
+  'jobs',
+] as const;
+export type ActivityCategory = (typeof ACTIVITY_CATEGORIES)[number];
+
+export const ACTIVITY_ACTIONS = [
+  'staging.remember',
+  'staging.discard',
+  'promotion.run',
+  'promotion.abandon',
+  'review.approve',
+  'review.reject',
+  'quarantine.restore',
+  'memory.create',
+  'memory.amend',
+  'memory.confirm',
+  'memory.retire',
+  'memory.retire_by_pr',
+  'job.quarantine_purge',
+  'job.revalidation_sweep',
+  'job.web_session_reaper',
+  'other',
+] as const;
+export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
+
+export type ActorKind = 'user' | 'agent' | 'ci' | 'system';
+
+export interface ActivityFactsDto {
+  branch?: string;
+  prNumber?: number;
+  applied?: number;
+  queued?: number;
+  quarantined?: number;
+  discarded?: number;
+  count?: number;
+  originPr?: number;
+  outcome?: 'applied' | 'queued' | 'quarantined';
+}
+
+export interface ActivityEventDto {
+  id: string;
+  at: string;
+  action: ActivityAction;
+  actor: { kind: ActorKind; name: string | null };
+  target: {
+    kind: 'memory' | 'staging_item' | 'quarantine';
+    type: MemoryType;
+    title: string;
+  } | null;
+  facts: ActivityFactsDto;
+}
+
+export interface ActivityListDto {
+  items: ActivityEventDto[];
+  nextCursor: string | null;
+}
+
+export const STAGING_ITEM_STATES = [
+  'staged',
+  'queued',
+  'applied',
+  'quarantined',
+  'review_rejected',
+] as const;
+export type StagingItemState = (typeof STAGING_ITEM_STATES)[number];
+
+export const SESSION_STATUSES = [
+  'open',
+  'validating',
+  'promoted',
+  'partially_promoted',
+  'rejected',
+  'abandoned',
+] as const;
+export type SessionStatus = (typeof SESSION_STATUSES)[number];
+
+export const JUDGE_STATES = ['pending', 'accepted', 'uncertain', 'rejected'] as const;
+export type JudgeState = (typeof JUDGE_STATES)[number];
+
+export interface StagingOverviewItemDto {
+  id: string;
+  op: Op;
+  type: MemoryType;
+  /** PII-masked by the server. */
+  title: string;
+  judgeState: JudgeState;
+  criterion: DecisionCriterion | null;
+  mandatoryReview: boolean;
+  state: StagingItemState;
+  createdAt: string;
+}
+
+export interface StagingSessionDto {
+  id: string;
+  repo: { id: string; label: string };
+  branch: string;
+  status: SessionStatus;
+  prNumber: number | null;
+  openedBy: string | null;
+  createdAt: string;
+  lastActivityAt: string;
+  expiresAt: string | null;
+  closedAt: string | null;
+  itemCount: number;
+  items: StagingOverviewItemDto[];
+  itemsTruncated: boolean;
+}
+
+export interface StagingOverviewDto {
+  sessions: StagingSessionDto[];
+  truncated: boolean;
 }

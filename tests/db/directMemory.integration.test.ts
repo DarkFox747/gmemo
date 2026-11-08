@@ -133,6 +133,7 @@ describeWithDb('direct memory management end to end (HU-13)', () => {
     const { PgLifecycleRepository } = await import('../../src/db/lifecycleRepository.js');
     const { PgMemoryAdminRepository } = await import('../../src/db/memoryAdminRepository.js');
     const { PgAdminSummaryRepository } = await import('../../src/db/adminSummaryRepository.js');
+    const { PgInsightsRepository } = await import('../../src/db/insightsRepository.js');
     const { RdsAuthorizer } = await import('../../src/auth/authorizer.js');
     const { RdsAuditLogger } = await import('../../src/auth/auditLogger.js');
     const { DeterministicJudge } = await import('../../src/judge/deterministicJudge.js');
@@ -211,6 +212,7 @@ describeWithDb('direct memory management end to end (HU-13)', () => {
             routing,
           }),
           adminSummaryRepository: new PgAdminSummaryRepository(pool),
+          insightsRepository: new PgInsightsRepository(pool),
         },
         { devUserHeader: false },
       ),

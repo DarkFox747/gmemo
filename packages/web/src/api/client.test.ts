@@ -188,6 +188,25 @@ describe('requests', () => {
     await api.getAdminSummary(P);
     expect(calls[0]!.url).toBe(`/api/v1/projects/${P}/admin-summary`);
   });
+
+  it('insights: dashboard, activity (empty values dropped), staging; encoded project', async () => {
+    const { api, calls } = fakeClient({ body: {} });
+    await api.getDashboard(P);
+    await api.listActivity(P, {});
+    await api.listActivity(P, { category: 'review', cursor: '119', limit: 50 });
+    await api.listActivity(P, { cursor: '' });
+    await api.listStaging(P, { status: 'closed' });
+    await api.listStaging('a/b', { status: 'open', limit: 5 });
+    expect(calls.map((c) => c.url)).toEqual([
+      `/api/v1/projects/${P}/dashboard`,
+      `/api/v1/projects/${P}/activity`,
+      `/api/v1/projects/${P}/activity?category=review&cursor=119&limit=50`,
+      `/api/v1/projects/${P}/activity`,
+      `/api/v1/projects/${P}/staging?status=closed`,
+      '/api/v1/projects/a%2Fb/staging?status=open&limit=5',
+    ]);
+    for (const c of calls) expect(c.init.method).toBe('GET');
+  });
 });
 
 describe('errors', () => {

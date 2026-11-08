@@ -1,5 +1,5 @@
 /**
- * Screenshots of the five web screens (C8, demo-kit §5). Run: pnpm screenshots
+ * Screenshots of the web screens (C8, demo-kit §5; insight views C12). Run: pnpm screenshots
  *
  * Optional tooling: if Playwright (`@playwright/test`) is not installed or the
  * web build (packages/web/dist, change C7) is missing, it prints why and exits 0.
@@ -83,6 +83,9 @@ async function main(): Promise<void> {
     { file: '3-cuarentena.png', hash: '#/quarantine' },
     { file: '4-memoria-del-proyecto.png', hash: '#/memory' },
     { file: '5-administracion.png', hash: '#/admin' },
+    { file: '6-inicio.png', hash: '#/home' },
+    { file: '7-actividad.png', hash: '#/activity' },
+    { file: '8-area-de-preparacion.png', hash: '#/staging' },
   ];
 
   await fs.mkdir(OUT_DIR, { recursive: true });

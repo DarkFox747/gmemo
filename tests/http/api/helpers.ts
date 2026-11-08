@@ -35,7 +35,17 @@ import {
 } from '../../memory/directFakes.js';
 import { FakeJudge } from '../../promote/fakes.js';
 import type { AdminSummaryRepository } from '../../../src/db/adminSummaryRepository.js';
-import type { AdminSummaryDto } from '../../../src/http/api/types.js';
+import type {
+  ActivityListDto,
+  AdminSummaryDto,
+  DashboardDto,
+  StagingOverviewDto,
+} from '../../../src/http/api/types.js';
+import type {
+  ActivityQuery,
+  InsightsRepository,
+  StagingQuery,
+} from '../../../src/db/insightsRepository.js';
 
 // ---------------------------------------------------------------------------
 // Seed: two projects, one admin each, plus every non-admin shape.
@@ -152,6 +162,66 @@ export class FakeAdminSummaryRepository implements AdminSummaryRepository {
   }
 }
 
+/** Empty dashboard (no data, no labels). */
+export function emptyDashboard(): DashboardDto {
+  return {
+    generatedAt: '2026-11-08T10:00:00.000Z',
+    windowDays: 30,
+    memories: {
+      total: 0,
+      byStatus: { active: 0, pending_revalidation: 0, superseded: 0, deprecated: 0 },
+      activeByType: {
+        decision: 0,
+        constraint: 0,
+        gotcha: 0,
+        pattern: 0,
+        integration_note: 0,
+        domain_rule: 0,
+        outcome: 0,
+      },
+    },
+    queue: { pending: 0, uncertain: 0, mandatory: 0 },
+    quarantine: { active: 0, byCriterion: { pipeline: 0, judge: 0, human_review: 0 } },
+    judge: {
+      outcomes: { accepted: 0, uncertain: 0, rejected: 0, pipelineBlocked: 0, notEvaluated: 0 },
+      labels: {
+        uncertainApproved: 0,
+        uncertainRejected: 0,
+        acceptedApproved: 0,
+        acceptedRejected: 0,
+        restoredFromJudge: 0,
+      },
+      restoredOther: { pipeline: 0, humanReview: 0 },
+      unlabeled: { autoApplied: 0, judgeRejectedNotRestored: 0 },
+      falsePositive: { count: 0, of: 0, rate: null },
+      falseNegative: { count: 0, of: 0, rate: null },
+    },
+  };
+}
+
+/** Insights fake (C12): scripted DTOs; records every call with its query. */
+export class FakeInsightsRepository implements InsightsRepository {
+  dashboard: DashboardDto = emptyDashboard();
+  activity: ActivityListDto = { items: [], nextCursor: null };
+  staging: StagingOverviewDto = { sessions: [], truncated: false };
+  calls: Array<{ method: string; projectId: string; q?: ActivityQuery | StagingQuery }> = [];
+
+  async getDashboard(projectId: string): Promise<DashboardDto> {
+    this.calls.push({ method: 'getDashboard', projectId });
+    return this.dashboard;
+  }
+
+  async listActivity(projectId: string, q: ActivityQuery): Promise<ActivityListDto> {
+    this.calls.push({ method: 'listActivity', projectId, q });
+    return this.activity;
+  }
+
+  async listStaging(projectId: string, q: StagingQuery): Promise<StagingOverviewDto> {
+    this.calls.push({ method: 'listStaging', projectId, q });
+    return this.staging;
+  }
+}
+
 export interface ApiTestKit {
   app: express.Express;
   authRepo: InMemoryAuthRepository;
@@ -175,6 +245,8 @@ export interface ApiTestKit {
   };
   /** Backing fake of the admin summary route (C7). */
   adminSummaryRepo: FakeAdminSummaryRepository;
+  /** Backing fake of the insights routes (C12). */
+  insightsRepo: FakeInsightsRepository;
 }
 
 export function makeApiTestApp(
@@ -199,6 +271,7 @@ export function makeApiTestApp(
   };
 
   const adminSummaryRepo = new FakeAdminSummaryRepository();
+  const insightsRepo = new FakeInsightsRepository();
 
   const deps: ApiRouterDeps = {
     authenticator,
@@ -227,6 +300,7 @@ export function makeApiTestApp(
       routing: DIRECT_ROUTING,
     }),
     adminSummaryRepository: adminSummaryRepo,
+    insightsRepository: insightsRepo,
     ...overrides,
   };
 
@@ -236,6 +310,6 @@ export function makeApiTestApp(
   app.use('/api', apiErrorHandler);
   return {
     app, authRepo, authenticator, queueRepo, promotionRepo, embedder, quarantineRepo, quarantinePromote,
-    lifecycleRepo, direct, adminSummaryRepo,
+    lifecycleRepo, direct, adminSummaryRepo, insightsRepo,
   };
 }

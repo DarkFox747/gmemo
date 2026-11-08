@@ -14,6 +14,9 @@ describe('parseHash', () => {
     ['#/quarantine', { name: 'quarantine' }],
     [`#/quarantine/${ID}`, { name: 'quarantineDetail', id: ID }],
     ['#/admin', { name: 'admin' }],
+    ['#/home', { name: 'home' }],
+    ['#/activity', { name: 'activity' }],
+    ['#/staging', { name: 'staging' }],
   ])('%s', (hash, route) => {
     expect(parseHash(hash)).toEqual(route);
   });
@@ -29,15 +32,24 @@ describe('parseHash', () => {
       '#/quarantine',
       `#/quarantine/${ID}`,
       '#/admin',
+      '#/home',
+      '#/activity',
+      '#/staging',
     ]) {
       expect(buildHash(parseHash(h))).toBe(h);
     }
   });
 
-  it('empty or unknown → review', () => {
-    expect(parseHash('')).toEqual({ name: 'review' });
-    expect(parseHash('#')).toEqual({ name: 'review' });
-    expect(parseHash('#/nope')).toEqual({ name: 'review' });
+  it('empty or unknown → home (Inicio is the landing route)', () => {
+    expect(parseHash('')).toEqual({ name: 'home' });
+    expect(parseHash('#')).toEqual({ name: 'home' });
+    expect(parseHash('#/nope')).toEqual({ name: 'home' });
+  });
+
+  it('insight routes with extra segments fall back to their list route', () => {
+    expect(parseHash(`#/activity/${ID}`)).toEqual({ name: 'activity' });
+    expect(parseHash('#/staging/x/y')).toEqual({ name: 'staging' });
+    expect(parseHash('#/home/extra')).toEqual({ name: 'home' });
   });
 
   it('a non-UUID id falls back to the list route', () => {

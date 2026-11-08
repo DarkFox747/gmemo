@@ -73,6 +73,7 @@ import type { QuarantineServiceLike } from '../../src/quarantine/quarantineServi
 import type { LifecycleServiceLike } from '../../src/lifecycle/types.js';
 import type { DirectMemoryServiceLike } from '../../src/memory/types.js';
 import type { AdminSummaryRepository } from '../../src/db/adminSummaryRepository.js';
+import type { InsightsRepository } from '../../src/db/insightsRepository.js';
 import type { Judge, JudgeItem } from '../../src/judge/judge.js';
 import type { OidcVerifier, PromotePrincipal } from '../../src/auth/oidcAuthenticator.js';
 import { PromoteService } from '../../src/promote/promoteService.js';
@@ -578,6 +579,13 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     getAdminSummary: () => Promise.resolve(null),
   };
 
+  // Stub insights (C12): never reached by these tests; fail loudly if it is.
+  const stubInsightsRepository: InsightsRepository = {
+    getDashboard: () => Promise.reject(new Error('stub insightsRepository')),
+    listActivity: () => Promise.reject(new Error('stub insightsRepository')),
+    listStaging: () => Promise.reject(new Error('stub insightsRepository')),
+  };
+
   return {
     authenticator: stubAuthenticator,
     tenantResolver: stubTenantResolver,
@@ -597,6 +605,7 @@ export function makeStubAuthServices(overrides: Partial<AppServices> = {}): AppS
     lifecycleService: stubLifecycleService,
     directMemoryService: stubDirectMemoryService,
     adminSummaryRepository: stubAdminSummaryRepository,
+    insightsRepository: stubInsightsRepository,
     ...overrides,
   };
 }

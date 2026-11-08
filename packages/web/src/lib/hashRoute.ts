@@ -1,12 +1,13 @@
 /**
  * Hash routes. The project is app state (not in the URL), so routes stay stable
  * when the user or project changes. Ids must be UUIDs; anything else falls back
- * to the list route.
+ * to the list route. An empty or unknown hash opens Inicio (home).
  */
 
 import { useEffect, useState } from 'react';
 
 export type Route =
+  | { name: 'home' }
   | { name: 'review' }
   | { name: 'reviewDetail'; itemId: string }
   | { name: 'memory' }
@@ -15,7 +16,9 @@ export type Route =
   | { name: 'memoryEdit'; memoryId: string }
   | { name: 'quarantine' }
   | { name: 'quarantineDetail'; id: string }
-  | { name: 'admin' };
+  | { name: 'admin' }
+  | { name: 'activity' }
+  | { name: 'staging' };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -44,13 +47,21 @@ export function parseHash(hash: string): Route {
         : { name: 'quarantine' };
     case 'admin':
       return { name: 'admin' };
+    case 'home':
+      return { name: 'home' };
+    case 'activity':
+      return { name: 'activity' };
+    case 'staging':
+      return { name: 'staging' };
     default:
-      return { name: 'review' };
+      return { name: 'home' };
   }
 }
 
 export function buildHash(r: Route): string {
   switch (r.name) {
+    case 'home':
+      return '#/home';
     case 'review':
       return '#/review';
     case 'reviewDetail':
@@ -69,6 +80,10 @@ export function buildHash(r: Route): string {
       return `#/quarantine/${r.id}`;
     case 'admin':
       return '#/admin';
+    case 'activity':
+      return '#/activity';
+    case 'staging':
+      return '#/staging';
   }
 }
 

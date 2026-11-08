@@ -985,3 +985,131 @@ td:has(> .cell--title) {
   border-radius: var(--radius);
   padding: 8px 12px;
 }
+
+/* insights — Inicio, Actividad, Área de preparación (C12) */
+.insights {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.insights-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+  align-items: start;
+}
+
+.insights__sublabel {
+  margin-top: 16px;
+}
+
+.insights__note {
+  margin-bottom: 12px;
+}
+
+.insights__gap {
+  margin-top: 14px;
+}
+
+.kpi-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 10px;
+}
+
+.kpi-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+}
+
+.kpi {
+  background: var(--bg);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.kpi__value {
+  font-size: 34px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi__num {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi__definition {
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.stat-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.5em;
+  grid-template-areas:
+    'label value'
+    'track track';
+  gap: 2px 8px;
+  margin-bottom: 8px;
+}
+
+.stat-bar__label {
+  grid-area: label;
+  font-size: 14px;
+}
+
+.stat-bar__value {
+  grid-area: value;
+  text-align: right;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-bar__track {
+  grid-area: track;
+  display: block;
+  height: 8px;
+  background: var(--bar-track);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.stat-bar__fill {
+  display: block;
+  height: 100%;
+}
+
+.stat-bar__fill--ok {
+  background: var(--green);
+}
+
+.stat-bar__fill--warn {
+  background: var(--bar);
+}
+
+.stat-bar__fill--danger {
+  background: var(--badge-red);
+}
+
+.stat-bar__fill--neutral {
+  background: var(--neutral-text);
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.target {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-card__meta {
+  margin-bottom: 10px;
+}

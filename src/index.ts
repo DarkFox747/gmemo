@@ -32,6 +32,7 @@ import { PgQuarantineRepository } from './db/quarantineRepository.js';
 import { PgLifecycleRepository } from './db/lifecycleRepository.js';
 import { PgMemoryAdminRepository } from './db/memoryAdminRepository.js';
 import { PgAdminSummaryRepository } from './db/adminSummaryRepository.js';
+import { PgInsightsRepository } from './db/insightsRepository.js';
 import { CognitoAuthenticator } from './auth/authenticator.js';
 import { DevAuthenticator } from './auth/devAuthenticator.js';
 import { DevOidcAuthenticator } from './auth/devOidcAuthenticator.js';
@@ -282,6 +283,7 @@ const services: AppServices = {
   lifecycleService,
   directMemoryService,
   adminSummaryRepository: new PgAdminSummaryRepository(pool), // C7 read-only admin view
+  insightsRepository: new PgInsightsRepository(pool), // C12 read-only governance insights
 };
 
 // --- 5m. Internal jobs (/internal/jobs): enabled anywhere a JOBS_TOKEN is

@@ -13,12 +13,15 @@
 import { MESSAGES } from '../lib/labels';
 import {
   CONFLICT_CODES,
+  type ActivityCategory,
+  type ActivityListDto,
   type AdminSummaryDto,
   type AmendMemoryRequest,
   type ApproveResponseDto,
   type ConfirmResponseDto,
   type ConflictCode,
   type CreateMemoryRequest,
+  type DashboardDto,
   type DirectWriteResponseDto,
   type MeDto,
   type MemoryDetailDto,
@@ -37,6 +40,7 @@ import {
   type RetireResponseDto,
   type ReviewItemDetailDto,
   type ReviewQueueListDto,
+  type StagingOverviewDto,
 } from './types';
 
 export type ApiErrorKind =
@@ -96,6 +100,15 @@ export interface ApiClient {
   retireMemory(p: string, id: string, b: { reason: string }): Promise<RetireResponseDto>;
   retireByPr(p: string, b: { originPr: number; reason: string }): Promise<RetireByPrResponseDto>;
   getAdminSummary(p: string): Promise<AdminSummaryDto>;
+  getDashboard(p: string): Promise<DashboardDto>;
+  listActivity(
+    p: string,
+    q: { category?: ActivityCategory; cursor?: string; limit?: number },
+  ): Promise<ActivityListDto>;
+  listStaging(
+    p: string,
+    q: { status: 'open' | 'closed'; limit?: number },
+  ): Promise<StagingOverviewDto>;
 }
 
 type Query = Record<string, string | number | undefined>;
@@ -220,6 +233,14 @@ export function createApiClient(deps: ApiClientDeps): ApiClient {
         reason: b.reason,
       }),
     getAdminSummary: (p) => request('GET', `${project(p)}/admin-summary`),
+    getDashboard: (p) => request('GET', `${project(p)}/dashboard`),
+    listActivity: (p, q) =>
+      request(
+        'GET',
+        `${project(p)}/activity${buildQuery({ category: q.category, cursor: q.cursor, limit: q.limit })}`,
+      ),
+    listStaging: (p, q) =>
+      request('GET', `${project(p)}/staging${buildQuery({ status: q.status, limit: q.limit })}`),
   };
 }
 

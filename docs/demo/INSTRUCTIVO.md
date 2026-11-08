@@ -44,7 +44,7 @@ Compose aplica las migraciones y el seed de desarrollo (servicio `migrate`) y ar
 | API REST de la web | `http://localhost:3000/api/v1` (por ejemplo `/api/v1/me`) |
 | Promoción por merge | `POST http://localhost:3000/promote` |
 | Jobs programados (modo abierto solo en desarrollo) | `POST http://localhost:3000/internal/jobs/revalidation-sweep`, `/quarantine-purge`, `/web-session-reaper` |
-| Web de gobierno (C7) | `http://localhost:3000/` (rutas por hash: `#/review`, `#/quarantine`, `#/memory`, `#/admin`) |
+| Web de gobierno (C7) | `http://localhost:3000/` (rutas por hash: `#/home`, `#/review`, `#/staging`, `#/memory`, `#/quarantine`, `#/activity`, `#/admin`; sin ruta abre Inicio) |
 | Postgres (depuración) | `localhost:5433`, base `gmemo` (credenciales de desarrollo en `docker-compose.yml`) |
 
 ## 5. Usuarios de desarrollo y cambio de rol
@@ -101,15 +101,18 @@ Todo lo que ocurre después (sanitización, juez, cola, cuarentena, aplicación 
 
 Abrir `http://localhost:3000/` con el stack recién levantado. La barra superior tiene el selector **Proyecto**
 ("Portal de Clientes"), el selector **Usuario de desarrollo** y el rol con las iniciales. La barra lateral muestra
-las insignias de pendientes (cola) y de entradas en cuarentena.
+las insignias de pendientes (cola) y de entradas en cuarentena. Sin ruta (o con una desconocida) se abre **Inicio**.
 
 | Pantalla | Ruta | Captura |
 |---|---|---|
+| Inicio | `#/home` | [`capturas/6-inicio.png`](capturas/6-inicio.png) |
 | Cola de revisión (Fig. 12) | `#/review` | [`capturas/1-cola-de-revision.png`](capturas/1-cola-de-revision.png) |
 | Detalle de revisión (Fig. 13) | `#/review/<itemId>` | [`capturas/2-detalle-de-revision.png`](capturas/2-detalle-de-revision.png) |
 | Cuarentena (Fig. 14) | `#/quarantine` (detalle `#/quarantine/<id>`) | [`capturas/3-cuarentena.png`](capturas/3-cuarentena.png) |
 | Memoria del proyecto (Fig. 16) | `#/memory` (`#/memory/new`, `#/memory/<id>`, `#/memory/<id>/edit`) | [`capturas/4-memoria-del-proyecto.png`](capturas/4-memoria-del-proyecto.png) |
 | Administración (Fig. 15) | `#/admin` | [`capturas/5-administracion.png`](capturas/5-administracion.png) |
+| Actividad | `#/activity` | [`capturas/7-actividad.png`](capturas/7-actividad.png) |
+| Área de preparación | `#/staging` | [`capturas/8-area-de-preparacion.png`](capturas/8-area-de-preparacion.png) |
 
 Recorrido sugerido (antes de `pnpm demo`, con los datos del seed):
 
@@ -135,7 +138,7 @@ Recorrido sugerido (antes de `pnpm demo`, con los datos del seed):
    *Restaurar* (por ejemplo la de rechazo del líder técnico) pide confirmación ("Restaurar la unidad la vuelve a
    someter a sanitización y evaluación") y el aviso indica el resultado: incorporada, en la cola de revisión o de
    nuevo en cuarentena. El pie recuerda que las restauraciones se registran como etiquetas para medir los falsos
-   negativos del Juez.
+   positivos del Juez (unidades buenas que el Juez retuvo).
 5. **Memoria del proyecto** (`#/memory`): pestañas *Activas* / *Pendientes de revalidación* (vacía hasta que corre el
    job de revalidación, que ejecutan `pnpm demo` y `pnpm smoke`), filtro por tipo, búsqueda y *Cargar más*.
    - *+ Nueva unidad*: elegir el tipo (los campos propios del tipo cambian), completar y pulsar *Previsualizar*: se
@@ -150,10 +153,48 @@ Recorrido sugerido (antes de `pnpm demo`, con los datos del seed):
    miembros con rol y las credenciales de servicio con estado y vencimiento, **sin tokens ni hashes**. Las altas y
    bajas se gestionan por ticket.
 
+7. **Inicio / Actividad / Área de preparación** (solo lectura, solo líder técnico): ver la sección 6.4.
+
 Después de `pnpm demo`, la decisión nueva ya no está en la cola (fue aprobada), la anterior figura como reemplazada
 y las 2 memorias vencidas del seed aparecen en *Pendientes de revalidación*.
 
 Las capturas de `docs/demo/capturas/` se regeneran con `pnpm screenshots` sobre el stack recién levantado (sección 8).
+
+### 6.4 Vistas de gobierno: Inicio, Actividad y Área de preparación
+
+Tres vistas de **solo lectura** para el líder técnico (un colaborador o lector ve "Sin permisos" y la web no llama
+a la API). Se actualizan con el botón *Actualizar*; no hay refresco automático.
+
+- **Inicio** (`#/home`, `GET /api/v1/projects/:id/dashboard`): memorias por estado y activas por tipo; pendientes
+  de la cola (mismo número que la insignia) y entradas en cuarentena por criterio, con accesos a esas pantallas;
+  **Decisiones del Juez** de los últimos 30 días (aceptadas, dudosas, rechazadas por el Juez, bloqueadas por la
+  sanitización y sin evaluación); **Correcciones humanas** de los últimos 30 días; y los **indicadores del Juez con
+  datos reales**, calculados con las etiquetas que ya guarda el sistema:
+  - **Falsos positivos** = unidades buenas que el Juez retuvo / unidades buenas etiquetadas, con
+    *buena* = aprobada en revisión o restaurada desde una cuarentena del Juez. Numerador: dudosas aprobadas +
+    cuarentenas del Juez restauradas; denominador: eso más las aceptadas por el Juez y aprobadas en revisión
+    obligatoria.
+  - **Falsos negativos** = unidades malas que el Juez dejó pasar / unidades malas etiquetadas, con
+    *mala* = rechazada en revisión. Numerador: aceptadas por el Juez y rechazadas en revisión obligatoria;
+    denominador: eso más las dudosas rechazadas.
+  - Sin etiquetas el indicador dice **"sin datos"** (nunca 0 %). Cada valor muestra "n de m".
+  - **Qué no es medible** (se informa como cobertura "sin etiqueta", nunca dentro de una tasa): las unidades
+    aceptadas y aplicadas automáticamente (nadie las miró), los rechazos del Juez que nadie restauró (el silencio no
+    es acuerdo), los bloqueos de la sanitización (no son decisiones del Juez; sus restauraciones se muestran como
+    "otras restauraciones") y las propuestas sin evaluación (destino cambiado o Juez no disponible). Los falsos
+    negativos solo se observan en los tipos con revisión obligatoria, así que la muestra está sesgada; la
+    contraparte sintética está en [`metricas.md`](metricas.md).
+- **Actividad** (`#/activity`, `GET …/activity`): línea de tiempo del registro de auditoría (propuestas y descartes
+  de agentes, promociones con sus contadores, PR cerradas sin merge, aprobaciones y rechazos, restauraciones, altas,
+  ediciones, revalidaciones y retiros desde la web, y tareas de la plataforma que tocaron el proyecto). Muestra
+  actor ("Agente · nombre", "CI", "Sistema" o el nombre del usuario), acción, objeto (tipo y título, o "—") y un
+  detalle corto. Filtros por categoría y *Cargar más*. Nunca muestra lecturas, hashes, correos, identidades ni
+  contenido más allá de los títulos.
+- **Área de preparación** (`#/staging`, `GET …/staging`): pestañas *Abiertas* y *Cerradas (7 días)*; una tarjeta
+  por sesión (repositorio, rama, PR, estado, quién la abrió, última actividad, vencimiento o cierre) con sus
+  propuestas: tipo, título (con datos personales enmascarados), operación, estado del Juez y estado de la propuesta
+  (En preparación, En cola de revisión, Incorporada, En cuarentena, Rechazada en revisión). Las sesiones internas
+  `restore/` y `web/` no se listan.
 
 ## 7. Conectar un agente real (opcional)
 
@@ -175,7 +216,7 @@ El borrador queda en la sesión de `feature/notif-async`. Esa sesión se promuev
 | `pnpm smoke` | Prueba de humo contra el stack levantado |
 | `pnpm demo` | El guion de extremo a extremo (sección 6) |
 | `pnpm eval` | Métricas sintéticas (TT-06): recall@5, MRR y nDCG@5 del `recall` híbrido (RRF) y tasas de falsos positivos/negativos del juez. Escribe [`metricas.md`](metricas.md). Usa **datos sintéticos** y los **stubs** del juez y del embedder; es determinista |
-| `pnpm screenshots` | Capturas de las 5 pantallas en `docs/demo/capturas/` (1440×900, escala 2) contra `http://localhost:3000` como `tl@demo.local`. Necesita `pnpm build:web` (para detectar el build) y el stack levantado; si faltan Playwright o el build, avisa y termina sin error |
+| `pnpm screenshots` | Capturas de las 8 pantallas en `docs/demo/capturas/` (1440×900, escala 2) contra `http://localhost:3000` como `tl@demo.local`. Necesita `pnpm build:web` (para detectar el build) y el stack levantado; si faltan Playwright o el build, avisa y termina sin error |
 | `pnpm package:demo` | Genera `dist-demo/gmemo-demo.zip` y lo verifica (sección 12) |
 
 Tras ejecutar la suite con base de datos, el esquema queda reiniciado: volver a `docker compose down -v && docker compose up --build -d --wait` antes de `pnpm smoke` o `pnpm demo`.
