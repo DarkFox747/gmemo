@@ -69,3 +69,6 @@ PROMPT-demo-entrega4.md
 
 # Demo package output
 dist-demo/
+
+# Documentation (internal / TFG material — not published in the repo)
+docs/
