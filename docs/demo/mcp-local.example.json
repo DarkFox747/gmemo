@@ -5,7 +5,7 @@
       "url": "http://localhost:3000/mcp",
       "headers": {
         "X-Git-Remote": "https://github.com/crombie-llc/gmemo-demo.git",
-        "X-Git-Branch": "feature/notif-async"
+        "X-Git-Branch": "main"
       }
     }
   }

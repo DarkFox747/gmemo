@@ -11,8 +11,9 @@
 - **Cuarentena**: lo rechazado por seguridad se retiene con vencimiento y se puede restaurar.
 - **Ciclo de vida**: revalidación periódica, retiro y reversión de memorias.
 - **Gestión directa**: alta, edición y retiro de memorias por un administrador, con historial de revisiones.
-- **Búsqueda híbrida RRF**: texto completo + vectores (pgvector) fusionados con Reciprocal Rank Fusion.
-- **Web de gobierno**: cola de revisión, detalle, cuarentena, memoria del proyecto y administración.
+- **Búsqueda híbrida RRF**: texto completo + vectores (pgvector) fusionados con Reciprocal Rank Fusion; misma función compartida entre `recall` y el explorador web.
+- **Web de gobierno (9 pantallas)**: Inicio con métricas en vivo del juez, cola de revisión, detalle, área de preparación, memoria del proyecto con historial de revisiones, buscar como agente, cuarentena, actividad y administración.
+- **Auditoría trazable**: toda escritura REST registra su fila de `access_log` en la misma transacción; pantalla Actividad visible para el líder técnico.
 
 ## Inicio rápido
 
@@ -21,7 +22,14 @@ docker compose up --build
 pnpm demo
 ```
 
-Luego abrir **http://localhost:3000/** (web de gobierno; el selector *Usuario de desarrollo* elige `tl@`, `dev@` o `viewer@demo.local`). `pnpm demo` recorre el flujo completo contra el stack local. Requiere Docker; Node 22 y pnpm solo para los scripts del host.
+Luego abrir **http://localhost:3000/** (entra en Inicio; el selector *Usuario de desarrollo* elige `tl@`, `dev@` o `viewer@demo.local`). `pnpm demo` recorre el flujo completo contra el stack local. Requiere Docker; Node 22 y pnpm solo para los scripts del host.
+
+| Script demo | Qué hace |
+|---|---|
+| `pnpm demo` | ciclo E2E guiado (remember → promote → recall) |
+| `pnpm demo:promote -- --branch <rama> --pr <n>` | simula el merge de un PR de agente desde local |
+| `pnpm demo:reset` | `docker compose down -v && up --build` — borra todo y vuelve al seed limpio |
+| `pnpm screenshots` | genera las capturas de `docs/demo/capturas/` sobre el stack levantado |
 
 > **Los bypass/stubs son solo de dev.** `AUTH_DEV_BYPASS`, `JUDGE_STUB`, `PROMOTE_OIDC_DEV_BYPASS` y
 > `EMBEDDER_STUB` con `NODE_ENV=production` (y `RATE_LIMIT_ENABLED=false`) hacen que la config se

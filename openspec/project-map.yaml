@@ -299,3 +299,6 @@ open_decisions:
     - "Facade contract v1 RBAC table omits project_admin for write tools (code admits it); contract does not cover /api/v1, /promote, jobs."
     - deploy.yml not gated on ci.yml; Dockerfile RDS CA bundle fetched without hash pin.
   follow_ups: openspec/backlog.md (Entrega 4 section)
+staleness:
+  status: fresh
+  generated_commit: 6f283bd

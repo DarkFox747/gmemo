@@ -1,4 +1,4 @@
-# @gmemo/web — web de gobierno (C7)
+# @gmemo/web — web de gobierno
 
 React + Vite + TypeScript, sin router, librería de UI ni de estado: rutas por hash, un cliente `fetch`
 tipado para `/api/v1` (`src/api/client.ts`, DTOs espejados a mano en `src/api/types.ts`) y CSS plano
@@ -6,13 +6,19 @@ tipado para `/api/v1` (`src/api/client.ts`, DTOs espejados a mano en `src/api/ty
 
 Pantallas (rutas hash):
 
-| Pantalla                               | Ruta                                                              |
-| -------------------------------------- | ----------------------------------------------------------------- |
-| Cola de revisión (Fig. 12)             | `#/review`                                                        |
-| Detalle de revisión (Fig. 13)          | `#/review/<itemId>`                                               |
-| Cuarentena (Fig. 14)                   | `#/quarantine`, detalle `#/quarantine/<id>`                       |
-| Memoria del proyecto (Fig. 16)         | `#/memory`, `#/memory/new`, `#/memory/<id>`, `#/memory/<id>/edit` |
-| Administración (Fig. 15, solo lectura) | `#/admin`                                                         |
+| Pantalla                                        | Ruta                                                              |
+| ----------------------------------------------- | ----------------------------------------------------------------- |
+| Inicio (ruta por defecto)                       | `#/home`                                                          |
+| Cola de revisión                                | `#/review`                                                        |
+| Detalle de revisión                             | `#/review/<itemId>`                                               |
+| Área de preparación                             | `#/staging`                                                       |
+| Memoria del proyecto                            | `#/memory`, `#/memory/new`, `#/memory/<id>`, `#/memory/<id>/edit` |
+| Buscar como agente                              | `#/search`                                                        |
+| Cuarentena                                      | `#/quarantine`, detalle `#/quarantine/<id>`                       |
+| Actividad                                       | `#/activity`                                                      |
+| Administración (solo lectura para project_admin)| `#/admin`                                                         |
+
+Capturas en [`docs/demo/capturas/`](../../docs/demo/capturas/) (1–10).
 
 ## Scripts (desde la raíz del repo)
 

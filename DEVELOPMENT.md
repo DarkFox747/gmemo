@@ -120,6 +120,10 @@ Las variables de la app dentro de compose están definidas en `docker-compose.ym
 | `pnpm provision` | provisiona roles de la base |
 | `pnpm seed:dev` | carga el seed de desarrollo (solo dev) |
 | `pnpm smoke` | prueba de humo contra un stack corriendo |
+| `pnpm demo` | ciclo E2E guiado (remember → promote → recall) contra el stack local |
+| `pnpm demo:promote -- --branch <rama> [--pr <n>]` | simula el merge de un PR de agente desde local; `main` no requiere `--pr` |
+| `pnpm demo:reset` | `docker compose down -v && up --build` — borra todo y vuelve al seed limpio |
+| `pnpm screenshots` | genera las capturas de `docs/demo/capturas/` sobre el stack levantado; requiere Playwright |
 | `pnpm job:quarantine-purge` | borra las entradas de cuarentena vencidas (`expires_at < now()`) e imprime el conteo; lee solo `DATABASE_URL` |
 | `pnpm job:revalidation` | pasa a `pending_revalidation` las memorias activas no-`outcome` con `revalidate_at < now()` e imprime el conteo; lee `DATABASE_URL` y `REVALIDATION_DAYS` |
 | `pnpm job:web-session-reaper` | abandona las sesiones `web/%` que siguen `open` con más de 5 minutos y borra sus items no promovidos; imprime el conteo; lee solo `DATABASE_URL` |
@@ -343,6 +347,42 @@ curl -sS -X PUT http://localhost:3000/api/v1/projects/$P/memories/<memoryId> "${
 `confirm` debe ser exactamente `true`; presupuestos y claves de `fields` por tipo igual que `remember` (400 si no).
 POST/PUT exigen `Content-Type: application/json`. La búsqueda `q` se audita solo como hash (`access_log.query_hash`).
 Retirar sigue siendo `POST /memories/<memoryId>/retire` (arriba).
+
+### Panel de gobierno — Insights (C12)
+
+Endpoints solo para `project_admin`. Todos leen de `access_log` y retornan estadísticas precomputadas.
+
+```bash
+P=00000000-0000-0000-0000-000000000010
+# Dashboard: memorias por estado, juez (últimos 30 días), correcciones humanas e indicadores FP/FN
+curl -sS "http://localhost:3000/api/v1/projects/$P/dashboard" -H 'X-Dev-User: tl@demo.local'
+
+# Actividad: quién hizo qué y cuándo; cursor de keyset sobre access_log.id (desc)
+curl -sS "http://localhost:3000/api/v1/projects/$P/activity?limit=20" -H 'X-Dev-User: tl@demo.local'
+# → {"items":[...],"nextCursor":"<opaco>"|null}
+
+# Área de preparación: sesiones abiertas o cerradas en los últimos 7 días
+curl -sS "http://localhost:3000/api/v1/projects/$P/staging?status=open" -H 'X-Dev-User: tl@demo.local'
+# status: open | closed
+```
+
+FP del Juez = (dudosas aprobadas + cuarentenas del Juez restauradas) / (eso + aceptadas aprobadas).
+FN del Juez = (aceptadas rechazadas) / (eso + dudosas rechazadas).
+
+### Buscar como agente — Search explorer (C13)
+
+Mismo ranking que `recall` (`rankActiveMemories`): un único camino de código compartido entre el MCP y la API.
+
+```bash
+P=00000000-0000-0000-0000-000000000010
+# Buscar: solo memorias activas; repoId opcional (prioriza ese repo igual que recall)
+curl -sS "http://localhost:3000/api/v1/projects/$P/search?q=cache+TTL&limit=5" \
+  -H 'X-Dev-User: tl@demo.local'
+# → {"results":[{handle,type,title,score,lexicalRank,semanticRank,...}],"total_matches":N,"cursor":null}
+# Con EMBEDDER_STUB=true el semanticRank es determinista (no semántico real)
+```
+
+La consulta se audita como `memories.search` con el hash SHA-256 de la consulta normalizada, nunca el texto.
 
 ### Jobs internos (`/internal/jobs`)
 
